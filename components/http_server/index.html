@@ -1,0 +1,77 @@
+<!DOCTYPE html>
+<html>
+<head>
+    <title>Shelfbot Control</title>
+    <meta name="viewport" content="width=device-width, initial-scale=1">
+    <style>
+        body { font-family: sans-serif; background-color: #f0f0f0; }
+        .container { max-width: 800px; margin: auto; padding: 20px; background-color: #fff; }
+        .endpoint { margin-top: 20px; padding: 15px; border: 1px solid #ccc; border-radius: 5px; }
+        .motor-control { display: flex; align-items: center; margin: 10px 0; }
+        .motor-control label { flex: 1; }
+        .motor-control input { width: 100px; margin-right: 10px; }
+        .motor-control button { flex-shrink: 0; }
+        #all-motors-control { margin-top: 20px; padding-top: 20px; border-top: 1px solid #eee; }
+    </style>
+</head>
+<body>
+    <div class="container">
+        <h1>Shelfbot Control</h1>
+        <div class='endpoint'>
+            <h2>Motor Control</h2>
+            <div id="motor-controls-container"></div>
+            <div id="all-motors-control">
+                Speed: <input type='number' id='allSpeed' value='4000'>
+                Non-Blocking: <input type='checkbox' id='nonBlocking'>
+                <button onclick='moveAllMotors()'>Move All Motors</button>
+            </div>
+        </div>
+    </div>
+
+    <script>
+        const NUM_MOTORS = 6;
+
+        // Function to generate motor controls dynamically on page load
+        function createMotorControls() {
+            const container = document.getElementById('motor-controls-container');
+            for (let i = 0; i < NUM_MOTORS; i++) {
+                const controlDiv = document.createElement('div');
+                controlDiv.className = 'motor-control';
+                controlDiv.innerHTML = `
+                    <label>Motor ${i}:</label>
+                    <input type='number' class='pos-input' id='position${i}' value='0' placeholder='Position'>
+                    <button onclick='sendCommand(${i}, document.getElementById("position${i}").value)'>Move</button>
+                `;
+                container.appendChild(controlDiv);
+            }
+        }
+
+        function sendCommand(motor, position) {
+            const body = { motor: motor, position: parseFloat(position) };
+            fetch('/motor', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            }).then(r => r.json()).then(d => console.log(d));
+        }
+
+        function moveAllMotors() {
+            const pos_inputs = Array.from(document.querySelectorAll('.pos-input'));
+            const positions = pos_inputs.map(i => parseFloat(i.value));
+            const speed = parseInt(document.getElementById('allSpeed').value);
+            const nonBlocking = document.getElementById('nonBlocking').checked;
+
+            const body = { positions: positions, speed: speed, nonBlocking: nonBlocking };
+
+            fetch('/motors', {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify(body)
+            }).then(r => r.json()).then(d => console.log(d));
+        }
+
+        // Create the UI when the page is loaded
+        document.addEventListener('DOMContentLoaded', createMotorControls);
+    </script>
+</body>
+</html>
