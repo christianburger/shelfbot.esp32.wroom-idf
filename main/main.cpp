@@ -4,6 +4,11 @@
 #include "nvs_flash.h"
 #include "wifi_station.h"
 #include "http_server.h"
+#include "motor_control.h"
+
+extern "C" {
+    void app_main(void);
+}
 
 void app_main(void)
 {
@@ -15,6 +20,7 @@ void app_main(void)
     }
     ESP_ERROR_CHECK(ret);
 
+    motor_control_begin();
     wifi_init_sta();
     start_webserver();
 }

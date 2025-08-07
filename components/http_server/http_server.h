@@ -1,8 +1,12 @@
-#ifndef HTTP_SERVER_H
-#define HTTP_SERVER_H
+#ifndef MAIN_HTTP_SERVER_H_
+#define MAIN_HTTP_SERVER_H_
 
-#include "esp_http_server.h"
+#include "esp_err.h"
 
-httpd_handle_t start_webserver(void);
+// Starts the web server
+esp_err_t start_webserver();
 
-#endif // HTTP_SERVER_H
+// Stops the web server
+esp_err_t stop_webserver();
+
+#endif /* MAIN_HTTP_SERVER_H_ */

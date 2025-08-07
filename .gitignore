@@ -10,6 +10,9 @@
 
 # Managed components downloaded by the component manager
 /managed_components/
+/components/arduino/
+/components/FastAccelStepper/
+
 
 # IDE configuration files
 /.idea/

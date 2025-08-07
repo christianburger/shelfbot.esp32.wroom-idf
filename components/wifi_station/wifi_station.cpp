@@ -2,6 +2,7 @@
 #include "esp_wifi.h"
 #include "esp_log.h"
 #include "freertos/event_groups.h"
+#include <cstring>
 
 static const char *TAG = "wifi station";
 
@@ -31,7 +32,7 @@ static void event_handler(void* arg, esp_event_base_t event_base, int32_t event_
     }
 }
 
-void wifi_init_sta(void) {
+void wifi_init_sta() {
     s_wifi_event_group = xEventGroupCreate();
 
     ESP_ERROR_CHECK(esp_netif_init());
@@ -47,14 +48,12 @@ void wifi_init_sta(void) {
     ESP_ERROR_CHECK(esp_event_handler_instance_register(WIFI_EVENT, ESP_EVENT_ANY_ID, &event_handler, NULL, &instance_any_id));
     ESP_ERROR_CHECK(esp_event_handler_instance_register(IP_EVENT, IP_EVENT_STA_GOT_IP, &event_handler, NULL, &instance_got_ip));
 
-    wifi_config_t wifi_config = {
-        .sta = {
-            .ssid = "dlink-30C0",
-            .password = "ypics98298",
-        },
-    };
+    wifi_config_t wifi_config = {}; // Zero-initialize all fields
+    strncpy((char*)wifi_config.sta.ssid, "dlink-30C0", sizeof(wifi_config.sta.ssid));
+    strncpy((char*)wifi_config.sta.password, "ypics98298", sizeof(wifi_config.sta.password));
+
     ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA) );
-    ESP_ERROR_CHECK(esp_wifi_set_config(ESP_IF_WIFI_STA, &wifi_config) );
+    ESP_ERROR_CHECK(esp_wifi_set_config(WIFI_IF_STA, &wifi_config) );
     ESP_ERROR_CHECK(esp_wifi_start() );
 
     ESP_LOGI(TAG, "wifi_init_sta finished.");
