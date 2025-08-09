@@ -1,12 +1,11 @@
-#include <stdio.h>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "nvs_flash.h"
-#include "wifi_station.h"
-#include "http_server.h"
-#include "motor_control.h"
 #include "Arduino.h"
 #include "esp_log.h"
+#include "http_server.h"
+#include "motor_control.h"
+#include "nvs_flash.h"
+#include "stdio.h"
+#include "wifi_station.h"
+#include "freertos/FreeRTOS.h"
 
 static const char* TAG = "main";
 
