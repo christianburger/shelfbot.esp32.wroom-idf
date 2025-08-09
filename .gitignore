@@ -12,6 +12,7 @@
 /managed_components/
 /components/arduino/
 /components/FastAccelStepper/
+/components/micro_ros_espidf_component/
 
 
 # IDE configuration files

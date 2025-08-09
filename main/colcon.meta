@@ -1,0 +1,20 @@
+
+{
+    "repositories": {
+        "uros/ros2/ros2_control": {
+            "type": "git",
+            "url": "https://github.com/micro-ROS/ros2_control.git",
+            "version": "humble"
+        },
+        "uros/ros2/control_msgs": {
+            "type": "git",
+            "url": "https://github.com/micro-ROS/control_msgs.git",
+            "version": "humble"
+        },
+        "uros/ros2/realtime_tools": {
+            "type": "git",
+            "url": "https://github.com/micro-ROS/realtime_tools.git",
+            "version": "humble"
+        }
+    }
+}
