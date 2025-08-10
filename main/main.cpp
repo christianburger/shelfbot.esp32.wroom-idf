@@ -1,6 +1,7 @@
 #include <string.h>
 #include <unistd.h>
 #include <arpa/inet.h>
+#include <time.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -11,6 +12,7 @@
 #include "esp_netif.h"
 #include "esp_http_server.h"
 #include "mdns.h"
+#include "esp_sntp.h"
 
 #include "wifi_station.h"
 #include "motor_control.h"
@@ -24,6 +26,7 @@ static const char* TAG = "main";
 
 // Agent IP address, discovered via mDNS
 static char agent_ip_str[16];
+static bool time_synchronized = false;
 
 // --- Error Handling ---
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){ESP_LOGE(TAG, "Failed status on line %d: %d. Aborting micro_ros_task.", __LINE__, (int)temp_rc); vTaskDelete(NULL);}}
@@ -90,6 +93,23 @@ static bool query_mdns_host(const char * host_name)
     return true;
 }
 
+// --- SNTP ---
+void time_sync_notification_cb(struct timeval *tv)
+{
+    ESP_LOGI(TAG, "Time synchronized");
+    time_synchronized = true;
+}
+
+static void initialize_sntp(void)
+{
+    ESP_LOGI(TAG, "Initializing SNTP");
+    esp_sntp_setoperatingmode(ESP_SNTP_OPMODE_POLL);
+    esp_sntp_setservername(0, "pool.ntp.org");
+    sntp_set_time_sync_notification_cb(time_sync_notification_cb);
+    esp_sntp_init();
+}
+
+
 // --- micro-ROS ---
 void micro_ros_task(void * arg)
 {
@@ -111,13 +131,16 @@ void micro_ros_task(void * arg)
     // Create node
     rcl_node_t node;
     RCCHECK(rclc_node_init_default(&node, "shelfbot_firmware", "", &support));
+    ESP_LOGI(TAG, "micro-ROS node created successfully.");
 
     // Create timer
     rcl_timer_t timer;
     RCCHECK(rclc_timer_init_default(&timer, &support, RCL_MS_TO_NS(1000), [](rcl_timer_t * timer, int64_t last_call_time) {
         (void) last_call_time;
         if (timer != NULL) {
-            ESP_LOGI(TAG, "Node is alive...");
+            struct timeval tv;
+            gettimeofday(&tv, NULL);
+            ESP_LOGI(TAG, "Node is alive... Time: %lld.%06ld", tv.tv_sec, tv.tv_usec);
         }
     }));
 
@@ -162,6 +185,18 @@ extern "C" void app_main(void)
     
     // This function will now block until Wi-Fi is connected.
     wifi_init_sta();
+
+    // Initialize SNTP and wait for time sync
+    initialize_sntp();
+    int retry = 0;
+    const int retry_count = 15;
+    while (!time_synchronized && ++retry < retry_count) {
+        ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
+        vTaskDelay(2000 / portTICK_PERIOD_MS);
+    }
+    if (!time_synchronized) {
+        ESP_LOGE(TAG, "Failed to synchronize time. Continuing without real time.");
+    }
 
     // Start services that require a network connection
     start_webserver();
