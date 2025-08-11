@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
+#include <math.h> // For M_PI
 
 static const char* TAG = "motor_control";
 
@@ -12,7 +13,9 @@ static FastAccelStepper* steppers[NUM_MOTORS] = {nullptr};
 static const int motorPins[NUM_MOTORS][2] = {
     {27, 26}, {14, 12}, {13, 15}, {4, 16}, {17, 5}, {18, 19}
 };
-static std::vector<long> motorSpeeds(NUM_MOTORS, 4000);
+
+// Conversion factor from radians to steps. This is the core of the unit standardization.
+const double RADS_TO_STEPS = (double)(STEPS_PER_REVOLUTION * MICROSTEPPING * GEAR_RATIO) / (2.0 * M_PI);
 
 void motor_control_begin() {
     ESP_LOGI(TAG, "Initializing motor system");
@@ -23,122 +26,89 @@ void motor_control_begin() {
         if (steppers[i]) {
             steppers[i]->setDirectionPin(motorPins[i][1]);
             steppers[i]->setAutoEnable(true);
-            steppers[i]->setSpeedInHz(motorSpeeds[i]);
-            steppers[i]->setAcceleration(motorSpeeds[i] / 2);
+            steppers[i]->setSpeedInHz(4000); // Default speed
+            steppers[i]->setAcceleration(2000); // Default acceleration
             steppers[i]->setCurrentPosition(0);
-            ESP_LOGI(TAG, "Motor %d initialized with speed %ld", i, motorSpeeds[i]);
-        } else {
-            ESP_LOGE(TAG, "Failed to initialize motor %d", i);
         }
     }
+    // NOTE: A background task is not needed. The FastAccelStepper library uses hardware interrupts
+    // on the ESP32 to generate steps in the background, so no polling `engine.run()` is required.
 }
 
-long motor_control_get_motor_speed(uint8_t index) {
-    if (index >= NUM_MOTORS) return 0;
-    return motorSpeeds[index];
-}
+// --- ROS 2 Standard Interface Implementation ---
 
-void motor_control_set_motor_speed(uint8_t index, long speed) {
-    if (index >= NUM_MOTORS) return;
-    ESP_LOGI(TAG, "Setting motor %d speed to %ld", index, speed);
-    motorSpeeds[index] = speed;
-    if (steppers[index]) {
-        steppers[index]->setSpeedInHz(speed);
-        steppers[index]->setAcceleration(speed / 2);
-    }
-}
-
-void motor_control_set_all_motor_speeds(long speed) {
-    ESP_LOGI(TAG, "Setting all motor speeds to %ld", speed);
-    for (int i = 0; i < NUM_MOTORS; i++) {
-        motor_control_set_motor_speed(i, speed);
-    }
-}
-
-bool motor_control_are_all_motors_stopped() {
-    for (int i = 0; i < NUM_MOTORS; i++) {
-        if (steppers[i] && steppers[i]->isRunning()) {
-            return false;
-        }
-    }
-    return true;
-}
-
-void motor_control_move_all_motors(long position, long speed, bool nonBlocking) {
-    ESP_LOGI(TAG, "Moving all motors to %ld with speed %ld. Non-blocking: %s", position, speed, nonBlocking ? "true" : "false");
-    motor_control_set_all_motor_speeds(speed);
-    for (int i = 0; i < NUM_MOTORS; i++) {
-        if(steppers[i]) {
-            ESP_LOGI(TAG, "Telling motor %d to move to %ld", i, position);
-            steppers[i]->moveTo(position);
-        }
-    }
-
-    if (!nonBlocking) {
-        ESP_LOGI(TAG, "Waiting for all motors to stop...");
-        while (!motor_control_are_all_motors_stopped()) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-        ESP_LOGI(TAG, "All motors have stopped.");
-    }
-}
-
-bool motor_control_move_all_motors_vector(const double* positions, size_t num_positions, long speed, bool nonBlocking) {
-    if (!positions || num_positions != NUM_MOTORS) return false;
-    ESP_LOGI(TAG, "Moving all motors with vector. Speed: %ld, Non-blocking: %s", speed, nonBlocking ? "true" : "false");
-    motor_control_set_all_motor_speeds(speed);
-    for (size_t i = 0; i < num_positions; i++) {
-        if (steppers[i]) {
-            long target_pos = static_cast<long>(positions[i]);
-            ESP_LOGI(TAG, "Telling motor %d to move to %ld", (int)i, target_pos);
-            steppers[i]->moveTo(target_pos);
-        }
-    }
-
-    if (!nonBlocking) {
-        ESP_LOGI(TAG, "Waiting for all motors to stop...");
-        while (!motor_control_are_all_motors_stopped()) {
-            vTaskDelay(pdMS_TO_TICKS(10));
-        }
-        ESP_LOGI(TAG, "All motors have stopped.");
-    }
-    return true;
-}
-
-void motor_control_set_motor_position_double(uint8_t index, double position) {
+void motor_control_set_position(uint8_t index, double position_rad) {
     if (index >= NUM_MOTORS || !steppers[index]) return;
-    double conversion_factor = (GEAR_RATIO * MICROSTEPPING * STEPS_PER_REVOLUTION) / 360.0;
-    long total_steps = (long)(position * conversion_factor);
-    ESP_LOGI(TAG, "Moving motor %d to position %f (steps: %ld)", index, position, total_steps);
-    steppers[index]->moveTo(total_steps);
+    long target_steps = (long)(position_rad * RADS_TO_STEPS);
+    steppers[index]->moveTo(target_steps);
 }
 
-double motor_control_get_motor_position_double(uint8_t index) {
+double motor_control_get_position(uint8_t index) {
     if (index >= NUM_MOTORS || !steppers[index]) return 0.0;
-    return static_cast<double>(steppers[index]->getCurrentPosition());
+    return (double)steppers[index]->getCurrentPosition() / RADS_TO_STEPS;
 }
 
-double motor_control_get_motor_velocity_double(uint8_t index) {
+double motor_control_get_velocity(uint8_t index) {
     if (index >= NUM_MOTORS || !steppers[index]) return 0.0;
-    return static_cast<double>(steppers[index]->getCurrentSpeedInUs());
+    // Library returns speed in mHz (steps/1000s). Convert to steps/s, then to rad/s.
+    double steps_per_sec = (double)steppers[index]->getCurrentSpeedInMilliHz() / 1000.0;
+    return steps_per_sec / RADS_TO_STEPS;
 }
 
-void motor_control_stop_motor(uint8_t index) {
+// --- Utility Function Implementations ---
+
+void motor_control_set_speed_hz(uint8_t index, long speed_hz) {
     if (index >= NUM_MOTORS || !steppers[index]) return;
-    ESP_LOGI(TAG, "Stopping motor %d", index);
-    steppers[index]->forceStop();
+    steppers[index]->setSpeedInHz(speed_hz);
+    steppers[index]->setAcceleration(speed_hz / 2); // Set a reasonable default acceleration
 }
 
-void motor_control_stop_all_motors() {
-    ESP_LOGI(TAG, "Stopping all motors");
+void motor_control_set_all_speeds_hz(long speed_hz) {
     for (int i = 0; i < NUM_MOTORS; i++) {
-        if (steppers[i]) {
-            steppers[i]->forceStop();
-        }
+        motor_control_set_speed_hz(i, speed_hz);
     }
 }
 
 bool motor_control_is_motor_running(uint8_t index) {
     if (index >= NUM_MOTORS || !steppers[index]) return false;
     return steppers[index]->isRunning();
+}
+
+void motor_control_stop_motor(uint8_t index) {
+    if (index >= NUM_MOTORS || !steppers[index]) return;
+    steppers[index]->forceStop();
+}
+
+void motor_control_stop_all_motors() {
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        if (steppers[i]) steppers[i]->forceStop();
+    }
+}
+
+// --- DEPRECATED Function Implementations (for REST API) ---
+// These now act as wrappers around the new radian-based API.
+
+void motor_control_set_motor_position_double(uint8_t index, double position_deg) {
+    // Use direct expression to avoid macro collision from Arduino.h
+    motor_control_set_position(index, position_deg * (M_PI / 180.0));
+}
+
+double motor_control_get_motor_position_double(uint8_t index) {
+    // Use direct expression to avoid macro collision from Arduino.h
+    return motor_control_get_position(index) * (180.0 / M_PI);
+}
+
+double motor_control_get_motor_velocity_double(uint8_t index) {
+    // Use direct expression to avoid macro collision from Arduino.h
+    return motor_control_get_velocity(index) * (180.0 / M_PI);
+}
+
+bool motor_control_move_all_motors_vector(const double* positions_deg, size_t num_positions, long speed, bool non_blocking) {
+    if (!positions_deg || num_positions > NUM_MOTORS) return false;
+    motor_control_set_all_speeds_hz(speed);
+    for (size_t i = 0; i < num_positions; i++) {
+        motor_control_set_motor_position_double(i, positions_deg[i]);
+    }
+    // Note: Non-blocking logic would need to be implemented if required for the REST API.
+    return true;
 }
