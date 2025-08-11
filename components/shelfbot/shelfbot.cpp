@@ -27,6 +27,7 @@
 
 #include <std_msgs/msg/int32.h>
 #include <std_msgs/msg/bool.h>
+#include <std_msgs/msg/float32_multi_array.h>
 
 static const char* TAG = "shelfbot";
 
@@ -39,6 +40,8 @@ rcl_publisher_t Shelfbot::heartbeat_publisher;
 std_msgs__msg__Int32 Shelfbot::heartbeat_msg;
 rcl_subscription_t Shelfbot::led_subscriber;
 std_msgs__msg__Bool Shelfbot::led_msg;
+rcl_subscription_t Shelfbot::motor_command_subscriber;
+std_msgs__msg__Float32MultiArray Shelfbot::motor_command_msg;
 
 // --- mDNS ---
 void Shelfbot::initialise_mdns(void)
@@ -93,7 +96,6 @@ void Shelfbot::heartbeat_timer_callback(rcl_timer_t * timer, int64_t last_call_t
     if (timer != NULL) {
         heartbeat_msg.data++;
         RCCHECK(rcl_publish(&heartbeat_publisher, &heartbeat_msg, NULL));
-        ESP_LOGI(TAG, "Heartbeat sent: %" PRId32, heartbeat_msg.data);
     }
 }
 
@@ -101,6 +103,18 @@ void Shelfbot::led_subscription_callback(const void * msin) {
     const std_msgs__msg__Bool * msg = (const std_msgs__msg__Bool *)msin;
     ESP_LOGI(TAG, "LED command received: %s", msg->data ? "ON" : "OFF");
     led_control_set(msg->data);
+}
+
+void Shelfbot::motor_command_subscription_callback(const void * msin) {
+    const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msin;
+    if (msg->data.size > NUM_MOTORS) {
+        ESP_LOGW(TAG, "Received motor command with %d positions, but only %d are supported. Ignoring extra values.", msg->data.size, NUM_MOTORS);
+    }
+
+    for (size_t i = 0; i < msg->data.size && i < NUM_MOTORS; i++) {
+        ESP_LOGI(TAG, "Motor %d command: %.2f rad", i, msg->data.data[i]);
+        motor_control_set_position(i, msg->data.data[i]);
+    }
 }
 
 // --- micro-ROS Task ---
@@ -127,30 +141,41 @@ void Shelfbot::micro_ros_task_impl()
     RCCHECK(rclc_node_init_default(&node, "shelfbot_firmware", "", &support));
     ESP_LOGI(TAG, "micro-ROS node created successfully.");
 
-    // Create Heartbeat Publisher
+    // Create Publishers
     RCCHECK(rclc_publisher_init_default(
         &heartbeat_publisher,
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
         "/shelfbot_firmware/heartbeat"));
 
-    // Create LED Subscriber
+    // Create Subscribers
     RCCHECK(rclc_subscription_init_default(
         &led_subscriber,
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
         "/shelfbot_firmware/led"));
+    RCCHECK(rclc_subscription_init_default(
+        &motor_command_subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+        "/shelfbot_firmware/motor_command"));
 
-    // Create Heartbeat Timer
+    // Create Timers
     rcl_timer_t heartbeat_timer;
     RCCHECK(rclc_timer_init_default(&heartbeat_timer, &support, RCL_MS_TO_NS(2000), heartbeat_timer_callback));
 
     // Create Executor
     rclc_executor_t executor;
-    // The number of handles is now 2 (one for the timer, one for the subscriber)
-    RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));
+    // The number of handles is now 3 (one for the timer, two for subscribers)
+    RCCHECK(rclc_executor_init(&executor, &support.context, 3, &allocator));
     RCCHECK(rclc_executor_add_timer(&executor, &heartbeat_timer));
     RCCHECK(rclc_executor_add_subscription(&executor, &led_subscriber, &led_msg, &led_subscription_callback, ON_NEW_DATA));
+    RCCHECK(rclc_executor_add_subscription(&executor, &motor_command_subscriber, &motor_command_msg, &motor_command_subscription_callback, ON_NEW_DATA));
+
+    // Pre-allocate memory for the motor command message
+    motor_command_msg.data.capacity = NUM_MOTORS;
+    motor_command_msg.data.data = (float*)malloc(motor_command_msg.data.capacity * sizeof(float));
+    motor_command_msg.data.size = 0;
 
     heartbeat_msg.data = 0;
     while(1){
@@ -159,8 +184,10 @@ void Shelfbot::micro_ros_task_impl()
     }
 
     // Cleanup
+    free(motor_command_msg.data.data);
     RCCHECK(rcl_publisher_fini(&heartbeat_publisher, &node));
     RCCHECK(rcl_subscription_fini(&led_subscriber, &node));
+    RCCHECK(rcl_subscription_fini(&motor_command_subscriber, &node));
     RCCHECK(rcl_timer_fini(&heartbeat_timer));
     RCCHECK(rcl_node_fini(&node));
     RCCHECK(rclc_support_fini(&support));
