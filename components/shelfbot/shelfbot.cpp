@@ -18,6 +18,7 @@
 #include "wifi_station.h"
 #include "motor_control.h"
 #include "http_server.h"
+#include "led_control.h"
 
 #include <rcl/rcl.h>
 #include <rclc/rclc.h>
@@ -25,6 +26,7 @@
 #include <rmw_microros/rmw_microros.h>
 
 #include <std_msgs/msg/int32.h>
+#include <std_msgs/msg/bool.h>
 
 static const char* TAG = "shelfbot";
 
@@ -35,6 +37,8 @@ static const char* TAG = "shelfbot";
 bool Shelfbot::time_synchronized = false;
 rcl_publisher_t Shelfbot::heartbeat_publisher;
 std_msgs__msg__Int32 Shelfbot::heartbeat_msg;
+rcl_subscription_t Shelfbot::led_subscriber;
+std_msgs__msg__Bool Shelfbot::led_msg;
 
 // --- mDNS ---
 void Shelfbot::initialise_mdns(void)
@@ -83,7 +87,7 @@ void Shelfbot::initialize_sntp(void)
     esp_sntp_init();
 }
 
-// --- micro-ROS Timer Callback ---
+// --- micro-ROS Callbacks ---
 void Shelfbot::heartbeat_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     (void) last_call_time;
     if (timer != NULL) {
@@ -91,6 +95,12 @@ void Shelfbot::heartbeat_timer_callback(rcl_timer_t * timer, int64_t last_call_t
         RCCHECK(rcl_publish(&heartbeat_publisher, &heartbeat_msg, NULL));
         ESP_LOGI(TAG, "Heartbeat sent: %" PRId32, heartbeat_msg.data);
     }
+}
+
+void Shelfbot::led_subscription_callback(const void * msin) {
+    const std_msgs__msg__Bool * msg = (const std_msgs__msg__Bool *)msin;
+    ESP_LOGI(TAG, "LED command received: %s", msg->data ? "ON" : "OFF");
+    led_control_set(msg->data);
 }
 
 // --- micro-ROS Task ---
@@ -117,18 +127,30 @@ void Shelfbot::micro_ros_task_impl()
     RCCHECK(rclc_node_init_default(&node, "shelfbot_firmware", "", &support));
     ESP_LOGI(TAG, "micro-ROS node created successfully.");
 
+    // Create Heartbeat Publisher
     RCCHECK(rclc_publisher_init_default(
         &heartbeat_publisher,
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
         "/shelfbot_firmware/heartbeat"));
 
+    // Create LED Subscriber
+    RCCHECK(rclc_subscription_init_default(
+        &led_subscriber,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+        "/shelfbot_firmware/led"));
+
+    // Create Heartbeat Timer
     rcl_timer_t heartbeat_timer;
     RCCHECK(rclc_timer_init_default(&heartbeat_timer, &support, RCL_MS_TO_NS(2000), heartbeat_timer_callback));
 
+    // Create Executor
     rclc_executor_t executor;
-    RCCHECK(rclc_executor_init(&executor, &support.context, 1, &allocator));
+    // The number of handles is now 2 (one for the timer, one for the subscriber)
+    RCCHECK(rclc_executor_init(&executor, &support.context, 2, &allocator));
     RCCHECK(rclc_executor_add_timer(&executor, &heartbeat_timer));
+    RCCHECK(rclc_executor_add_subscription(&executor, &led_subscriber, &led_msg, &led_subscription_callback, ON_NEW_DATA));
 
     heartbeat_msg.data = 0;
     while(1){
@@ -136,7 +158,9 @@ void Shelfbot::micro_ros_task_impl()
         usleep(100000);
     }
 
+    // Cleanup
     RCCHECK(rcl_publisher_fini(&heartbeat_publisher, &node));
+    RCCHECK(rcl_subscription_fini(&led_subscriber, &node));
     RCCHECK(rcl_timer_fini(&heartbeat_timer));
     RCCHECK(rcl_node_fini(&node));
     RCCHECK(rclc_support_fini(&support));
@@ -150,6 +174,11 @@ void Shelfbot::begin()
 {
     ESP_LOGI(TAG, "Starting Shelfbot");
 
+    // Initialize peripherals
+    led_control_init();
+    motor_control_begin();
+
+    // Initialize networking
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
       ESP_ERROR_CHECK(nvs_flash_erase());
@@ -159,8 +188,6 @@ void Shelfbot::begin()
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-
-    motor_control_begin();
     
     wifi_init_sta();
 
