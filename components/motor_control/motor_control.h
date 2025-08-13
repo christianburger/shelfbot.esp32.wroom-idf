@@ -4,6 +4,11 @@
 #include <stdint.h>
 #include <stdbool.h>
 #include <vector>
+#include "FastAccelStepper.h"
+#include "esp_log.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include <math.h> // For M_PI
 
 // --- Hardware Configuration ---
 #define NUM_MOTORS 6
