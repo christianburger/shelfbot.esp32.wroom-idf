@@ -12,5 +12,4 @@ idf_component_register(SRCS "shelfbot.cpp"
                         esp_event
                         esp_system
                         freertos
-                        ultrasonic_sensors
 )

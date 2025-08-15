@@ -9,16 +9,13 @@ static const char* TAG = "shelfbot";
 bool Shelfbot::time_synchronized = false;
 rcl_publisher_t Shelfbot::heartbeat_publisher;
 std_msgs__msg__Int32 Shelfbot::heartbeat_msg;
+rcl_publisher_t Shelfbot::led_state_publisher;
+std_msgs__msg__Bool Shelfbot::led_state_msg;
 rcl_subscription_t Shelfbot::led_subscriber;
 std_msgs__msg__Bool Shelfbot::led_msg;
 rcl_subscription_t Shelfbot::motor_command_subscriber;
 std_msgs__msg__Float32MultiArray Shelfbot::motor_command_msg;
 float Shelfbot::motor_command_data[NUM_MOTORS];
-
-// Bumper sensor objects
-rcl_publisher_t Shelfbot::bumper_publisher;
-std_msgs__msg__Float32MultiArray Shelfbot::bumper_msg;
-float Shelfbot::bumper_data[NUM_ULTRASONIC_SENSORS];
 
 // --- mDNS ---
 void Shelfbot::initialise_mdns(void)
@@ -76,12 +73,11 @@ void Shelfbot::heartbeat_timer_callback(rcl_timer_t * timer, int64_t last_call_t
     }
 }
 
-void Shelfbot::bumper_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
+void Shelfbot::led_state_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     (void) last_call_time;
     if (timer != NULL) {
-        ultrasonic_sensors_read_all(bumper_data);
-        bumper_msg.data.size = NUM_ULTRASONIC_SENSORS;
-        RCCHECK(rcl_publish(&bumper_publisher, &bumper_msg, NULL));
+        led_state_msg.data = led_control_get_state();
+        RCCHECK(rcl_publish(&led_state_publisher, &led_state_msg, NULL));
     }
 }
 
@@ -133,11 +129,13 @@ void Shelfbot::micro_ros_task_impl()
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
         "/shelfbot_firmware/heartbeat"));
+    vTaskDelay(pdMS_TO_TICKS(100));
     RCCHECK(rclc_publisher_init_default(
-        &bumper_publisher,
+        &led_state_publisher,
         &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-        "/shelfbot_firmware/bumper_distances"));
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+        "/shelfbot_firmware/led_state"));
+    vTaskDelay(pdMS_TO_TICKS(250));
 
     // Create Subscribers
     RCCHECK(rclc_subscription_init_default(
@@ -145,23 +143,25 @@ void Shelfbot::micro_ros_task_impl()
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
         "/shelfbot_firmware/led"));
+    vTaskDelay(pdMS_TO_TICKS(100));
     RCCHECK(rclc_subscription_init_default(
         &motor_command_subscriber,
         &node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
         "/shelfbot_firmware/motor_command"));
+    vTaskDelay(pdMS_TO_TICKS(100));
 
     // Create Timers
     rcl_timer_t heartbeat_timer;
-    RCCHECK(rclc_timer_init_default(&heartbeat_timer, &support, RCL_MS_TO_NS(2000), heartbeat_timer_callback));
-    rcl_timer_t bumper_timer;
-    RCCHECK(rclc_timer_init_default(&bumper_timer, &support, RCL_MS_TO_NS(1200), bumper_timer_callback));
+    RCCHECK(rclc_timer_init_default2(&heartbeat_timer, &support, RCL_MS_TO_NS(2000), heartbeat_timer_callback, true));
+    rcl_timer_t led_state_timer;
+    RCCHECK(rclc_timer_init_default2(&led_state_timer, &support, RCL_MS_TO_NS(500), led_state_timer_callback, true));
 
     // Create Executor
     rclc_executor_t executor;
     RCCHECK(rclc_executor_init(&executor, &support.context, 4, &allocator));
     RCCHECK(rclc_executor_add_timer(&executor, &heartbeat_timer));
-    RCCHECK(rclc_executor_add_timer(&executor, &bumper_timer));
+    RCCHECK(rclc_executor_add_timer(&executor, &led_state_timer));
     RCCHECK(rclc_executor_add_subscription(&executor, &led_subscriber, &led_msg, &led_subscription_callback, ON_NEW_DATA));
     RCCHECK(rclc_executor_add_subscription(&executor, &motor_command_subscriber, &motor_command_msg, &motor_command_subscription_callback, ON_NEW_DATA));
 
@@ -169,10 +169,6 @@ void Shelfbot::micro_ros_task_impl()
     motor_command_msg.data.capacity = NUM_MOTORS;
     motor_command_msg.data.data = Shelfbot::motor_command_data;
     motor_command_msg.data.size = 0;
-
-    bumper_msg.data.capacity = NUM_ULTRASONIC_SENSORS;
-    bumper_msg.data.data = Shelfbot::bumper_data;
-    bumper_msg.data.size = 0;
 
     heartbeat_msg.data = 0;
     while(1){
@@ -182,11 +178,11 @@ void Shelfbot::micro_ros_task_impl()
 
     // Cleanup
     RCCHECK(rcl_publisher_fini(&heartbeat_publisher, &node));
-    RCCHECK(rcl_publisher_fini(&bumper_publisher, &node));
+    RCCHECK(rcl_publisher_fini(&led_state_publisher, &node));
     RCCHECK(rcl_subscription_fini(&led_subscriber, &node));
     RCCHECK(rcl_subscription_fini(&motor_command_subscriber, &node));
     RCCHECK(rcl_timer_fini(&heartbeat_timer));
-    RCCHECK(rcl_timer_fini(&bumper_timer));
+    RCCHECK(rcl_timer_fini(&led_state_timer));
     RCCHECK(rcl_node_fini(&node));
     RCCHECK(rclc_support_fini(&support));
     RCCHECK(rcl_init_options_fini(&init_options));
@@ -202,7 +198,6 @@ void Shelfbot::begin()
     // Initialize peripherals
     led_control_init();
     motor_control_begin();
-    ultrasonic_sensors_init();
 
     // Initialize networking
     esp_err_t ret = nvs_flash_init();

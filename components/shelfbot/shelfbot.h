@@ -18,7 +18,6 @@
 #include "motor_control.h"
 #include "http_server.h"
 #include "led_control.h"
-#include "ultrasonic_sensors.h"
 
 #include <rcl/rcl.h>
 #include <rclc/rclc.h>
@@ -45,16 +44,13 @@ private:
     // ROS Communication Objects
     static rcl_publisher_t heartbeat_publisher;
     static std_msgs__msg__Int32 heartbeat_msg;
+    static rcl_publisher_t led_state_publisher;
+    static std_msgs__msg__Bool led_state_msg;
     static rcl_subscription_t led_subscriber;
     static std_msgs__msg__Bool led_msg;
     static rcl_subscription_t motor_command_subscriber;
     static std_msgs__msg__Float32MultiArray motor_command_msg;
     static float motor_command_data[NUM_MOTORS];
-
-    // Bumper sensor objects
-    static rcl_publisher_t bumper_publisher;
-    static std_msgs__msg__Float32MultiArray bumper_msg;
-    static float bumper_data[NUM_ULTRASONIC_SENSORS];
 
     // Helper methods
     void initialise_mdns();
@@ -65,7 +61,7 @@ private:
     // Static callbacks for C APIs
     static void time_sync_notification_cb(struct timeval *tv);
     static void heartbeat_timer_callback(rcl_timer_t * timer, int64_t last_call_time);
-    static void bumper_timer_callback(rcl_timer_t * timer, int64_t last_call_time);
+    static void led_state_timer_callback(rcl_timer_t * timer, int64_t last_call_time);
     static void led_subscription_callback(const void * msin);
     static void motor_command_subscription_callback(const void * msin);
     static void micro_ros_task_wrapper(void * arg);
