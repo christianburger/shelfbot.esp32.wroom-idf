@@ -58,7 +58,8 @@ private:
     static std_msgs__msg__Float32MultiArray motor_command_msg;
     static float motor_command_data[NUM_MOTORS];
     static rcl_subscription_t set_speed_subscriber;
-    static std_msgs__msg__Float32 set_speed_msg;
+    static std_msgs__msg__Float32MultiArray set_speed_msg;
+    static float set_speed_data[NUM_MOTORS];
     static rcl_subscription_t led_subscriber;
     static std_msgs__msg__Bool led_msg;
 

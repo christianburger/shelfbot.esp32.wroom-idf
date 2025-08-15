@@ -35,7 +35,8 @@ rcl_subscription_t Shelfbot::motor_command_subscriber;
 std_msgs__msg__Float32MultiArray Shelfbot::motor_command_msg;
 float Shelfbot::motor_command_data[NUM_MOTORS];
 rcl_subscription_t Shelfbot::set_speed_subscriber;
-std_msgs__msg__Float32 Shelfbot::set_speed_msg;
+std_msgs__msg__Float32MultiArray Shelfbot::set_speed_msg;
+float Shelfbot::set_speed_data[NUM_MOTORS];
 rcl_subscription_t Shelfbot::led_subscriber;
 std_msgs__msg__Bool Shelfbot::led_msg;
 
@@ -145,10 +146,17 @@ void Shelfbot::motor_command_subscription_callback(const void * msin) {
 }
 
 void Shelfbot::set_speed_subscription_callback(const void * msin) {
-    const std_msgs__msg__Float32 * msg = (const std_msgs__msg__Float32 *)msin;
-    long speed_in_hz = (long)msg->data;
-    ESP_LOGI(TAG, "Set speed command received: %ld Hz", speed_in_hz);
-    motor_control_set_all_speeds_hz(speed_in_hz);
+    const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msin;
+    
+    if (msg->data.size > NUM_MOTORS) {
+        ESP_LOGW(TAG, "Received set_speed command with %d values, but only %d motors are supported. Ignoring extra values.", msg->data.size, NUM_MOTORS);
+    }
+
+    for (size_t i = 0; i < msg->data.size && i < NUM_MOTORS; i++) {
+        long speed_in_hz = (long)msg->data.data[i];
+        ESP_LOGI(TAG, "Setting Motor %d speed to %ld Hz", i, speed_in_hz);
+        motor_control_set_speed_hz(i, speed_in_hz);
+    }
 }
 
 void Shelfbot::led_subscription_callback(const void * msin) {
@@ -226,7 +234,7 @@ void Shelfbot::micro_ros_task_impl()
     RCCHECK(rclc_subscription_init_default(
         &set_speed_subscriber,
         &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
         "/shelfbot_firmware/set_speed"));
 
     ESP_LOGI(TAG, "Creating LED subscriber...");
@@ -250,6 +258,7 @@ void Shelfbot::micro_ros_task_impl()
     // Statically allocate memory for messages
     init_multi_array(motor_command_msg, Shelfbot::motor_command_data, NUM_MOTORS);
     init_multi_array(motor_position_msg, Shelfbot::motor_position_data, NUM_MOTORS);
+    init_multi_array(set_speed_msg, Shelfbot::set_speed_data, NUM_MOTORS);
     init_multi_array(distance_sensors_msg, Shelfbot::distance_sensors_data, 8);
 
     // Create Executor
