@@ -45,11 +45,16 @@ private:
     // ROS Communication Objects
     static rcl_publisher_t heartbeat_publisher;
     static std_msgs__msg__Int32 heartbeat_msg;
+    static rcl_publisher_t motor_position_publisher;
+    static std_msgs__msg__Float32MultiArray motor_position_msg;
+    static float motor_position_data[NUM_MOTORS];
     static rcl_subscription_t motor_command_subscriber;
     static std_msgs__msg__Float32MultiArray motor_command_msg;
     static float motor_command_data[NUM_MOTORS];
     static rcl_subscription_t set_speed_subscriber;
     static std_msgs__msg__Float32 set_speed_msg;
+    static rcl_subscription_t led_subscriber;
+    static std_msgs__msg__Bool led_msg;
 
     // Helper methods
     void initialise_mdns();
@@ -60,7 +65,9 @@ private:
     // Static callbacks for C APIs
     static void time_sync_notification_cb(struct timeval *tv);
     static void heartbeat_timer_callback(rcl_timer_t * timer, int64_t last_call_time);
+    static void motor_position_timer_callback(rcl_timer_t * timer, int64_t last_call_time);
     static void motor_command_subscription_callback(const void * msin);
     static void set_speed_subscription_callback(const void * msin);
+    static void led_subscription_callback(const void * msin);
     static void micro_ros_task_wrapper(void * arg);
 };
