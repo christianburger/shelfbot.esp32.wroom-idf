@@ -41,6 +41,7 @@ private:
 
     // Static members for C callbacks
     static bool time_synchronized;
+    static bool led_state;
     
     // ROS Communication Objects
     static rcl_publisher_t heartbeat_publisher;
@@ -51,6 +52,8 @@ private:
     static rcl_publisher_t distance_sensors_publisher;
     static std_msgs__msg__Float32MultiArray distance_sensors_msg;
     static float distance_sensors_data[8];
+    static rcl_publisher_t led_state_publisher;
+    static std_msgs__msg__Bool led_state_msg;
     static rcl_subscription_t motor_command_subscriber;
     static std_msgs__msg__Float32MultiArray motor_command_msg;
     static float motor_command_data[NUM_MOTORS];
@@ -70,6 +73,7 @@ private:
     static void heartbeat_timer_callback(rcl_timer_t * timer, int64_t last_call_time);
     static void motor_position_timer_callback(rcl_timer_t * timer, int64_t last_call_time);
     static void distance_sensors_timer_callback(rcl_timer_t * timer, int64_t last_call_time);
+    static void led_state_timer_callback(rcl_timer_t * timer, int64_t last_call_time);
     static void motor_command_subscription_callback(const void * msin);
     static void set_speed_subscription_callback(const void * msin);
     static void led_subscription_callback(const void * msin);

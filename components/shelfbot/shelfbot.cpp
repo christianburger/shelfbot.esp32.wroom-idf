@@ -20,6 +20,7 @@ void init_multi_array(std_msgs__msg__Float32MultiArray& msg, float* data_buffer,
 
 // --- Static Member Definitions ---
 bool Shelfbot::time_synchronized = false;
+bool Shelfbot::led_state = false;
 rcl_publisher_t Shelfbot::heartbeat_publisher;
 std_msgs__msg__Int32 Shelfbot::heartbeat_msg;
 rcl_publisher_t Shelfbot::motor_position_publisher;
@@ -28,6 +29,8 @@ float Shelfbot::motor_position_data[NUM_MOTORS];
 rcl_publisher_t Shelfbot::distance_sensors_publisher;
 std_msgs__msg__Float32MultiArray Shelfbot::distance_sensors_msg;
 float Shelfbot::distance_sensors_data[8];
+rcl_publisher_t Shelfbot::led_state_publisher;
+std_msgs__msg__Bool Shelfbot::led_state_msg;
 rcl_subscription_t Shelfbot::motor_command_subscriber;
 std_msgs__msg__Float32MultiArray Shelfbot::motor_command_msg;
 float Shelfbot::motor_command_data[NUM_MOTORS];
@@ -121,6 +124,14 @@ void Shelfbot::distance_sensors_timer_callback(rcl_timer_t * timer, int64_t last
     }
 }
 
+void Shelfbot::led_state_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
+    (void) last_call_time;
+    if (timer != NULL) {
+        led_state_msg.data = led_state;
+        RCCHECK(rcl_publish(&led_state_publisher, &led_state_msg, NULL));
+    }
+}
+
 void Shelfbot::motor_command_subscription_callback(const void * msin) {
     const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msin;
     if (msg->data.size > NUM_MOTORS) {
@@ -143,7 +154,8 @@ void Shelfbot::set_speed_subscription_callback(const void * msin) {
 void Shelfbot::led_subscription_callback(const void * msin) {
     const std_msgs__msg__Bool * msg = (const std_msgs__msg__Bool *)msin;
     ESP_LOGI(TAG, "LED command received: %s", msg->data ? "ON" : "OFF");
-    led_control_set(msg->data);
+    led_state = msg->data;
+    led_control_set(led_state);
 }
 
 // --- micro-ROS Task ---
@@ -195,6 +207,13 @@ void Shelfbot::micro_ros_task_impl()
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
         "/shelfbot_firmware/distance_sensors"));
 
+    ESP_LOGI(TAG, "Creating LED state publisher...");
+    RCCHECK(rclc_publisher_init_default(
+        &led_state_publisher,
+        &node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+        "/shelfbot_firmware/led_state"));
+
     // Create Subscribers
     ESP_LOGI(TAG, "Creating motor command subscriber...");
     RCCHECK(rclc_subscription_init_default(
@@ -225,6 +244,8 @@ void Shelfbot::micro_ros_task_impl()
     RCCHECK(rclc_timer_init_default2(&motor_position_timer, &support, RCL_MS_TO_NS(500), motor_position_timer_callback, true));
     rcl_timer_t distance_sensors_timer;
     RCCHECK(rclc_timer_init_default2(&distance_sensors_timer, &support, RCL_MS_TO_NS(1000), distance_sensors_timer_callback, true));
+    rcl_timer_t led_state_timer;
+    RCCHECK(rclc_timer_init_default2(&led_state_timer, &support, RCL_MS_TO_NS(2000), led_state_timer_callback, true));
 
     // Statically allocate memory for messages
     init_multi_array(motor_command_msg, Shelfbot::motor_command_data, NUM_MOTORS);
@@ -234,13 +255,14 @@ void Shelfbot::micro_ros_task_impl()
     // Create Executor
     ESP_LOGI(TAG, "Creating executor...");
     rclc_executor_t executor;
-    unsigned int num_handles = 3 + 3; // 3 timers, 3 subscribers
+    unsigned int num_handles = 4 + 3; // 4 timers, 3 subscribers
     RCCHECK(rclc_executor_init(&executor, &support.context, num_handles, &allocator));
 
     ESP_LOGI(TAG, "Adding entities to executor...");
     RCCHECK(rclc_executor_add_timer(&executor, &heartbeat_timer));
     RCCHECK(rclc_executor_add_timer(&executor, &motor_position_timer));
     RCCHECK(rclc_executor_add_timer(&executor, &distance_sensors_timer));
+    RCCHECK(rclc_executor_add_timer(&executor, &led_state_timer));
     RCCHECK(rclc_executor_add_subscription(&executor, &motor_command_subscriber, &motor_command_msg, &motor_command_subscription_callback, ON_NEW_DATA));
     RCCHECK(rclc_executor_add_subscription(&executor, &set_speed_subscriber, &set_speed_msg, &set_speed_subscription_callback, ON_NEW_DATA));
     RCCHECK(rclc_executor_add_subscription(&executor, &led_subscriber, &led_msg, &led_subscription_callback, ON_NEW_DATA));
@@ -256,12 +278,14 @@ void Shelfbot::micro_ros_task_impl()
     RCCHECK(rcl_publisher_fini(&heartbeat_publisher, &node));
     RCCHECK(rcl_publisher_fini(&motor_position_publisher, &node));
     RCCHECK(rcl_publisher_fini(&distance_sensors_publisher, &node));
+    RCCHECK(rcl_publisher_fini(&led_state_publisher, &node));
     RCCHECK(rcl_subscription_fini(&motor_command_subscriber, &node));
     RCCHECK(rcl_subscription_fini(&set_speed_subscriber, &node));
     RCCHECK(rcl_subscription_fini(&led_subscriber, &node));
     RCCHECK(rcl_timer_fini(&heartbeat_timer));
     RCCHECK(rcl_timer_fini(&motor_position_timer));
     RCCHECK(rcl_timer_fini(&distance_sensors_timer));
+    RCCHECK(rcl_timer_fini(&led_state_timer));
     RCCHECK(rcl_node_fini(&node));
     RCCHECK(rclc_support_fini(&support));
     RCCHECK(rcl_init_options_fini(&init_options));
