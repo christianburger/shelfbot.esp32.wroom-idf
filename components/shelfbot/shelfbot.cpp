@@ -147,14 +147,22 @@ void Shelfbot::motor_command_subscription_callback(const void * msin) {
 
 void Shelfbot::set_speed_subscription_callback(const void * msin) {
     const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msin;
-    
+    const long MAX_SPEED_HZ = 2200;
+
     if (msg->data.size > NUM_MOTORS) {
         ESP_LOGW(TAG, "Received set_speed command with %d values, but only %d motors are supported. Ignoring extra values.", msg->data.size, NUM_MOTORS);
     }
 
     for (size_t i = 0; i < msg->data.size && i < NUM_MOTORS; i++) {
-        long speed_in_hz = (long)msg->data.data[i];
-        ESP_LOGI(TAG, "Setting Motor %d speed to %ld Hz", i, speed_in_hz);
+        float speed_in_rad_s = msg->data.data[i];
+        long speed_in_hz = (long)(speed_in_rad_s * RADS_TO_STEPS);
+        
+        if (speed_in_hz > MAX_SPEED_HZ) {
+            ESP_LOGW(TAG, "Motor %d calculated speed (%ld Hz) exceeds limit. Capping at %ld Hz.", i, speed_in_hz, MAX_SPEED_HZ);
+            speed_in_hz = MAX_SPEED_HZ;
+        }
+
+        ESP_LOGI(TAG, "Motor %d speed command: %.2f rad/s -> Setting speed to %ld Hz", i, speed_in_rad_s, speed_in_hz);
         motor_control_set_speed_hz(i, speed_in_hz);
     }
 }

@@ -34,7 +34,10 @@ void motor_control_begin() {
 
 void motor_control_set_position(uint8_t index, double position_rad) {
     if (index >= NUM_MOTORS || !steppers[index]) return;
+    ESP_LOGI(TAG, "Conversion Info: STEPS_PER_REV=%.1f, MICROSTEPPING=%.1f, GEAR_RATIO=%.1f, RADS_TO_STEPS=%.4f", STEPS_PER_REVOLUTION, MICROSTEPPING, GEAR_RATIO, RADS_TO_STEPS);
     long target_steps = (long)(position_rad * RADS_TO_STEPS);
+    ESP_LOGI(TAG, "Motor %d: Converting %.2f rad to %ld steps", index, position_rad, target_steps);
+    ESP_LOGI(TAG, "Executing: steppers[%d]->moveTo(%ld)", index, target_steps);
     steppers[index]->moveTo(target_steps);
 }
 
