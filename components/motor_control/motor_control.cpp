@@ -1,4 +1,5 @@
 #include "motor_control.h"
+#include "driver/gpio.h" // For gpio_pad_select_gpio
 
 static const char* TAG = "motor_control";
 
@@ -17,9 +18,16 @@ void motor_control_begin() {
     engine.init();
     
     for (int i = 0; i < NUM_MOTORS; i++) {
+        // --- FIX: Forcefully configure pins as GPIO ---
+        // This is crucial for strapping pins (like 15, 12, 5, 4) to ensure they
+        // are released from their boot-time functions and can be controlled by peripherals.
+        gpio_pad_select_gpio((gpio_num_t)motorPins[i][0]); // PULSE Pin
+        gpio_pad_select_gpio((gpio_num_t)motorPins[i][1]); // DIR Pin
+
         steppers[i] = engine.stepperConnectToPin(motorPins[i][0]);
         if (steppers[i]) {
-            steppers[i]->setDirectionPin(motorPins[i][1]);
+            steppers[i]->setDirectionPin(motorPins[i][1], true);
+
             steppers[i]->setAutoEnable(true);
             steppers[i]->setSpeedInHz(4000); // Default speed
             steppers[i]->setAcceleration(2000); // Default acceleration
@@ -74,6 +82,11 @@ bool motor_control_is_motor_running(uint8_t index) {
 
 void motor_control_stop_motor(uint8_t index) {
     if (index >= NUM_MOTORS || !steppers[index]) return;
+    ESP_LOGI(TAG, "Motor %d: Stopping motor", index);
+    int pulse_pin = motorPins[index][0];
+    int dir_pin = motorPins[index][1];
+    int dir_level = gpio_get_level((gpio_num_t)dir_pin);
+    ESP_LOGI(TAG, "Motor %d GPIOs: PULSE_PIN=%d, DIR_PIN=%d, DIR_LEVEL=%d", index, pulse_pin, dir_pin, dir_level);
     steppers[index]->forceStop();
 }
 
