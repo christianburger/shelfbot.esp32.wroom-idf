@@ -18,6 +18,7 @@
 #include "motor_control.h"
 #include "http_server.h"
 #include "led_control.h"
+#include "sensor_control.h"
 
 #include <rcl/rcl.h>
 #include <rclc/rclc.h>
@@ -51,7 +52,7 @@ private:
     static float motor_position_data[NUM_MOTORS];
     static rcl_publisher_t distance_sensors_publisher;
     static std_msgs__msg__Float32MultiArray distance_sensors_msg;
-    static float distance_sensors_data[8];
+    static float distance_sensors_data[NUM_SENSORS];
     static rcl_publisher_t led_state_publisher;
     static std_msgs__msg__Bool led_state_msg;
     static rcl_subscription_t motor_command_subscriber;

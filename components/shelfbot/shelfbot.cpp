@@ -1,4 +1,5 @@
 #include "shelfbot.h"
+#include "sensor_control.h"
 #include <rcl/allocator.h>
 
 static const char* TAG = "shelfbot";
@@ -28,7 +29,7 @@ std_msgs__msg__Float32MultiArray Shelfbot::motor_position_msg;
 float Shelfbot::motor_position_data[NUM_MOTORS];
 rcl_publisher_t Shelfbot::distance_sensors_publisher;
 std_msgs__msg__Float32MultiArray Shelfbot::distance_sensors_msg;
-float Shelfbot::distance_sensors_data[8];
+float Shelfbot::distance_sensors_data[NUM_SENSORS];
 rcl_publisher_t Shelfbot::led_state_publisher;
 std_msgs__msg__Bool Shelfbot::led_state_msg;
 rcl_subscription_t Shelfbot::motor_command_subscriber;
@@ -113,14 +114,16 @@ void Shelfbot::motor_position_timer_callback(rcl_timer_t * timer, int64_t last_c
 void Shelfbot::distance_sensors_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     (void) last_call_time;
     if (timer != NULL) {
-        // In a real implementation, you would read the sensor values here.
-        // For now, we'll just publish a placeholder.
-        for (int i = 0; i < 8; ++i) {
-            distance_sensors_msg.data.data[i] = 0.0f; // Placeholder value
+        float received_distances[NUM_SENSORS];
+        // Check the queue for new data, but don't block
+        if (xQueueReceive(distance_data_queue, &received_distances, 0) == pdPASS) {
+            // If new data is available, copy it to the message
+            for (int i = 0; i < NUM_SENSORS; ++i) {
+                distance_sensors_msg.data.data[i] = received_distances[i];
+            }
         }
-        distance_sensors_msg.data.size = 8;
-
-        // Publish the message
+        // If no new data, the publisher will just send the last known values
+        distance_sensors_msg.data.size = NUM_SENSORS;
         RCCHECK(rcl_publish(&distance_sensors_publisher, &distance_sensors_msg, NULL));
     }
 }
@@ -260,7 +263,7 @@ void Shelfbot::micro_ros_task_impl()
     init_multi_array(motor_command_msg, Shelfbot::motor_command_data, NUM_MOTORS);
     init_multi_array(motor_position_msg, Shelfbot::motor_position_data, NUM_MOTORS);
     init_multi_array(set_speed_msg, Shelfbot::set_speed_data, NUM_MOTORS);
-    init_multi_array(distance_sensors_msg, Shelfbot::distance_sensors_data, 8);
+    init_multi_array(distance_sensors_msg, Shelfbot::distance_sensors_data, NUM_SENSORS);
 
     // Create Executor
     ESP_LOGI(TAG, "Creating executor...");
@@ -311,6 +314,7 @@ void Shelfbot::begin()
     // Initialize peripherals
     led_control_init();
     motor_control_begin();
+    sensor_control_init();
 
     // Initialize networking
     esp_err_t ret = nvs_flash_init();
@@ -341,14 +345,10 @@ void Shelfbot::begin()
 
     if (query_mdns_host("gentoo-laptop")) {
         xTaskCreate(micro_ros_task_wrapper, "micro_ros_task", 16000, this, 5, NULL);
+        sensor_control_start_task();
     } else {
         ESP_LOGE(TAG, "Could not find micro-ROS agent. Aborting firmware.");
     }
 
-    ESP_LOGI(TAG, "Shelfbot initialization complete. Entering main loop.");
-
-    while (true) {
-        // The main task can sleep here, or perform other periodic tasks.
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
+    ESP_LOGI(TAG, "Shelfbot initialization complete. Returning to app_main.");
 }

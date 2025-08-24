@@ -70,6 +70,34 @@ The firmware is organized into modular, reusable ESP-IDF components to promote s
 
 ---
 
+## Hardware Resource Allocation
+
+The ESP32 has a limited number of GPIO pins and hardware peripherals. The following table details how they are used by the firmware components.
+
+| Component | Function | Resource | Pin/ID | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| **`motor_control`** | Motor 0 | GPIO (PUL/DIR) | 27, 26 | **Should be changed:** These are ADC2 pins, which can be unreliable when Wi-Fi is active. |
+| | Motor 1 | GPIO (PUL/DIR) | 14, 12 | **Should be changed:** ADC2 pins. GPIO 12 is also a strapping pin and can affect boot. |
+| | Motor 2 | GPIO (PUL/DIR) | 13, 15 | **Should be changed:** ADC2 pins. GPIO 15 is also a strapping pin and can affect boot. |
+| | Motor 3 | GPIO (PUL/DIR) | 4, 16 | **Should be changed:** GPIO 4 is an ADC2 pin. |
+| | Motor 4 | GPIO (PUL/DIR) | 17, 5 | **Potential Issue:** GPIO 5 is a strapping pin and must be HIGH at boot. |
+| | Motor 5 | GPIO (PUL/DIR) | 18, 19 | Safe to use. |
+| | Stepper Engine | RMT Channels | 0, 1, 2, 3, 4, 5 | Safe to use. `FastAccelStepper` uses 6 of the 8 available RMT channels. |
+| **`sensor_control`** | Sensor 0 | GPIO (Trig/Echo) | 21, 34 | Safe to use. GPIO 34 is input-only. |
+| | Sensor 1 | GPIO (Trig/Echo) | 22, 35 | Safe to use. GPIO 35 is input-only. |
+| | Sensor 2 | GPIO (Trig/Echo) | 23, 36 | Safe to use. GPIO 36 is input-only. |
+| | Sensor 3 | GPIO (Trig/Echo) | 32, 39 | Safe to use. GPIO 39 is input-only. |
+| | Sensor Timeout | Hardware Timer | GPTimer 0 | Safe to use. A single shared timer is used for all sensors, leaving 3 timers free. |
+| | Echo Interrupt | GPIO ISR | Pins 34, 35, 36, 39 | Safe to use. Uses the global GPIO ISR service. |
+| **`led_control`** | Onboard LED | GPIO | 2 | Safe to use. |
+| **`wifi_station`** | Wi-Fi | Peripheral | N/A | **Implicit Conflict:** The Wi-Fi peripheral interferes with all pins on the ADC2 controller. |
+
+### Key Hardware Issues
+
+1.  **ADC2 and Wi-Fi Conflict:** Many of the GPIO pins assigned to the motors are controlled by the `ADC2` peripheral. The ESP32 documentation warns that these pins cannot be used reliably while the Wi-Fi is active. This can lead to erratic motor behavior or stalls. For future hardware revisions, it is strongly recommended to move motor control pins to non-ADC2 GPIOs.
+
+---
+
 ## ROS 2 Interface
 
 The firmware creates a single ROS 2 node named `shelfbot_firmware`.
