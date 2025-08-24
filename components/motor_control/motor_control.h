@@ -23,9 +23,12 @@ void motor_control_begin();
 
 // --- ROS 2 Standard Interface (Primary Control) ---
 // All position values are in RADIANS. All velocity values are in RADIANS/SEC.
-void motor_control_set_position(uint8_t index, double position_rad);
+void motor_control_set_velocity(uint8_t index, double velocity_rad_s);
 double motor_control_get_position(uint8_t index);
 double motor_control_get_velocity(uint8_t index);
+
+// --- DEPRECATED: Kept for REST API and position-based testing ---
+void motor_control_set_position(uint8_t index, double position_rad);
 
 // --- Utility Functions ---
 void motor_control_set_speed_hz(uint8_t index, long speed_hz);

@@ -147,23 +147,16 @@ void Shelfbot::motor_command_subscription_callback(const void * msin) {
 
 void Shelfbot::set_speed_subscription_callback(const void * msin) {
     const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msin;
-    const long MAX_SPEED_HZ = 2200;
 
     if (msg->data.size > NUM_MOTORS) {
         ESP_LOGW(TAG, "Received set_speed command with %d values, but only %d motors are supported. Ignoring extra values.", msg->data.size, NUM_MOTORS);
     }
 
+    // This callback now directly controls the motor's continuous velocity.
     for (size_t i = 0; i < msg->data.size && i < NUM_MOTORS; i++) {
-        float speed_in_rad_s = msg->data.data[i];
-        long speed_in_hz = (long)(speed_in_rad_s * RADS_TO_STEPS);
-        
-        if (speed_in_hz > MAX_SPEED_HZ) {
-            ESP_LOGW(TAG, "Motor %d calculated speed (%ld Hz) exceeds limit. Capping at %ld Hz.", i, speed_in_hz, MAX_SPEED_HZ);
-            speed_in_hz = MAX_SPEED_HZ;
-        }
-
-        ESP_LOGI(TAG, "Motor %d speed command: %.2f rad/s -> Setting speed to %ld Hz", i, speed_in_rad_s, speed_in_hz);
-        motor_control_set_speed_hz(i, speed_in_hz);
+        float velocity_in_rad_s = msg->data.data[i];
+        ESP_LOGI(TAG, "Motor %d velocity command: %.2f rad/s", i, velocity_in_rad_s);
+        motor_control_set_velocity(i, velocity_in_rad_s);
     }
 }
 

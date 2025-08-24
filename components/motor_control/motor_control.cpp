@@ -61,6 +61,31 @@ double motor_control_get_velocity(uint8_t index) {
     return steps_per_sec / RADS_TO_STEPS;
 }
 
+// --- Add this new function ---
+void motor_control_set_velocity(uint8_t index, double velocity_rad_s) {
+    if (index >= NUM_MOTORS || !steppers[index]) return;
+
+    // If velocity is very close to zero, stop the motor.
+    if (fabs(velocity_rad_s) < 1e-4) {
+        steppers[index]->stopMove();
+        return;
+    }
+
+    // Convert velocity in rad/s to speed in Hz (steps/s)
+    long speed_hz = (long)fabs(velocity_rad_s * RADS_TO_STEPS);
+
+    // Set the motor speed and acceleration
+    steppers[index]->setSpeedInHz(speed_hz);
+    steppers[index]->setAcceleration(speed_hz / 2); // Use a reasonable acceleration
+
+    // Set the direction and command the motor to run continuously
+    if (velocity_rad_s > 0) {
+        steppers[index]->runForward();
+    } else {
+        steppers[index]->runBackward();
+    }
+}
+
 // --- Utility Function Implementations ---
 
 void motor_control_set_speed_hz(uint8_t index, long speed_hz) {
