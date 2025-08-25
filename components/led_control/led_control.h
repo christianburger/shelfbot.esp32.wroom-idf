@@ -2,10 +2,6 @@
 
 #include <stdbool.h>
 
-#ifdef __cplusplus
-extern "C" {
-#endif
-
 /**
  * @brief Initializes the GPIO for the built-in LED.
  */
@@ -18,6 +14,9 @@ void led_control_init(void);
  */
 void led_control_set(bool state);
 
-#ifdef __cplusplus
-}
-#endif
+/**
+ * @brief Gets the current state of the built-in LED.
+ *
+ * @return true if the LED is on, false if it is off.
+ */
+bool led_control_get_state(void);

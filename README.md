@@ -6,57 +6,127 @@ This firmware runs on an ESP32-WROOM-32 and serves as the real-time hardware int
 
 ## Architecture
 
-The Shelfbot control system is a distributed system composed of three key software components:
+The Shelfbot control system is a distributed system that cleanly separates high-level control logic from low-level hardware management. This is achieved through three main components that communicate over a Wi-Fi network.
 
-1.  **ROS 2 Host Application (`shelfbot`)**: The high-level "brain" of the robot. It runs on a host computer (e.g., a laptop running ROS 2 Humble in a Docker container) and is responsible for navigation, path planning, and high-level control logic.
-2.  **micro-ROS Agent**: A standalone application that runs on the host computer and acts as a bridge. It relays messages between the main ROS 2 network and the ESP32 firmware over a UDP-based Wi-Fi connection.
-3.  **ESP32 Firmware (This Repository)**: The low-level C++ controller that directly manages the stepper motors and other hardware. It connects to the micro-ROS Agent to join the ROS 2 network.
+1.  **ROS 2 Host Application (`shelfbot`)**: The "brain" of the robot, running on a host computer. It uses the `ros2_control` framework for a standardized approach to robot control. This includes controllers (like `FourWheelDriveController`) for tasks like odometry and motion, and a hardware interface (`FourWheelDriveHardwareInterface`) that abstracts the physical robot.
+2.  **micro-ROS Agent**: A lightweight bridge that relays messages between the main ROS 2 network (DDS) and the micro-ROS client on the ESP32 (RTPS over UDP).
+3.  **ESP32 Firmware (This Repository)**: The low-level C++ controller that directly manages the stepper motors and other hardware. It acts as a micro-ROS node, exposing its capabilities as ROS 2 topics, and effectively serving as the "muscles" of the robot.
+
+### Control and Data Flow Diagram
+
+The following diagram illustrates how a high-level command from the `ros2_control` system flows down to the hardware, and how position feedback flows back up to update the robot's state.
+
+```plantuml
+@startuml
+title Shelfbot Control and Data Flow
+
+package "ROS 2 Host Computer" {
+  package "ros2_control Application" {
+    [FourWheelDriveController] as Controller
+    [FourWheelDriveHardwareInterface] as HW_Interface
+    [MicroRosCommunication] as Comm
+  }
+  [micro-ROS Agent] as Agent
+}
+
+package "ESP32 Microcontroller" {
+  package "Firmware" {
+    [Shelfbot Class (micro-ROS Node)] as Node
+    [motor_control component] as MotorControl
+  }
+  database "Stepper Motors" as Motors
+}
+
+' --- Command Flow (Host -> ESP32) ---
+Controller --> HW_Interface : write()
+HW_Interface --> Comm : writeCommandsToHardware()
+Comm --> Agent : /motor_command (ROS 2 Topic)
+Agent ..> Node : /motor_command (UDP)
+Node --> MotorControl : motor_control_set_position()
+MotorControl --> Motors : Hardware Signals
+
+' --- Feedback Loop (ESP32 -> Host) ---
+Motors --> MotorControl : Step Count
+MotorControl --> Node : motor_control_get_position()
+Node --> Agent : /motor_positions (ROS 2 Topic)
+Agent ..> Comm : /motor_positions (UDP)
+Comm --> HW_Interface : readStateFromHardware()
+HW_Interface --> Controller : read()
+Controller --> Controller : Update Odometry
+
+@enduml
+```
 
 ### Firmware Architecture
 
 The firmware is organized into modular, reusable ESP-IDF components to promote separation of concerns:
 
-*   **`main`**: A minimal entry point. Its sole responsibility is to instantiate the `Shelfbot` class and start the application. This adheres to the ESP-IDF requirement for a C-style `app_main` function while keeping the application logic purely in C++.
+*   **`main`**: A minimal entry point. Its sole responsibility is to instantiate the `Shelfbot` class and start the application.
 *   **`shelfbot`**: The core application component. The `Shelfbot` C++ class within this component orchestrates all major functions: network initialization, mDNS discovery, SNTP time synchronization, and managing the micro-ROS task.
 *   **`motor_control`**: A hardware abstraction layer for the stepper motors. It uses the `FastAccelStepper` library to provide a simple API for motor control.
-*   **`led_control`**: A simple hardware abstraction for the ESP32's built-in LED, providing a clean C-style interface (`led_control_init`, `led_control_set`).
+*   **`led_control`**: A simple hardware abstraction for the ESP32's built-in LED.
 *   **`wifi_station`**: Manages the Wi-Fi connection.
 *   **`http_server`**: Provides a REST API for basic troubleshooting and manual control.
 
-This component-based C++ design makes the system easier to maintain, test, and extend.
+### Micro-ROS Agent Connection Recovery
+
+The firmware implements a resilient state machine to manage the connection to the micro-ROS agent, ensuring that the robot can recover from network dropouts or agent restarts. This makes the system more robust for long-running operations.
+
+The state machine consists of three states:
+
+1.  **`WAITING_AGENT`**: In this initial state, the firmware actively searches for the micro-ROS agent on the network using mDNS. Once the agent is discovered, it attempts to establish a connection.
+2.  **`AGENT_CONNECTED`**: After a successful connection, the firmware transitions to this state. It creates all the necessary ROS 2 publishers, subscribers, and timers. The firmware remains in this state, publishing and receiving messages, as long as the connection is healthy. Any communication error (e.g., a failed `rcl_publish` call) will trigger a transition to the `AGENT_DISCONNECTED` state.
+3.  **`AGENT_DISCONNECTED`**: If the connection is lost, the firmware enters this state. It safely tears down all ROS 2 entities (publishers, subscribers, etc.) and cleans up the connection. It then transitions back to the `WAITING_AGENT` state to begin the discovery and reconnection process again.
+
+This cycle ensures that the firmware can operate autonomously and will always attempt to re-establish communication with the ROS 2 system whenever possible.
+
+The following log snippet shows the recovery mechanism in action. The firmware detects a publishing error, disconnects, tears down the ROS 2 entities, and then successfully reconnects to the agent.
 
 ```
-+---------------------------------------+
-|         ROS 2 Host Computer           |
-|                                       |
-|  +---------------------------------+  |
-|  |      `shelfbot` ROS 2 App       |  |
-|  +---------------------------------+  |
-|                 |                     |
-| (ROS 2 Topics)  v                     |
-|  +---------------------------------+  |
-|  |   micro-ROS Agent (Bridge)      |  |
-|  +---------------------------------+  |
-|                                       |
-+-----------------|---------------------+
-                  |
-                  | (Wi-Fi / UDP)
-                  v
-+---------------------------------------+
-|          ESP32 Firmware               |
-|                                       |
-|  +---------------------------------+  |
-|  |        `Shelfbot` Class         |  |
-|  | (Orchestrates all components)   |  |
-|  +---------------------------------+  |
-|                 |                     |
-|                 v                     |
-|  +---------------------------------+  |
-|  | Hardware Components (motor, led)|  |
-|  +---------------------------------+  |
-|                                       |
-+---------------------------------------+
+E (47105) shelfbot: Error publishing heartbeat message
+W (53242) shelfbot: State: AGENT_DISCONNECTED.
+W (53243) shelfbot: Destroying entities.
+W (61287) shelfbot: RCL soft error in rcl_subscription_fini(&motor_command_subscriber, &node): 1
+...
+W (103509) shelfbot: RCL soft error in rcl_node_fini(&node): 1
+W (103510) shelfbot: Tearing down transport.
+I (103514) shelfbot: Transitioning to WAITING_AGENT
+I (104516) shelfbot: State: WAITING_AGENT
+I (104517) shelfbot: Querying for mDNS host: gentoo-laptop.local
+I (104792) shelfbot: mDNS host 'gentoo-laptop.local' found at IP: 192.168.0.80
+I (104792) shelfbot: Agent found, attempting to connect...
+I (104997) shelfbot: Successfully connected to agent.
+I (106997) shelfbot: State: AGENT_CONNECTED (creating entities)
+I (107180) shelfbot: Entities created successfully.
 ```
+
+---
+
+## Hardware Resource Allocation
+
+The ESP32 has a limited number of GPIO pins and hardware peripherals. The following table details how they are used by the firmware components.
+
+| Component | Function | Resource | Pin/ID | Notes |
+| :--- | :--- | :--- | :--- | :--- |
+| **`motor_control`** | Motor 0 | GPIO (PUL/DIR) | 27, 26 | **Should be changed:** These are ADC2 pins, which can be unreliable when Wi-Fi is active. |
+| | Motor 1 | GPIO (PUL/DIR) | 14, 12 | **Should be changed:** ADC2 pins. GPIO 12 is also a strapping pin and can affect boot. |
+| | Motor 2 | GPIO (PUL/DIR) | 13, 15 | **Should be changed:** ADC2 pins. GPIO 15 is also a strapping pin and can affect boot. |
+| | Motor 3 | GPIO (PUL/DIR) | 4, 16 | **Should be changed:** GPIO 4 is an ADC2 pin. |
+| | Motor 4 | GPIO (PUL/DIR) | 17, 5 | **Potential Issue:** GPIO 5 is a strapping pin and must be HIGH at boot. |
+| | Motor 5 | GPIO (PUL/DIR) | 18, 19 | Safe to use. |
+| | Stepper Engine | RMT Channels | 0, 1, 2, 3, 4, 5 | Safe to use. `FastAccelStepper` uses 6 of the 8 available RMT channels. |
+| **`sensor_control`** | Sensor 0 | GPIO (Trig/Echo) | 21, 34 | Safe to use. GPIO 34 is input-only. |
+| | Sensor 1 | GPIO (Trig/Echo) | 22, 35 | Safe to use. GPIO 35 is input-only. |
+| | Sensor 2 | GPIO (Trig/Echo) | 23, 36 | Safe to use. GPIO 36 is input-only. |
+| | Sensor 3 | GPIO (Trig/Echo) | 32, 39 | Safe to use. GPIO 39 is input-only. |
+| | Sensor Timeout | Hardware Timer | GPTimer 0 | Safe to use. A single shared timer is used for all sensors, leaving 3 timers free. |
+| | Echo Interrupt | GPIO ISR | Pins 34, 35, 36, 39 | Safe to use. Uses the global GPIO ISR service. |
+| **`led_control`** | Onboard LED | GPIO | 2 | Safe to use. |
+| **`wifi_station`** | Wi-Fi | Peripheral | N/A | **Implicit Conflict:** The Wi-Fi peripheral interferes with all pins on the ADC2 controller. |
+
+### Key Hardware Issues
+
+1.  **ADC2 and Wi-Fi Conflict:** Many of the GPIO pins assigned to the motors are controlled by the `ADC2` peripheral. The ESP32 documentation warns that these pins cannot be used reliably while the Wi-Fi is active. This can lead to erratic motor behavior or stalls. For future hardware revisions, it is strongly recommended to move motor control pins to non-ADC2 GPIOs.
 
 ---
 
@@ -68,14 +138,18 @@ The firmware creates a single ROS 2 node named `shelfbot_firmware`.
 
 | Topic | Message Type | Description |
 | :--- | :--- | :--- |
-| `/shelfbot_firmware/heartbeat` | `std_msgs/msg/Int32` | A simple counter published every 2 seconds to indicate that the firmware is alive and connected. |
+| `/shelfbot_firmware/heartbeat` | `std_msgs/msg/Int32` | A counter published every 2 seconds to indicate the firmware is alive. |
+| `/shelfbot_firmware/motor_positions` | `std_msgs/msg/Float32MultiArray` | Publishes the current position of each motor in **radians**. Used as feedback for `ros2_control`. |
+| `/shelfbot_firmware/distance_sensors`| `std_msgs/msg/Float32MultiArray` | Publishes readings from distance sensors. |
+| `/shelfbot_firmware/led_state` | `std_msgs/msg/Bool` | Publishes the current state of the onboard LED. |
 
 ### Subscribed Topics
 
 | Topic | Message Type | Description |
 | :--- | :--- | :--- |
 | `/shelfbot_firmware/led` | `std_msgs/msg/Bool` | Controls the state of the ESP32's built-in blue LED. `true` turns the LED on, `false` turns it off. |
-| `/shelfbot_firmware/motor_command` | `std_msgs/msg/Float32MultiArray` | Commands the motors to specific positions. The `data` field should be an array of target positions in **radians**. |
+| `/shelfbot_firmware/motor_command` | `std_msgs/msg/Float32MultiArray` | Commands the motors to specific positions. The `data` field should be an array of target positions in **radians**. This is the primary topic used by `ros2_control`. |
+| `/shelfbot_firmware/set_speed` | `std_msgs/msg/Float32MultiArray` | Sets the speed for each motor individually in **Hz (steps/sec)**. Useful for testing and configuration. |
 
 ---
 
@@ -83,7 +157,7 @@ The firmware creates a single ROS 2 node named `shelfbot_firmware`.
 
 ### Testing Motor Control
 
-This test verifies that you can command the motors to specific positions.
+This test verifies that you can command the motors to specific positions, bypassing `ros2_control`.
 
 | Action | Command | Expected Result |
 | :--- | :--- | :--- |
@@ -92,7 +166,7 @@ This test verifies that you can command the motors to specific positions.
 | **3. Return all to Zero** | `ros2 topic pub --once /shelfbot_firmware/motor_command std_msgs/msg/Float32MultiArray "{data: [0.0, 0.0, 0.0, 0.0, 0.0, 0.0]}"` | All motors return to their zero position. |
 
 **Troubleshooting:**
-*   **Motors do not move:** Verify motor power supply and wiring. Check the serial monitor for any error messages from the `motor_control` or `FastAccelStepper` libraries.
+*   **Motors do not move:** Verify motor power supply and wiring. Check the serial monitor for any error messages.
 *   **Moves to wrong position:** Ensure your high-level application is sending commands in **radians**, not degrees.
 
 ### Testing the LED Control
@@ -106,7 +180,7 @@ This test verifies basic two-way communication with the ESP32.
 
 **Troubleshooting:**
 *   **Command fails or hangs:** Ensure the micro-ROS agent is running and the ESP32 is connected to Wi-Fi.
-*   **No serial log message:** Verify the ESP32 is powered and the `idf.py monitor` is running and connected to the correct serial port.
+*   **No serial log message:** Verify the ESP32 is powered and the `idf.py monitor` is running.
 
 ---
 

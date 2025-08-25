@@ -1,9 +1,5 @@
 #include "motor_control.h"
-#include "FastAccelStepper.h"
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include <math.h> // For M_PI
+#include "driver/gpio.h" // For gpio_pad_select_gpio
 
 static const char* TAG = "motor_control";
 
@@ -22,9 +18,16 @@ void motor_control_begin() {
     engine.init();
     
     for (int i = 0; i < NUM_MOTORS; i++) {
+        // --- FIX: Forcefully configure pins as GPIO ---
+        // This is crucial for strapping pins (like 15, 12, 5, 4) to ensure they
+        // are released from their boot-time functions and can be controlled by peripherals.
+        gpio_pad_select_gpio((gpio_num_t)motorPins[i][0]); // PULSE Pin
+        gpio_pad_select_gpio((gpio_num_t)motorPins[i][1]); // DIR Pin
+
         steppers[i] = engine.stepperConnectToPin(motorPins[i][0]);
         if (steppers[i]) {
-            steppers[i]->setDirectionPin(motorPins[i][1]);
+            steppers[i]->setDirectionPin(motorPins[i][1], true);
+
             steppers[i]->setAutoEnable(true);
             steppers[i]->setSpeedInHz(4000); // Default speed
             steppers[i]->setAcceleration(2000); // Default acceleration
@@ -39,7 +42,10 @@ void motor_control_begin() {
 
 void motor_control_set_position(uint8_t index, double position_rad) {
     if (index >= NUM_MOTORS || !steppers[index]) return;
+    ESP_LOGI(TAG, "Conversion Info: STEPS_PER_REV=%.1f, MICROSTEPPING=%.1f, GEAR_RATIO=%.1f, RADS_TO_STEPS=%.4f", STEPS_PER_REVOLUTION, MICROSTEPPING, GEAR_RATIO, RADS_TO_STEPS);
     long target_steps = (long)(position_rad * RADS_TO_STEPS);
+    ESP_LOGI(TAG, "Motor %d: Converting %.2f rad to %ld steps", index, position_rad, target_steps);
+    ESP_LOGI(TAG, "Executing: steppers[%d]->moveTo(%ld)", index, target_steps);
     steppers[index]->moveTo(target_steps);
 }
 
@@ -53,6 +59,31 @@ double motor_control_get_velocity(uint8_t index) {
     // Library returns speed in mHz (steps/1000s). Convert to steps/s, then to rad/s.
     double steps_per_sec = (double)steppers[index]->getCurrentSpeedInMilliHz() / 1000.0;
     return steps_per_sec / RADS_TO_STEPS;
+}
+
+// --- Add this new function ---
+void motor_control_set_velocity(uint8_t index, double velocity_rad_s) {
+    if (index >= NUM_MOTORS || !steppers[index]) return;
+
+    // If velocity is very close to zero, stop the motor.
+    if (fabs(velocity_rad_s) < 1e-4) {
+        steppers[index]->stopMove();
+        return;
+    }
+
+    // Convert velocity in rad/s to speed in Hz (steps/s)
+    long speed_hz = (long)fabs(velocity_rad_s * RADS_TO_STEPS);
+
+    // Set the motor speed and acceleration
+    steppers[index]->setSpeedInHz(speed_hz);
+    steppers[index]->setAcceleration(speed_hz / 2); // Use a reasonable acceleration
+
+    // Set the direction and command the motor to run continuously
+    if (velocity_rad_s > 0) {
+        steppers[index]->runForward();
+    } else {
+        steppers[index]->runBackward();
+    }
 }
 
 // --- Utility Function Implementations ---
@@ -76,6 +107,11 @@ bool motor_control_is_motor_running(uint8_t index) {
 
 void motor_control_stop_motor(uint8_t index) {
     if (index >= NUM_MOTORS || !steppers[index]) return;
+    ESP_LOGI(TAG, "Motor %d: Stopping motor", index);
+    int pulse_pin = motorPins[index][0];
+    int dir_pin = motorPins[index][1];
+    int dir_level = gpio_get_level((gpio_num_t)dir_pin);
+    ESP_LOGI(TAG, "Motor %d GPIOs: PULSE_PIN=%d, DIR_PIN=%d, DIR_LEVEL=%d", index, pulse_pin, dir_pin, dir_level);
     steppers[index]->forceStop();
 }
 

@@ -1,8 +1,4 @@
 #include "http_server.h"
-#include "motor_control.h"
-#include "esp_http_server.h"
-#include "esp_log.h"
-#include "cJSON.h"
 
 static const char *TAG = "http_server";
 
