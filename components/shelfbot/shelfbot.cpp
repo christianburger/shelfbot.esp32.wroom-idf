@@ -1,6 +1,7 @@
 #include "shelfbot.h"
 #include "sensor_control.h"
 #include <rcl/allocator.h>
+#include <rmw_microros/init_options.h>
 
 static const char* TAG = "shelfbot";
 
@@ -16,30 +17,10 @@ void init_multi_array(std_msgs__msg__Float32MultiArray& msg, float* data_buffer,
     msg.layout.data_offset = 0;
 }
 
-// --- Error Handling ---
-#define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){ESP_LOGE(TAG, "Failed status on line %d: %d. Aborting micro_ros_task.", __LINE__, (int)temp_rc); vTaskDelete(NULL);}}
-
 // --- Static Member Definitions ---
 bool Shelfbot::time_synchronized = false;
 bool Shelfbot::led_state = false;
-rcl_publisher_t Shelfbot::heartbeat_publisher;
-std_msgs__msg__Int32 Shelfbot::heartbeat_msg;
-rcl_publisher_t Shelfbot::motor_position_publisher;
-std_msgs__msg__Float32MultiArray Shelfbot::motor_position_msg;
-float Shelfbot::motor_position_data[NUM_MOTORS];
-rcl_publisher_t Shelfbot::distance_sensors_publisher;
-std_msgs__msg__Float32MultiArray Shelfbot::distance_sensors_msg;
-float Shelfbot::distance_sensors_data[NUM_SENSORS];
-rcl_publisher_t Shelfbot::led_state_publisher;
-std_msgs__msg__Bool Shelfbot::led_state_msg;
-rcl_subscription_t Shelfbot::motor_command_subscriber;
-std_msgs__msg__Float32MultiArray Shelfbot::motor_command_msg;
-float Shelfbot::motor_command_data[NUM_MOTORS];
-rcl_subscription_t Shelfbot::set_speed_subscriber;
-std_msgs__msg__Float32MultiArray Shelfbot::set_speed_msg;
-float Shelfbot::set_speed_data[NUM_MOTORS];
-rcl_subscription_t Shelfbot::led_subscriber;
-std_msgs__msg__Bool Shelfbot::led_msg;
+Shelfbot* Shelfbot::instance = nullptr;
 
 // --- mDNS ---
 void Shelfbot::initialise_mdns(void)
@@ -56,11 +37,11 @@ bool Shelfbot::query_mdns_host(const char * host_name)
     esp_ip4_addr_t addr;
     addr.addr = 0;
 
-    esp_err_t err = mdns_query_a(host_name, 5000,  &addr);
+    esp_err_t err = mdns_query_a(host_name, 2000,  &addr); // 2 second timeout
 
     if (err) {
         if (err == ESP_ERR_NOT_FOUND) {
-            ESP_LOGE(TAG, "mDNS host '%s.local' not found!", host_name);
+            ESP_LOGW(TAG, "mDNS host '%s.local' not found!", host_name);
             return false;
         }
         ESP_LOGE(TAG, "mDNS query failed: %s", esp_err_to_name(err));
@@ -93,21 +74,24 @@ void Shelfbot::heartbeat_timer_callback(rcl_timer_t * timer, int64_t last_call_t
     (void) last_call_time;
     if (timer != NULL) {
         heartbeat_msg.data++;
-        RCCHECK(rcl_publish(&heartbeat_publisher, &heartbeat_msg, NULL));
+        if (rcl_publish(&heartbeat_publisher, &heartbeat_msg, NULL) != RCL_RET_OK) {
+            ESP_LOGE(TAG, "Error publishing heartbeat message");
+            agent_connected = false;
+        }
     }
 }
 
 void Shelfbot::motor_position_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     (void) last_call_time;
     if (timer != NULL) {
-        // Populate the message with current motor positions
         for (int i = 0; i < NUM_MOTORS; ++i) {
             motor_position_msg.data.data[i] = motor_control_get_position(i);
         }
         motor_position_msg.data.size = NUM_MOTORS;
-
-        // Publish the message
-        RCCHECK(rcl_publish(&motor_position_publisher, &motor_position_msg, NULL));
+        if (rcl_publish(&motor_position_publisher, &motor_position_msg, NULL) != RCL_RET_OK) {
+            ESP_LOGE(TAG, "Error publishing motor position message");
+            agent_connected = false;
+        }
     }
 }
 
@@ -115,16 +99,16 @@ void Shelfbot::distance_sensors_timer_callback(rcl_timer_t * timer, int64_t last
     (void) last_call_time;
     if (timer != NULL) {
         float received_distances[NUM_SENSORS];
-        // Check the queue for new data, but don't block
         if (xQueueReceive(distance_data_queue, &received_distances, 0) == pdPASS) {
-            // If new data is available, copy it to the message
             for (int i = 0; i < NUM_SENSORS; ++i) {
                 distance_sensors_msg.data.data[i] = received_distances[i];
             }
         }
-        // If no new data, the publisher will just send the last known values
         distance_sensors_msg.data.size = NUM_SENSORS;
-        RCCHECK(rcl_publish(&distance_sensors_publisher, &distance_sensors_msg, NULL));
+        if (rcl_publish(&distance_sensors_publisher, &distance_sensors_msg, NULL) != RCL_RET_OK) {
+            ESP_LOGE(TAG, "Error publishing distance sensors message");
+            agent_connected = false;
+        }
     }
 }
 
@@ -132,7 +116,10 @@ void Shelfbot::led_state_timer_callback(rcl_timer_t * timer, int64_t last_call_t
     (void) last_call_time;
     if (timer != NULL) {
         led_state_msg.data = led_state;
-        RCCHECK(rcl_publish(&led_state_publisher, &led_state_msg, NULL));
+        if (rcl_publish(&led_state_publisher, &led_state_msg, NULL) != RCL_RET_OK) {
+            ESP_LOGE(TAG, "Error publishing led state message");
+            agent_connected = false;
+        }
     }
 }
 
@@ -143,7 +130,7 @@ void Shelfbot::motor_command_subscription_callback(const void * msin) {
     }
 
     for (size_t i = 0; i < msg->data.size && i < NUM_MOTORS; i++) {
-        ESP_LOGI(TAG, "Motor %d command: %.2f rad", i, msg->data.data[i]);
+        ESP_LOGD(TAG, "Motor %d command: %.2f rad", i, msg->data.data[i]);
         motor_control_set_position(i, msg->data.data[i]);
     }
 }
@@ -155,10 +142,9 @@ void Shelfbot::set_speed_subscription_callback(const void * msin) {
         ESP_LOGW(TAG, "Received set_speed command with %d values, but only %d motors are supported. Ignoring extra values.", msg->data.size, NUM_MOTORS);
     }
 
-    // This callback now directly controls the motor's continuous velocity.
     for (size_t i = 0; i < msg->data.size && i < NUM_MOTORS; i++) {
         float velocity_in_rad_s = msg->data.data[i];
-        ESP_LOGI(TAG, "Motor %d velocity command: %.2f rad/s", i, velocity_in_rad_s);
+        ESP_LOGD(TAG, "Motor %d velocity command: %.2f rad/s", i, velocity_in_rad_s);
         motor_control_set_velocity(i, velocity_in_rad_s);
     }
 }
@@ -170,6 +156,91 @@ void Shelfbot::led_subscription_callback(const void * msin) {
     led_control_set(led_state);
 }
 
+// --- Static Callback Wrappers ---
+void Shelfbot::heartbeat_timer_callback_wrapper(rcl_timer_t* timer, int64_t last_call_time) {
+    if (instance) instance->heartbeat_timer_callback(timer, last_call_time);
+}
+void Shelfbot::motor_position_timer_callback_wrapper(rcl_timer_t* timer, int64_t last_call_time) {
+    if (instance) instance->motor_position_timer_callback(timer, last_call_time);
+}
+void Shelfbot::distance_sensors_timer_callback_wrapper(rcl_timer_t* timer, int64_t last_call_time) {
+    if (instance) instance->distance_sensors_timer_callback(timer, last_call_time);
+}
+void Shelfbot::led_state_timer_callback_wrapper(rcl_timer_t* timer, int64_t last_call_time) {
+    if (instance) instance->led_state_timer_callback(timer, last_call_time);
+}
+void Shelfbot::motor_command_subscription_callback_wrapper(const void* msin) {
+    if (instance) instance->motor_command_subscription_callback(msin);
+}
+void Shelfbot::set_speed_subscription_callback_wrapper(const void* msin) {
+    if (instance) instance->set_speed_subscription_callback(msin);
+}
+void Shelfbot::led_subscription_callback_wrapper(const void* msin) {
+    if (instance) instance->led_subscription_callback(msin);
+}
+
+// --- micro-ROS Entity Management ---
+bool Shelfbot::create_entities() {
+    allocator = rcl_get_default_allocator();
+
+    // Create node
+    RCCHECK(rclc_node_init_default(&node, "shelfbot_firmware", "", &support));
+
+    // Create Publishers
+    RCCHECK(rclc_publisher_init_default(&heartbeat_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32), "/shelfbot_firmware/heartbeat"));
+    RCCHECK(rclc_publisher_init_default(&motor_position_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "/shelfbot_firmware/motor_positions"));
+    RCCHECK(rclc_publisher_init_default(&distance_sensors_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "/shelfbot_firmware/distance_sensors"));
+    RCCHECK(rclc_publisher_init_default(&led_state_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "/shelfbot_firmware/led_state"));
+
+    // Create Subscribers
+    RCCHECK(rclc_subscription_init_default(&motor_command_subscriber, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "/shelfbot_firmware/motor_command"));
+    RCCHECK(rclc_subscription_init_default(&set_speed_subscriber, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "/shelfbot_firmware/set_speed"));
+    RCCHECK(rclc_subscription_init_default(&led_subscriber, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "/shelfbot_firmware/led"));
+
+    // Create Timers
+    RCCHECK(rclc_timer_init_default2(&heartbeat_timer, &support, RCL_MS_TO_NS(2000), heartbeat_timer_callback_wrapper, true));
+    RCCHECK(rclc_timer_init_default2(&motor_position_timer, &support, RCL_MS_TO_NS(500), motor_position_timer_callback_wrapper, true));
+    RCCHECK(rclc_timer_init_default2(&distance_sensors_timer, &support, RCL_MS_TO_NS(1000), distance_sensors_timer_callback_wrapper, true));
+    RCCHECK(rclc_timer_init_default2(&led_state_timer, &support, RCL_MS_TO_NS(2000), led_state_timer_callback_wrapper, true));
+
+    // Initialize message memory
+    init_multi_array(motor_command_msg, motor_command_data, NUM_MOTORS);
+    init_multi_array(motor_position_msg, motor_position_data, NUM_MOTORS);
+    init_multi_array(set_speed_msg, set_speed_data, NUM_MOTORS);
+    init_multi_array(distance_sensors_msg, distance_sensors_data, NUM_SENSORS);
+
+    // Create Executor
+    unsigned int num_handles = 4 + 3; // 4 timers, 3 subscribers
+    RCCHECK(rclc_executor_init(&executor, &support.context, num_handles, &allocator));
+
+    RCCHECK(rclc_executor_add_timer(&executor, &heartbeat_timer));
+    RCCHECK(rclc_executor_add_timer(&executor, &motor_position_timer));
+    RCCHECK(rclc_executor_add_timer(&executor, &distance_sensors_timer));
+    RCCHECK(rclc_executor_add_timer(&executor, &led_state_timer));
+    RCCHECK(rclc_executor_add_subscription(&executor, &motor_command_subscriber, &motor_command_msg, &motor_command_subscription_callback_wrapper, ON_NEW_DATA));
+    RCCHECK(rclc_executor_add_subscription(&executor, &set_speed_subscriber, &set_speed_msg, &set_speed_subscription_callback_wrapper, ON_NEW_DATA));
+    RCCHECK(rclc_executor_add_subscription(&executor, &led_subscriber, &led_msg, &led_subscription_callback_wrapper, ON_NEW_DATA));
+
+    heartbeat_msg.data = 0;
+    return true;
+}
+
+void Shelfbot::destroy_entities() {
+    RCSOFTCHECK(rclc_executor_fini(&executor));
+    RCSOFTCHECK(rcl_subscription_fini(&motor_command_subscriber, &node));
+    RCSOFTCHECK(rcl_subscription_fini(&set_speed_subscriber, &node));
+    RCSOFTCHECK(rcl_subscription_fini(&led_subscriber, &node));
+    RCSOFTCHECK(rcl_publisher_fini(&heartbeat_publisher, &node));
+    RCSOFTCHECK(rcl_publisher_fini(&motor_position_publisher, &node));
+    RCSOFTCHECK(rcl_publisher_fini(&distance_sensors_publisher, &node));
+    RCSOFTCHECK(rcl_publisher_fini(&led_state_publisher, &node));
+    RCSOFTCHECK(rcl_timer_fini(&heartbeat_timer));
+    RCSOFTCHECK(rcl_timer_fini(&motor_position_timer));
+    RCSOFTCHECK(rcl_timer_fini(&distance_sensors_timer));
+    RCSOFTCHECK(rcl_timer_fini(&led_state_timer));
+    RCSOFTCHECK(rcl_node_fini(&node));
+}
+
 // --- micro-ROS Task ---
 void Shelfbot::micro_ros_task_wrapper(void * arg)
 {
@@ -179,137 +250,87 @@ void Shelfbot::micro_ros_task_wrapper(void * arg)
 
 void Shelfbot::micro_ros_task_impl()
 {
-    ESP_LOGI(TAG, "micro_ros_task started, trying to connect to agent at %s:8888", agent_ip_str);
+    bool entities_created = false;
 
-    rcl_allocator_t allocator = rcl_get_default_allocator();
-    rclc_support_t support;
+    while(1) {
+        // Always get a fresh allocator
+        allocator = rcl_get_default_allocator();
 
-    // Create init_options
-    rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
-    RCCHECK(rcl_init_options_init(&init_options, allocator));
-    RCCHECK(rmw_uros_options_set_udp_address(agent_ip_str, "8888", rcl_init_options_get_rmw_init_options(&init_options)));
+        switch(state) {
+            case WAITING_AGENT:
+                ESP_LOGI(TAG, "State: WAITING_AGENT");
+                if (query_mdns_host("gentoo-laptop")) {
+                    ESP_LOGI(TAG, "Agent found, attempting to connect...");
 
-    // Setup support structure
-    RCCHECK(rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator));
+                    rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
+                    RCCHECK_VOID(rcl_init_options_init(&init_options, allocator));
+                    RCCHECK_VOID(rmw_uros_options_set_udp_address(agent_ip_str, "8888", rcl_init_options_get_rmw_init_options(&init_options)));
 
-    // Create node
-    rcl_node_t node;
-    RCCHECK(rclc_node_init_default(&node, "shelfbot_firmware", "", &support));
-    ESP_LOGI(TAG, "micro-ROS node created successfully.");
+                    if (rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator) == RCL_RET_OK) {
+                        ESP_LOGI(TAG, "Successfully connected to agent.");
+                        agent_connected = true;
+                        state = AGENT_CONNECTED;
+                    } else {
+                        ESP_LOGW(TAG, "Connection to agent failed.");
+                        RCSOFTCHECK(rclc_support_fini(&support)); // Clean up partial initialization
+                    }
+                    RCSOFTCHECK(rcl_init_options_fini(&init_options));
+                }
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                break;
 
-    // Create Publishers
-    ESP_LOGI(TAG, "Creating heartbeat publisher...");
-    RCCHECK(rclc_publisher_init_default(
-        &heartbeat_publisher,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-        "/shelfbot_firmware/heartbeat"));
+            case AGENT_CONNECTED:
+                if (!entities_created) {
+                    ESP_LOGI(TAG, "State: AGENT_CONNECTED (creating entities)");
+                    if (create_entities()) {
+                        entities_created = true;
+                        ESP_LOGI(TAG, "Entities created successfully.");
+                    } else {
+                        ESP_LOGE(TAG, "Failed to create entities.");
+                        state = AGENT_DISCONNECTED;
+                        break; 
+                    }
+                }
 
-    ESP_LOGI(TAG, "Creating motor position publisher...");
-    RCCHECK(rclc_publisher_init_default(
-        &motor_position_publisher,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-        "/shelfbot_firmware/motor_positions"));
+                // Spin the executor
+                if (rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)) != RCL_RET_OK) {
+                    ESP_LOGE(TAG, "Executor spin failed, disconnecting.");
+                    agent_connected = false;
+                }
 
-    ESP_LOGI(TAG, "Creating distance sensors publisher...");
-    RCCHECK(rclc_publisher_init_default(
-        &distance_sensors_publisher,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-        "/shelfbot_firmware/distance_sensors"));
+                if (!agent_connected) {
+                    state = AGENT_DISCONNECTED;
+                }
+                
+                vTaskDelay(pdMS_TO_TICKS(100));
+                break;
 
-    ESP_LOGI(TAG, "Creating LED state publisher...");
-    RCCHECK(rclc_publisher_init_default(
-        &led_state_publisher,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-        "/shelfbot_firmware/led_state"));
+            case AGENT_DISCONNECTED:
+                ESP_LOGW(TAG, "State: AGENT_DISCONNECTED.");
+                
+                if (entities_created) {
+                    ESP_LOGW(TAG, "Destroying entities.");
+                    destroy_entities();
+                    entities_created = false;
+                }
 
-    // Create Subscribers
-    ESP_LOGI(TAG, "Creating motor command subscriber...");
-    RCCHECK(rclc_subscription_init_default(
-        &motor_command_subscriber,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-        "/shelfbot_firmware/motor_command"));
+                // First, tear down the transport layer to prevent blocking
+                ESP_LOGW(TAG, "Tearing down transport.");
+                RCSOFTCHECK(rclc_support_fini(&support));
 
-    ESP_LOGI(TAG, "Creating set speed subscriber...");
-    RCCHECK(rclc_subscription_init_default(
-        &set_speed_subscriber,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-        "/shelfbot_firmware/set_speed"));
-
-    ESP_LOGI(TAG, "Creating LED subscriber...");
-    RCCHECK(rclc_subscription_init_default(
-        &led_subscriber,
-        &node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-        "/shelfbot_firmware/led"));
-
-    // Create Timers
-    ESP_LOGI(TAG, "Creating timers...");
-    rcl_timer_t heartbeat_timer;
-    RCCHECK(rclc_timer_init_default2(&heartbeat_timer, &support, RCL_MS_TO_NS(2000), heartbeat_timer_callback, true));
-    rcl_timer_t motor_position_timer;
-    RCCHECK(rclc_timer_init_default2(&motor_position_timer, &support, RCL_MS_TO_NS(500), motor_position_timer_callback, true));
-    rcl_timer_t distance_sensors_timer;
-    RCCHECK(rclc_timer_init_default2(&distance_sensors_timer, &support, RCL_MS_TO_NS(1000), distance_sensors_timer_callback, true));
-    rcl_timer_t led_state_timer;
-    RCCHECK(rclc_timer_init_default2(&led_state_timer, &support, RCL_MS_TO_NS(2000), led_state_timer_callback, true));
-
-    // Statically allocate memory for messages
-    init_multi_array(motor_command_msg, Shelfbot::motor_command_data, NUM_MOTORS);
-    init_multi_array(motor_position_msg, Shelfbot::motor_position_data, NUM_MOTORS);
-    init_multi_array(set_speed_msg, Shelfbot::set_speed_data, NUM_MOTORS);
-    init_multi_array(distance_sensors_msg, Shelfbot::distance_sensors_data, NUM_SENSORS);
-
-    // Create Executor
-    ESP_LOGI(TAG, "Creating executor...");
-    rclc_executor_t executor;
-    unsigned int num_handles = 4 + 3; // 4 timers, 3 subscribers
-    RCCHECK(rclc_executor_init(&executor, &support.context, num_handles, &allocator));
-
-    ESP_LOGI(TAG, "Adding entities to executor...");
-    RCCHECK(rclc_executor_add_timer(&executor, &heartbeat_timer));
-    RCCHECK(rclc_executor_add_timer(&executor, &motor_position_timer));
-    RCCHECK(rclc_executor_add_timer(&executor, &distance_sensors_timer));
-    RCCHECK(rclc_executor_add_timer(&executor, &led_state_timer));
-    RCCHECK(rclc_executor_add_subscription(&executor, &motor_command_subscriber, &motor_command_msg, &motor_command_subscription_callback, ON_NEW_DATA));
-    RCCHECK(rclc_executor_add_subscription(&executor, &set_speed_subscriber, &set_speed_msg, &set_speed_subscription_callback, ON_NEW_DATA));
-    RCCHECK(rclc_executor_add_subscription(&executor, &led_subscriber, &led_msg, &led_subscription_callback, ON_NEW_DATA));
-
-    ESP_LOGI(TAG, "Executor setup complete.");
-    heartbeat_msg.data = 0;
-    while(1){
-        rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
-        usleep(100000);
+                state = WAITING_AGENT;
+                ESP_LOGI(TAG, "Transitioning to WAITING_AGENT");
+                vTaskDelay(pdMS_TO_TICKS(1000)); // Wait before trying to reconnect
+                break;
+        }
     }
-
-    // Cleanup
-    RCCHECK(rcl_publisher_fini(&heartbeat_publisher, &node));
-    RCCHECK(rcl_publisher_fini(&motor_position_publisher, &node));
-    RCCHECK(rcl_publisher_fini(&distance_sensors_publisher, &node));
-    RCCHECK(rcl_publisher_fini(&led_state_publisher, &node));
-    RCCHECK(rcl_subscription_fini(&motor_command_subscriber, &node));
-    RCCHECK(rcl_subscription_fini(&set_speed_subscriber, &node));
-    RCCHECK(rcl_subscription_fini(&led_subscriber, &node));
-    RCCHECK(rcl_timer_fini(&heartbeat_timer));
-    RCCHECK(rcl_timer_fini(&motor_position_timer));
-    RCCHECK(rcl_timer_fini(&distance_sensors_timer));
-    RCCHECK(rcl_timer_fini(&led_state_timer));
-    RCCHECK(rcl_node_fini(&node));
-    RCCHECK(rclc_support_fini(&support));
-    RCCHECK(rcl_init_options_fini(&init_options));
-
     vTaskDelete(NULL);
 }
-
 
 void Shelfbot::begin()
 {
     ESP_LOGI(TAG, "Starting Shelfbot");
+    instance = this; // Set singleton instance
 
     // Initialize peripherals
     led_control_init();
@@ -337,18 +358,14 @@ void Shelfbot::begin()
         vTaskDelay(2000 / portTICK_PERIOD_MS);
     }
     if (!time_synchronized) {
-        ESP_LOGE(TAG, "Failed to synchronize time. Continuing without real time.");
+        ESP_LOGW(TAG, "Failed to synchronize time. Continuing without real time.");
     }
 
     start_webserver();
     initialise_mdns();
 
-    if (query_mdns_host("gentoo-laptop")) {
-        xTaskCreate(micro_ros_task_wrapper, "micro_ros_task", 16000, this, 5, NULL);
-        sensor_control_start_task();
-    } else {
-        ESP_LOGE(TAG, "Could not find micro-ROS agent. Aborting firmware.");
-    }
+    xTaskCreate(micro_ros_task_wrapper, "micro_ros_task", 16000, this, 5, NULL);
+    sensor_control_start_task();
 
     ESP_LOGI(TAG, "Shelfbot initialization complete. Returning to app_main.");
 }

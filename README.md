@@ -68,6 +68,38 @@ The firmware is organized into modular, reusable ESP-IDF components to promote s
 *   **`wifi_station`**: Manages the Wi-Fi connection.
 *   **`http_server`**: Provides a REST API for basic troubleshooting and manual control.
 
+### Micro-ROS Agent Connection Recovery
+
+The firmware implements a resilient state machine to manage the connection to the micro-ROS agent, ensuring that the robot can recover from network dropouts or agent restarts. This makes the system more robust for long-running operations.
+
+The state machine consists of three states:
+
+1.  **`WAITING_AGENT`**: In this initial state, the firmware actively searches for the micro-ROS agent on the network using mDNS. Once the agent is discovered, it attempts to establish a connection.
+2.  **`AGENT_CONNECTED`**: After a successful connection, the firmware transitions to this state. It creates all the necessary ROS 2 publishers, subscribers, and timers. The firmware remains in this state, publishing and receiving messages, as long as the connection is healthy. Any communication error (e.g., a failed `rcl_publish` call) will trigger a transition to the `AGENT_DISCONNECTED` state.
+3.  **`AGENT_DISCONNECTED`**: If the connection is lost, the firmware enters this state. It safely tears down all ROS 2 entities (publishers, subscribers, etc.) and cleans up the connection. It then transitions back to the `WAITING_AGENT` state to begin the discovery and reconnection process again.
+
+This cycle ensures that the firmware can operate autonomously and will always attempt to re-establish communication with the ROS 2 system whenever possible.
+
+The following log snippet shows the recovery mechanism in action. The firmware detects a publishing error, disconnects, tears down the ROS 2 entities, and then successfully reconnects to the agent.
+
+```
+E (47105) shelfbot: Error publishing heartbeat message
+W (53242) shelfbot: State: AGENT_DISCONNECTED.
+W (53243) shelfbot: Destroying entities.
+W (61287) shelfbot: RCL soft error in rcl_subscription_fini(&motor_command_subscriber, &node): 1
+...
+W (103509) shelfbot: RCL soft error in rcl_node_fini(&node): 1
+W (103510) shelfbot: Tearing down transport.
+I (103514) shelfbot: Transitioning to WAITING_AGENT
+I (104516) shelfbot: State: WAITING_AGENT
+I (104517) shelfbot: Querying for mDNS host: gentoo-laptop.local
+I (104792) shelfbot: mDNS host 'gentoo-laptop.local' found at IP: 192.168.0.80
+I (104792) shelfbot: Agent found, attempting to connect...
+I (104997) shelfbot: Successfully connected to agent.
+I (106997) shelfbot: State: AGENT_CONNECTED (creating entities)
+I (107180) shelfbot: Entities created successfully.
+```
+
 ---
 
 ## Hardware Resource Allocation
