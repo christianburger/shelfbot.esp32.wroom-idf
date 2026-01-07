@@ -1,6 +1,7 @@
 idf_component_register(
         SRCS
-        "tof_sensor_driver.cpp"
+        "ultrasonic_sensor.cpp"
+        "tof_sensor.cpp"
         "sensor_control.cpp"
         INCLUDE_DIRS
         "include"

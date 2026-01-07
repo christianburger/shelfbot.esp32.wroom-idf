@@ -9,10 +9,11 @@ BASE_DIR="components/sensor_control"
 
 FILES=(
     "CMakeLists.txt"
-    "sensor_control.cpp"
-    "tof_sensor_driver.cpp"
-    "tof_sensor_driver.h"
-    "include/sensor_control.h"
+    "ultrasonic_sensor.cpp"
+    "tof_sensor.cpp"
+    "ultrasonic_sensor.h"
+    "tof_sensor.h"
+    "include/sensor_common.h"
 )
 
 echo "Checking sensor_control component structure..."
@@ -42,3 +43,8 @@ done
 
 echo
 echo "sensor_control component structure is valid."
+
+
+
+
+
