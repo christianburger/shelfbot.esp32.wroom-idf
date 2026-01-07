@@ -574,7 +574,7 @@ void ToFSensorManager::reading_task(void* param) {
         vTaskDelay(pdMS_TO_TICKS(interval_ms));
     }
 
-    vTaskDelete(NULL);
+    vTaskDelete(nullptr);
 }
 
 bool ToFSensorManager::get_latest_readings(std::vector<Reading>& readings) {

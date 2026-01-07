@@ -50,3 +50,4 @@ components/sensor_control/.idea/
 dependencies.lock
 
 
+.clangd
