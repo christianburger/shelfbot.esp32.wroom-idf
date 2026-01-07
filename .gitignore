@@ -45,3 +45,8 @@ Thumbs.db
 *.priv
 esp32_serial.log
 doc/
+
+components/sensor_control/.idea/ 
+dependencies.lock
+
+

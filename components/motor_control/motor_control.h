@@ -13,7 +13,7 @@
 // --- Hardware Configuration ---
 #define NUM_MOTORS 6
 #define STEPS_PER_REVOLUTION 200.0 // For standard 1.8-degree stepper motors
-#define MICROSTEPPING 16.0
+#define MICROSTEPPING 8.0
 #define GEAR_RATIO 1.0
 
 // --- Conversion Factors ---
