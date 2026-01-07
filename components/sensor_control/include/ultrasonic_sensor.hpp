@@ -3,7 +3,7 @@
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
-#include "sensor_common.h"  // Shared types
+#include "sensor_common.hpp"  // Shared types
 #include "driver/gpio.h"    // For gpio_num_t
 #include <functional>       // For std::function
 

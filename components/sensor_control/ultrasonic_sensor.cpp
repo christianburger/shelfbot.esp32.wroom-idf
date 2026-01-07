@@ -1,5 +1,5 @@
 // Corrected ultrasonic_sensor.cpp
-#include "ultrasonic_sensor.h"
+#include "ultrasonic_sensor.hpp"
 #include "esp_log.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"

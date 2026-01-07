@@ -1,4 +1,4 @@
-#include "sensor_control.h"
+#include "sensor_control.hpp"
 #include "esp_log.h"
 #include "freertos/task.h"
 #include "freertos/semphr.h"

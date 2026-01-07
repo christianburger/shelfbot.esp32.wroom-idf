@@ -1,4 +1,4 @@
-#include "motor_control.h"
+#include "motor_control.hpp"
 #include "driver/gpio.h" // For gpio_pad_select_gpio
 
 static const char* TAG = "motor_control";

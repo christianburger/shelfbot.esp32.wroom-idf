@@ -1,5 +1,5 @@
 // Updated tof_sensor.cpp with interrupt support
-#include "tof_sensor.h"
+#include "tof_sensor.hpp"
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "driver/gpio.h"

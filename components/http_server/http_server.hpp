@@ -1,7 +1,7 @@
 #ifndef HTTP_SERVER_H
 #define HTTP_SERVER_H
 
-#include "motor_control.h"
+#include "motor_control.hpp"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "cJSON.h"

@@ -1,5 +1,5 @@
-#include "shelfbot.h"
-#include "sensor_control.h"
+#include "shelfbot.hpp"
+#include "sensor_control.hpp"
 #include <rcl/allocator.h>
 #include <rmw_microros/init_options.h>
 

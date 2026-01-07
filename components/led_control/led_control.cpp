@@ -1,4 +1,4 @@
-#include "led_control.h"
+#include "led_control.hpp"
 #include "driver/gpio.h"
 
 // Most ESP32-WROOM-32 boards have the built-in LED on GPIO 2.

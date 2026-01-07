@@ -12,7 +12,7 @@
 #include "freertos/task.h"
 #include "esp_err.h"
 #include "esp_timer.h"
-#include "sensor_common.h"  // New include for shared types
+#include "sensor_common.hpp"  // New include for shared types
 
 // ============================================================================
 // Constants (MUST match cpp name)

@@ -1,4 +1,4 @@
-#include "wifi_station.h"
+#include "wifi_station.hpp"
 
 // Define a tag for logging
 static const char *TAG = "wifi station";

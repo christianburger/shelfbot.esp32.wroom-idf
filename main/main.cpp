@@ -1,6 +1,6 @@
-#include "shelfbot.h"
-#include "sensor_control.h"
-#include "motor_control.h"
+#include "shelfbot.hpp"
+#include "sensor_control.hpp"
+#include "motor_control.hpp"
 #include "esp_log.h"
 
 // The ESP-IDF framework requires a C-style `app_main` entry point.

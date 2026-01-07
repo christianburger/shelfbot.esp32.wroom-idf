@@ -14,11 +14,11 @@
 #include "mdns.h"
 #include "esp_sntp.h"
 
-#include "wifi_station.h"
-#include "motor_control.h"
-#include "http_server.h"
-#include "led_control.h"
-#include "sensor_control.h"
+#include "wifi_station.hpp"
+#include "motor_control.hpp"
+#include "http_server.hpp"
+#include "led_control.hpp"
+#include "sensor_control.hpp"
 
 #include <rcl/rcl.h>
 #include <rclc/rclc.h>
