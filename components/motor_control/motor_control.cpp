@@ -18,9 +18,6 @@ void motor_control_begin() {
     engine.init();
     
     for (int i = 0; i < NUM_MOTORS; i++) {
-        // --- FIX: Forcefully configure pins as GPIO ---
-        // This is crucial for strapping pins (like 15, 12, 5, 4) to ensure they
-        // are released from their boot-time functions and can be controlled by peripherals.
         gpio_pad_select_gpio((gpio_num_t)motorPins[i][0]); // PULSE Pin
         gpio_pad_select_gpio((gpio_num_t)motorPins[i][1]); // DIR Pin
 
