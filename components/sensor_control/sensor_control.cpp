@@ -20,7 +20,8 @@ static gptimer_handle_t shared_timeout_timer = NULL;
 static volatile int active_sensor_index = -1;
 
 static const int sensor_pins[NUM_SENSORS][2] = {
-    {21, 34}, {22, 35}, {23, 36}, {32, 39}
+    {32, 34},
+    {0, 35}
 };
 
 // --- State Machine and Data ---

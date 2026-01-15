@@ -3,7 +3,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/queue.h"
 
-#define NUM_SENSORS 4
+#define NUM_SENSORS 2
 
 // Queue for sending sensor data to the ROS publisher
 extern QueueHandle_t distance_data_queue;

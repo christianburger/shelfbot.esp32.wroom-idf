@@ -7,7 +7,7 @@
 #include "driver/gpio.h"    // For gpio_num_t
 #include <functional>       // For std::function
 
-#define NUM_ULTRASONIC_SENSORS 4  // Configurable, but hardcoded for now
+#define NUM_ULTRASONIC_SENSORS 2
 
 // Queue for sending sensor data to the ROS publisher (use common Reading)
 extern QueueHandle_t distance_data_queue;

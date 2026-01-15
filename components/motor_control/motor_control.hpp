@@ -11,7 +11,8 @@
 #include <math.h> // For M_PI
 
 // --- Hardware Configuration ---
-#define NUM_MOTORS 6
+#define NUM_MOTORS 5
+
 #define STEPS_PER_REVOLUTION 200.0 // For standard 1.8-degree stepper motors
 #define MICROSTEPPING 8.0
 #define GEAR_RATIO 1.0

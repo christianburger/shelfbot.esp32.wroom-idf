@@ -6,8 +6,13 @@ static const char* TAG = "motor_control";
 // Global stepper motor objects and configuration
 static FastAccelStepperEngine engine = FastAccelStepperEngine();
 static FastAccelStepper* steppers[NUM_MOTORS] = {nullptr};
+
 static const int motorPins[NUM_MOTORS][2] = {
-    {27, 26}, {14, 12}, {13, 15}, {4, 16}, {17, 5}, {18, 19}
+    {27, 26},
+    {14, 33},
+    {13, 25},
+    {4, 16},
+    {17, 23}
 };
 
 // Conversion factor from radians to steps. This is the core of the unit standardization.
