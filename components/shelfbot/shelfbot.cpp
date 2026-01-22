@@ -10,7 +10,6 @@ void init_multi_array(std_msgs__msg__Float32MultiArray& msg, float* data_buffer,
     msg.data.data = data_buffer;
     msg.data.capacity = capacity;
     msg.data.size = 0;
-    // Initialize layout
     msg.layout.dim.data = NULL;
     msg.layout.dim.size = 0;
     msg.layout.dim.capacity = 0;
@@ -37,7 +36,7 @@ bool Shelfbot::query_mdns_host(const char * host_name)
     esp_ip4_addr_t addr;
     addr.addr = 0;
 
-    esp_err_t err = mdns_query_a(host_name, 2000,  &addr); // 2 second timeout
+    esp_err_t err = mdns_query_a(host_name, 2000,  &addr);
 
     if (err) {
         if (err == ESP_ERR_NOT_FOUND) {
@@ -123,6 +122,27 @@ void Shelfbot::led_state_timer_callback(rcl_timer_t * timer, int64_t last_call_t
     }
 }
 
+void Shelfbot::tof_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
+    (void) last_call_time;
+    if (timer != NULL) {
+        std::vector<SensorCommon::Reading> readings;
+        if (ToFSensorManager::instance().get_latest_readings(readings)) {
+            if (!readings.empty() && readings[0].valid) {
+                tof_distance_msg.data = readings[0].distance_cm;
+            } else {
+                tof_distance_msg.data = -1.0f;
+            }
+        } else {
+            tof_distance_msg.data = -1.0f;
+        }
+
+        if (rcl_publish(&tof_distance_publisher, &tof_distance_msg, NULL) != RCL_RET_OK) {
+            ESP_LOGE(TAG, "Error publishing ToF distance");
+            agent_connected = false;
+        }
+    }
+}
+
 void Shelfbot::motor_command_subscription_callback(const void * msin) {
     const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msin;
     if (msg->data.size > NUM_MOTORS) {
@@ -169,6 +189,9 @@ void Shelfbot::distance_sensors_timer_callback_wrapper(rcl_timer_t* timer, int64
 void Shelfbot::led_state_timer_callback_wrapper(rcl_timer_t* timer, int64_t last_call_time) {
     if (instance) instance->led_state_timer_callback(timer, last_call_time);
 }
+void Shelfbot::tof_timer_callback_wrapper(rcl_timer_t* timer, int64_t last_call_time) {
+    if (instance) instance->tof_timer_callback(timer, last_call_time);
+}
 void Shelfbot::motor_command_subscription_callback_wrapper(const void* msin) {
     if (instance) instance->motor_command_subscription_callback(msin);
 }
@@ -191,6 +214,7 @@ bool Shelfbot::create_entities() {
     RCCHECK(rclc_publisher_init_default(&motor_position_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "/shelfbot_firmware/motor_positions"));
     RCCHECK(rclc_publisher_init_default(&distance_sensors_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "/shelfbot_firmware/distance_sensors"));
     RCCHECK(rclc_publisher_init_default(&led_state_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "/shelfbot_firmware/led_state"));
+    RCCHECK(rclc_publisher_init_default(&tof_distance_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), "/shelfbot_firmware/tof_distance"));
 
     // Create Subscribers
     RCCHECK(rclc_subscription_init_default(&motor_command_subscriber, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "/shelfbot_firmware/motor_command"));
@@ -202,21 +226,24 @@ bool Shelfbot::create_entities() {
     RCCHECK(rclc_timer_init_default(&motor_position_timer, &support, RCL_MS_TO_NS(500), motor_position_timer_callback_wrapper));
     RCCHECK(rclc_timer_init_default(&distance_sensors_timer, &support, RCL_MS_TO_NS(1000), distance_sensors_timer_callback_wrapper));
     RCCHECK(rclc_timer_init_default(&led_state_timer, &support, RCL_MS_TO_NS(2000), led_state_timer_callback_wrapper));
+    RCCHECK(rclc_timer_init_default(&tof_timer, &support, RCL_MS_TO_NS(100), tof_timer_callback_wrapper));
 
     // Initialize message memory
     init_multi_array(motor_command_msg, motor_command_data, NUM_MOTORS);
     init_multi_array(motor_position_msg, motor_position_data, NUM_MOTORS);
     init_multi_array(set_speed_msg, set_speed_data, NUM_MOTORS);
     init_multi_array(distance_sensors_msg, distance_sensors_data, NUM_SENSORS);
+    tof_distance_msg.data = 0.0f;
 
     // Create Executor
-    unsigned int num_handles = 4 + 3; // 4 timers, 3 subscribers
+    unsigned int num_handles = 5 + 3; // 5 timers, 3 subscribers
     RCCHECK(rclc_executor_init(&executor, &support.context, num_handles, &allocator));
 
     RCCHECK(rclc_executor_add_timer(&executor, &heartbeat_timer));
     RCCHECK(rclc_executor_add_timer(&executor, &motor_position_timer));
     RCCHECK(rclc_executor_add_timer(&executor, &distance_sensors_timer));
     RCCHECK(rclc_executor_add_timer(&executor, &led_state_timer));
+    RCCHECK(rclc_executor_add_timer(&executor, &tof_timer));
     RCCHECK(rclc_executor_add_subscription(&executor, &motor_command_subscriber, &motor_command_msg, &motor_command_subscription_callback_wrapper, ON_NEW_DATA));
     RCCHECK(rclc_executor_add_subscription(&executor, &set_speed_subscriber, &set_speed_msg, &set_speed_subscription_callback_wrapper, ON_NEW_DATA));
     RCCHECK(rclc_executor_add_subscription(&executor, &led_subscriber, &led_msg, &led_subscription_callback_wrapper, ON_NEW_DATA));
@@ -234,10 +261,12 @@ void Shelfbot::destroy_entities() {
     RCSOFTCHECK(rcl_publisher_fini(&motor_position_publisher, &node));
     RCSOFTCHECK(rcl_publisher_fini(&distance_sensors_publisher, &node));
     RCSOFTCHECK(rcl_publisher_fini(&led_state_publisher, &node));
+    RCSOFTCHECK(rcl_publisher_fini(&tof_distance_publisher, &node));
     RCSOFTCHECK(rcl_timer_fini(&heartbeat_timer));
     RCSOFTCHECK(rcl_timer_fini(&motor_position_timer));
     RCSOFTCHECK(rcl_timer_fini(&distance_sensors_timer));
     RCSOFTCHECK(rcl_timer_fini(&led_state_timer));
+    RCSOFTCHECK(rcl_timer_fini(&tof_timer));
     RCSOFTCHECK(rcl_node_fini(&node));
 }
 
@@ -253,7 +282,6 @@ void Shelfbot::micro_ros_task_impl()
     bool entities_created = false;
 
     while(1) {
-        // Always get a fresh allocator
         allocator = rcl_get_default_allocator();
 
         switch(state) {
@@ -272,7 +300,7 @@ void Shelfbot::micro_ros_task_impl()
                         state = AGENT_CONNECTED;
                     } else {
                         ESP_LOGW(TAG, "Connection to agent failed.");
-                        RCSOFTCHECK(rclc_support_fini(&support)); // Clean up partial initialization
+                        RCSOFTCHECK(rclc_support_fini(&support));
                     }
                     RCSOFTCHECK(rcl_init_options_fini(&init_options));
                 }
@@ -288,11 +316,10 @@ void Shelfbot::micro_ros_task_impl()
                     } else {
                         ESP_LOGE(TAG, "Failed to create entities.");
                         state = AGENT_DISCONNECTED;
-                        break; 
+                        break;
                     }
                 }
 
-                // Spin the executor
                 if (rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)) != RCL_RET_OK) {
                     ESP_LOGE(TAG, "Executor spin failed, disconnecting.");
                     agent_connected = false;
@@ -301,26 +328,25 @@ void Shelfbot::micro_ros_task_impl()
                 if (!agent_connected) {
                     state = AGENT_DISCONNECTED;
                 }
-                
+
                 vTaskDelay(pdMS_TO_TICKS(100));
                 break;
 
             case AGENT_DISCONNECTED:
                 ESP_LOGW(TAG, "State: AGENT_DISCONNECTED.");
-                
+
                 if (entities_created) {
                     ESP_LOGW(TAG, "Destroying entities.");
                     destroy_entities();
                     entities_created = false;
                 }
 
-                // First, tear down the transport layer to prevent blocking
                 ESP_LOGW(TAG, "Tearing down transport.");
                 RCSOFTCHECK(rclc_support_fini(&support));
 
                 state = WAITING_AGENT;
                 ESP_LOGI(TAG, "Transitioning to WAITING_AGENT");
-                vTaskDelay(pdMS_TO_TICKS(1000)); // Wait before trying to reconnect
+                vTaskDelay(pdMS_TO_TICKS(1000));
                 break;
         }
     }
@@ -330,12 +356,44 @@ void Shelfbot::micro_ros_task_impl()
 void Shelfbot::begin()
 {
     ESP_LOGI(TAG, "Starting Shelfbot");
-    instance = this; // Set singleton instance
+    instance = this;
 
     // Initialize peripherals
     led_control_init();
     motor_control_begin();
     sensor_control_init();
+
+    // Initialize ToF sensor
+    ESP_LOGI(TAG, "Initializing ToF sensor...");
+
+    ToFArrayConfig tof_array_config = {
+        .i2c_port = I2C_NUM_0,
+        .i2c_freq_hz = 400000,
+        .sda_gpio = 21,
+        .scl_gpio = 22,
+        .enable_pullups = true,
+        .num_sensors = 1
+    };
+
+    ToFSensorConfig tof_sensor_config = {
+        .i2c_port = I2C_NUM_0,
+        .i2c_address = 0x29,
+        .xshut_gpio = 255,
+        .int_gpio = GPIO_NUM_MAX,
+        .range_mm = 2000,
+        .timing_budget_ms = 33
+    };
+
+    if (!ToFSensorManager::instance().configure(tof_array_config, &tof_sensor_config, 1)) {
+        ESP_LOGE(TAG, "Failed to configure ToF sensor!");
+    } else {
+        ESP_LOGI(TAG, "ToF sensor configured successfully");
+        if (!ToFSensorManager::instance().start_reading_task(100, 5)) {
+            ESP_LOGE(TAG, "Failed to start ToF reading task!");
+        } else {
+            ESP_LOGI(TAG, "ToF reading task started");
+        }
+    }
 
     // Initialize networking
     esp_err_t ret = nvs_flash_init();
@@ -347,7 +405,7 @@ void Shelfbot::begin()
 
     ESP_ERROR_CHECK(esp_netif_init());
     ESP_ERROR_CHECK(esp_event_loop_create_default());
-    
+
     wifi_init_sta();
 
     initialize_sntp();

@@ -2,7 +2,7 @@
 
 #include <string.h>
 #include <unistd.h>
-#include <inttypes.h> // For PRId32 macro
+#include <inttypes.h>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -16,9 +16,10 @@
 
 #include "wifi_station.hpp"
 #include "motor_control.hpp"
-#include "http_server.hpp"
+#include "../http_server/include/http_server.hpp"
 #include "led_control.hpp"
 #include "sensor_control.hpp"
+#include "tof_sensor.hpp"
 
 #include <rcl/rcl.h>
 #include <rclc/rclc.h>
@@ -31,9 +32,8 @@
 #include <std_msgs/msg/float32.h>
 #include <std_msgs/msg/float32_multi_array.h>
 
-#include <time.h> // for struct timeval
+#include <time.h>
 
-// Redefine RCCHECK for methods that return bool
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){ESP_LOGE(TAG, "RCL error in %s: %ld", #fn, temp_rc); return false;}}
 #define RCCHECK_VOID(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){ESP_LOGE(TAG, "RCL error in %s: %ld", #fn, temp_rc);}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){ESP_LOGW(TAG, "RCL soft error in %s: %ld", #fn, temp_rc);}}
@@ -59,32 +59,41 @@ private:
     rclc_support_t support;
     rcl_node_t node;
     rclc_executor_t executor;
-    
+
     // ROS Timers
     rcl_timer_t heartbeat_timer;
     rcl_timer_t motor_position_timer;
     rcl_timer_t distance_sensors_timer;
     rcl_timer_t led_state_timer;
+    rcl_timer_t tof_timer;
 
     // ROS Publishers
     rcl_publisher_t heartbeat_publisher;
     std_msgs__msg__Int32 heartbeat_msg;
+
     rcl_publisher_t motor_position_publisher;
     std_msgs__msg__Float32MultiArray motor_position_msg;
     float motor_position_data[NUM_MOTORS];
+
     rcl_publisher_t distance_sensors_publisher;
     std_msgs__msg__Float32MultiArray distance_sensors_msg;
     float distance_sensors_data[NUM_SENSORS];
+
     rcl_publisher_t led_state_publisher;
     std_msgs__msg__Bool led_state_msg;
+
+    rcl_publisher_t tof_distance_publisher;
+    std_msgs__msg__Float32 tof_distance_msg;
 
     // ROS Subscribers
     rcl_subscription_t motor_command_subscriber;
     std_msgs__msg__Float32MultiArray motor_command_msg;
     float motor_command_data[NUM_MOTORS];
+
     rcl_subscription_t set_speed_subscriber;
     std_msgs__msg__Float32MultiArray set_speed_msg;
     float set_speed_data[NUM_MOTORS];
+
     rcl_subscription_t led_subscriber;
     std_msgs__msg__Bool led_msg;
 
@@ -99,14 +108,15 @@ private:
     // Static members for C-style callbacks
     static bool time_synchronized;
     static bool led_state;
-    static Shelfbot* instance; // Singleton instance pointer
+    static Shelfbot* instance;
 
-    // Static callbacks for C APIs that wrap member functions
+    // Static callbacks
     static void time_sync_notification_cb(struct timeval *tv);
     static void heartbeat_timer_callback_wrapper(rcl_timer_t * timer, int64_t last_call_time);
     static void motor_position_timer_callback_wrapper(rcl_timer_t * timer, int64_t last_call_time);
     static void distance_sensors_timer_callback_wrapper(rcl_timer_t * timer, int64_t last_call_time);
     static void led_state_timer_callback_wrapper(rcl_timer_t * timer, int64_t last_call_time);
+    static void tof_timer_callback_wrapper(rcl_timer_t * timer, int64_t last_call_time);
     static void motor_command_subscription_callback_wrapper(const void * msin);
     static void set_speed_subscription_callback_wrapper(const void * msin);
     static void led_subscription_callback_wrapper(const void * msin);
@@ -117,6 +127,7 @@ private:
     void motor_position_timer_callback(rcl_timer_t * timer, int64_t last_call_time);
     void distance_sensors_timer_callback(rcl_timer_t * timer, int64_t last_call_time);
     void led_state_timer_callback(rcl_timer_t * timer, int64_t last_call_time);
+    void tof_timer_callback(rcl_timer_t * timer, int64_t last_call_time);
     void motor_command_subscription_callback(const void * msin);
     void set_speed_subscription_callback(const void * msin);
     void led_subscription_callback(const void * msin);
