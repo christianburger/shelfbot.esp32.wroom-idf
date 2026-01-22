@@ -198,10 +198,10 @@ bool Shelfbot::create_entities() {
     RCCHECK(rclc_subscription_init_default(&led_subscriber, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "/shelfbot_firmware/led"));
 
     // Create Timers
-    RCCHECK(rclc_timer_init_default2(&heartbeat_timer, &support, RCL_MS_TO_NS(2000), heartbeat_timer_callback_wrapper, true));
-    RCCHECK(rclc_timer_init_default2(&motor_position_timer, &support, RCL_MS_TO_NS(500), motor_position_timer_callback_wrapper, true));
-    RCCHECK(rclc_timer_init_default2(&distance_sensors_timer, &support, RCL_MS_TO_NS(1000), distance_sensors_timer_callback_wrapper, true));
-    RCCHECK(rclc_timer_init_default2(&led_state_timer, &support, RCL_MS_TO_NS(2000), led_state_timer_callback_wrapper, true));
+    RCCHECK(rclc_timer_init_default(&heartbeat_timer, &support, RCL_MS_TO_NS(2000), heartbeat_timer_callback_wrapper));
+    RCCHECK(rclc_timer_init_default(&motor_position_timer, &support, RCL_MS_TO_NS(500), motor_position_timer_callback_wrapper));
+    RCCHECK(rclc_timer_init_default(&distance_sensors_timer, &support, RCL_MS_TO_NS(1000), distance_sensors_timer_callback_wrapper));
+    RCCHECK(rclc_timer_init_default(&led_state_timer, &support, RCL_MS_TO_NS(2000), led_state_timer_callback_wrapper));
 
     // Initialize message memory
     init_multi_array(motor_command_msg, motor_command_data, NUM_MOTORS);
