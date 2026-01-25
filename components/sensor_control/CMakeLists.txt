@@ -1,13 +1,14 @@
 idf_component_register(
-        SRCS
-        "ultrasonic_sensor.cpp"
-        "tof_sensor.cpp"
-        "sensor_control.cpp"
-        INCLUDE_DIRS
-        "include"
-        "."
-        REQUIRES
-        driver
-        esp_timer
-        freertos
+  SRCS
+  "ultrasonic_sensor.cpp"
+  "tof_sensor.cpp"
+  "sensor_control.cpp"
+  INCLUDE_DIRS
+  "include"
+  "."
+  REQUIRES
+  vl53l0x_driver
+  driver
+  esp_timer
+  freertos
 )

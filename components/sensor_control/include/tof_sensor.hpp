@@ -1,150 +1,111 @@
-// Updated tof_sensor.h with interrupt support
+// tof_sensor.hpp - Refactored with comprehensive debugging
 #pragma once
 
-#include <cstdint>
-#include <functional>
-#include <vector>
-
+#include <stdint.h>
+#include <stdbool.h>
+#include "vl53l0x.hpp"
+#include "sensor_common.hpp"
+#include "freertos/FreeRTOS.h"
+#include "freertos/task.h"
+#include "freertos/semphr.h"
 #include "driver/i2c.h"
 #include "driver/gpio.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/semphr.h"
-#include "freertos/task.h"
-#include "esp_err.h"
+#include "esp_log.h"
 #include "esp_timer.h"
-#include "sensor_common.hpp"  // New include for shared types
+#include <vector>
+#include <memory>
+#include <functional>
 
-// ============================================================================
-// Constants (MUST match cpp name)
-// ============================================================================
-
-namespace ToFConstants {
-
-    constexpr uint8_t DEFAULT_ADDRESS = 0x29;
-    constexpr uint8_t ADDRESS_MIN     = 0x08;
-    constexpr uint8_t ADDRESS_MAX     = 0x77;
-
-    constexpr uint16_t MIN_TIMING_BUDGET_MS = 20;
-    constexpr uint16_t MAX_TIMING_BUDGET_MS = 200;
-}
-
-// ============================================================================
-// Data Types (Map to common Reading)
-// ============================================================================
-
-using Reading = SensorCommon::Reading;  // Alias for unified reading
+#define NUM_TOF_SENSORS 1
 
 // ============================================================================
 // Configuration Structures
 // ============================================================================
 
-struct ToFSensorConfig {
-    i2c_port_t i2c_port;
-    uint8_t    i2c_address;
-    uint8_t    xshut_gpio;        // 255 if unused
-    gpio_num_t int_gpio = GPIO_NUM_MAX;  // Interrupt pin, GPIO_NUM_MAX if polling
-    uint16_t   range_mm;
-    uint16_t   timing_budget_ms;
-    bool       interrupt_active_high = false;  // Default active low
-};
-
 struct ToFArrayConfig {
     i2c_port_t i2c_port;
-    uint32_t   i2c_freq_hz;
-    int        sda_gpio;
-    int        scl_gpio;
-    bool       enable_pullups;
-    uint8_t    num_sensors;
+    uint32_t i2c_freq_hz;
+    gpio_num_t sda_gpio;
+    gpio_num_t scl_gpio;
+    bool enable_pullups;
+    uint8_t num_sensors;
+};
+
+struct ToFSensorConfig {
+    i2c_port_t i2c_port;
+    uint8_t i2c_address;
+    gpio_num_t xshut_gpio;
+    gpio_num_t int_gpio;
+    uint16_t range_mm;
+    uint32_t timing_budget_ms;
 };
 
 // ============================================================================
-// ToFSensor
-// ============================================================================
-
-class ToFSensor {
-public:
-    explicit ToFSensor(const ToFSensorConfig& config);
-    ~ToFSensor();
-
-    bool init();
-    bool read_single(Reading& reading, uint32_t timeout_ms = SensorCommon::DEFAULT_TIMEOUT_MS);
-
-    bool start_continuous();
-    bool stop_continuous();
-
-    bool set_address(uint8_t new_address);
-    uint8_t get_address() const;
-
-private:
-    bool write_register(uint8_t reg, uint8_t value);
-    bool write_register_16(uint8_t reg, uint16_t value);
-    bool read_register(uint8_t reg, uint8_t& value);
-    bool read_register_16(uint8_t reg, uint16_t& value);
-
-    bool set_signal_rate_limit(float limit_mcps);
-    bool get_spad_info(uint8_t& count, bool& type_is_aperture);
-    bool set_timing_budget(uint16_t budget_ms);
-    bool configure_interrupt();
-
-    static void IRAM_ATTR interrupt_handler(void* arg);
-
-private:
-    ToFSensorConfig   config_;
-    bool              initialized_;
-    bool              continuous_mode_;
-    SemaphoreHandle_t i2c_mutex_;
-    SemaphoreHandle_t measurement_sem_;
-};
-
-// ============================================================================
-// ToFSensorArray
+// ToFSensorArray - Manages multiple VL53L0X sensors
 // ============================================================================
 
 class ToFSensorArray {
 public:
-    explicit ToFSensorArray(const ToFArrayConfig& config);
+    explicit ToFSensorArray(uint8_t num_sensors = NUM_TOF_SENSORS);
     ~ToFSensorArray();
 
-    bool init();
-    bool add_sensor(const ToFSensorConfig& sensor_config);
-    bool read_all_single(std::vector<Reading>& readings, uint32_t timeout_ms = SensorCommon::DEFAULT_TIMEOUT_MS);
+    // Initialize I2C bus (only once for all sensors)
+    bool init(const ToFArrayConfig& array_config);
+
+    // Add individual sensor to the array
+    bool add_sensor(uint8_t index, const ToFSensorConfig& sensor_config);
+
+    // Start continuous ranging mode for all sensors
+    bool start_continuous();
+
+    // Read from all sensors
+    bool read_all(std::vector<SensorCommon::Reading>& readings, uint32_t timeout_ms = SensorCommon::DEFAULT_TIMEOUT_MS);
 
 private:
-    bool init_i2c_bus();
-    bool program_sensor_addresses();
-
-private:
-    ToFArrayConfig    config_;
-    ToFSensor**       sensors_;
-    uint8_t           sensor_count_;
-    bool              initialized_;
+    std::vector<std::shared_ptr<VL53L0X>> sensors_;
+    uint8_t num_sensors_;
+    bool initialized_;
+    bool i2c_installed_;
+    i2c_port_t i2c_port_;
     SemaphoreHandle_t array_mutex_;
 };
 
 // ============================================================================
-// ToFSensorManager (ORDER MATTERS)
+// ToFSensorManager - Singleton manager with background task
 // ============================================================================
 
 class ToFSensorManager {
 public:
     static ToFSensorManager& instance();
 
+    // Configure the manager with array and sensor configs
     bool configure(const ToFArrayConfig& array_config,
                    const ToFSensorConfig* sensor_configs,
                    uint8_t num_sensors);
 
-    bool start_reading_task(uint32_t read_interval_ms,
-                            UBaseType_t priority);
+    // Start background reading task
+    bool start_reading_task(uint32_t read_interval_ms, UBaseType_t priority);
 
-    bool get_latest_readings(std::vector<Reading>& readings);
+    // Get the latest readings (thread-safe)
+    bool get_latest_readings(std::vector<SensorCommon::Reading>& readings);
 
+    // Control the reading task
     void pause();
     void resume();
     void stop();
 
+    // Optional callback for each reading cycle
+    void set_callback(std::function<void(const std::vector<SensorCommon::Reading>&)> cb) {
+        callback_ = cb;
+    }
+
 private:
     ToFSensorManager();
     ~ToFSensorManager();
+
+    // Prevent copying
+    ToFSensorManager(const ToFSensorManager&) = delete;
+    ToFSensorManager& operator=(const ToFSensorManager&) = delete;
 
     static void reading_task(void* param);
 
@@ -154,12 +115,11 @@ private:
     };
 
 private:
-    // ORDER MATCHES CONSTRUCTOR INITIALIZER LIST
-    ToFSensorArray*   array_;
-    std::vector<Reading> latest_readings_;  // Use vector for dynamic size
+    ToFSensorArray* array_;
+    std::vector<SensorCommon::Reading> latest_readings_;
     SemaphoreHandle_t data_mutex_;
-    TaskHandle_t      task_handle_;
-    bool              running_;
-    bool              paused_;
-    std::function<void(const std::vector<Reading>&)> callback_;
+    TaskHandle_t task_handle_;
+    bool running_;
+    bool paused_;
+    std::function<void(const std::vector<SensorCommon::Reading>&)> callback_;
 };

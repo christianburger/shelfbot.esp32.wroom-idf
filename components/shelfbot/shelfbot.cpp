@@ -353,71 +353,67 @@ void Shelfbot::micro_ros_task_impl()
     vTaskDelete(NULL);
 }
 
-void Shelfbot::begin()
-{
-    ESP_LOGI(TAG, "Starting Shelfbot");
-    instance = this;
+void Shelfbot::begin() {
+  // Initialize peripherals
+  led_control_init();
+  motor_control_begin();
+  sensor_control_init();
 
-    // Initialize peripherals
-    led_control_init();
-    motor_control_begin();
-    sensor_control_init();
+  // Initialize ToF sensor
+  ESP_LOGI(TAG, "Initializing ToF sensor...");
 
-    // Initialize ToF sensor
-    ESP_LOGI(TAG, "Initializing ToF sensor...");
+  ToFArrayConfig tof_array_config = {
+    .i2c_port = I2C_NUM_0,
+    .i2c_freq_hz = 400000,
+    .sda_gpio = GPIO_NUM_21,  // Fixed: Cast to gpio_num_t
+    .scl_gpio = GPIO_NUM_22,  // Fixed: Cast to gpio_num_t
+    .enable_pullups = true,
+    .num_sensors = 1
+};
 
-    ToFArrayConfig tof_array_config = {
-        .i2c_port = I2C_NUM_0,
-        .i2c_freq_hz = 400000,
-        .sda_gpio = 21,
-        .scl_gpio = 22,
-        .enable_pullups = true,
-        .num_sensors = 1
-    };
+  ToFSensorConfig tof_sensor_config = {
+    .i2c_port = I2C_NUM_0,
+    .i2c_address = 0x29,
+    .xshut_gpio = GPIO_NUM_NC,  // Fixed: Use GPIO_NUM_NC instead of 255
+    .int_gpio = GPIO_NUM_NC,    // Fixed: Use GPIO_NUM_NC (was GPIO_NUM_MAX)
+    .range_mm = 2000,
+    .timing_budget_ms = 33
+};
 
-    ToFSensorConfig tof_sensor_config = {
-        .i2c_port = I2C_NUM_0,
-        .i2c_address = 0x29,
-        .xshut_gpio = 255,
-        .int_gpio = GPIO_NUM_MAX,
-        .range_mm = 2000,
-        .timing_budget_ms = 33
-    };
+if (!ToFSensorManager::instance().configure(tof_array_config, &tof_sensor_config, 1)) {
+  ESP_LOGE(TAG, "Failed to configure ToF sensor!");
+} else {
+  ESP_LOGI(TAG, "ToF sensor configured successfully");
+  if (!ToFSensorManager::instance().start_reading_task(100, 5)) {
+      ESP_LOGE(TAG, "Failed to start ToF reading task!");
+  } else {
+      ESP_LOGI(TAG, "ToF reading task started");
+  }
+}
 
-    if (!ToFSensorManager::instance().configure(tof_array_config, &tof_sensor_config, 1)) {
-        ESP_LOGE(TAG, "Failed to configure ToF sensor!");
-    } else {
-        ESP_LOGI(TAG, "ToF sensor configured successfully");
-        if (!ToFSensorManager::instance().start_reading_task(100, 5)) {
-            ESP_LOGE(TAG, "Failed to start ToF reading task!");
-        } else {
-            ESP_LOGI(TAG, "ToF reading task started");
-        }
-    }
+// Initialize networking
+esp_err_t ret = nvs_flash_init();
+if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+   ESP_ERROR_CHECK(nvs_flash_erase());
+   ret = nvs_flash_init();
+}
+   ESP_ERROR_CHECK(ret);
 
-    // Initialize networking
-    esp_err_t ret = nvs_flash_init();
-    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-      ESP_ERROR_CHECK(nvs_flash_erase());
-      ret = nvs_flash_init();
-    }
-    ESP_ERROR_CHECK(ret);
+   ESP_ERROR_CHECK(esp_netif_init());
+   ESP_ERROR_CHECK(esp_event_loop_create_default());
 
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
+   wifi_init_sta();
 
-    wifi_init_sta();
-
-    initialize_sntp();
-    int retry = 0;
-    const int retry_count = 15;
-    while (!time_synchronized && ++retry < retry_count) {
+   initialize_sntp();
+   int retry = 0;
+   const int retry_count = 15;
+   while (!time_synchronized && ++retry < retry_count) {
         ESP_LOGI(TAG, "Waiting for system time to be set... (%d/%d)", retry, retry_count);
         vTaskDelay(2000 / portTICK_PERIOD_MS);
-    }
-    if (!time_synchronized) {
-        ESP_LOGW(TAG, "Failed to synchronize time. Continuing without real time.");
-    }
+   }
+   if (!time_synchronized) {
+      ESP_LOGW(TAG, "Failed to synchronize time. Continuing without real time.");
+   }
 
     start_webserver();
     initialise_mdns();
