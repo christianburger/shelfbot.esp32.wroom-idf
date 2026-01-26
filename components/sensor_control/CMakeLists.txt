@@ -8,6 +8,7 @@ idf_component_register(
   "."
   REQUIRES
   vl53l0x_driver
+  firmware_version
   driver
   esp_timer
   freertos

@@ -1,6 +1,12 @@
-    idf_component_register(    
-        SRCS "vl53l0x.cpp"    
-        INCLUDE_DIRS "include"    
-        REQUIRES "driver" 
-        "esp_timer"
+    idf_component_register(
+      SRCS
+      "vl53l0x.cpp"
+      "i2c_scanner.cpp"
+      INCLUDE_DIRS
+      "."
+      "include"
+      REQUIRES
+      driver
+      freertos
+      esp_timer
     )
