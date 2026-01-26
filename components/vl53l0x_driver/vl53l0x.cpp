@@ -1,12 +1,9 @@
-// vl53l0x.cpp - Complete implementation based on Pololu/ST libraries
-// Refactored for ESP-IDF with proper I2C handling (no extern C)
-// Copyright © 2019 Adrian Kennard, Andrews & Arnold Ltd. Modified for your project.
-
 #include "vl53l0x.hpp"
 #include "esp_timer.h"
 #include "esp_log.h"
 #include <driver/i2c.h>
 #include <driver/gpio.h>
+#include <inttypes.h>
 #include <cstring>
 #include <cstdlib>
 #include <vector>
@@ -248,7 +245,14 @@ std::shared_ptr<VL53L0X> VL53L0X::create(i2c_port_t port, gpio_num_t xshut, uint
 }
 
 const char* VL53L0X::init() {
-    if (readReg8Bit(IDENTIFICATION_MODEL_ID) != 0xEE) { return "Model ID not matching"; }
+    ESP_LOGI(TAG, "Starting VL53L0X initialization");
+
+    uint8_t model_id = readReg8Bit(IDENTIFICATION_MODEL_ID);
+    if (model_id != 0xEE) {
+        ESP_LOGE(TAG, "Model ID mismatch: expected 0xEE, got 0x%02" PRIX8, model_id);
+        return "Model ID not matching";
+    }
+    ESP_LOGI(TAG, "Model ID check passed: 0x%02" PRIX8, model_id);
 
     uint8_t buf_0x01 = 0x01;
     uint8_t buf_0x00 = 0x00;
@@ -258,19 +262,33 @@ const char* VL53L0X::init() {
     writeReg8Bit(0xFF, buf_0x01);
     writeReg8Bit(0x00, buf_0x00);
     pimpl->stop_variable = readReg8Bit(0x91);
+    ESP_LOGI(TAG, "Read stop_variable: 0x%02" PRIX8, pimpl->stop_variable);
     writeReg8Bit(0x00, buf_0x01);
     writeReg8Bit(0xFF, buf_0x00);
     writeReg8Bit(0x80, buf_0x00);
 
-    writeReg8Bit(MSRC_CONFIG_CONTROL, readReg8Bit(MSRC_CONFIG_CONTROL) | 0x12);
+    uint8_t msrc_control = readReg8Bit(MSRC_CONFIG_CONTROL);
+    ESP_LOGI(TAG, "Read MSRC_CONFIG_CONTROL: 0x%02" PRIX8, msrc_control);
+    writeReg8Bit(MSRC_CONFIG_CONTROL, msrc_control | 0x12);
 
-    setSignalRateLimit(0.25);
+    const char* rate_limit_result = setSignalRateLimit(0.25);
+    if (rate_limit_result != nullptr) {
+        ESP_LOGE(TAG, "setSignalRateLimit failed: %s", rate_limit_result);
+    } else {
+        ESP_LOGI(TAG, "setSignalRateLimit success");
+    }
 
     writeReg8Bit(SYSTEM_SEQUENCE_CONFIG, 0xFF);
 
-    uint8_t spad_count;
-    bool spad_type_is_aperture;
-    if (!pimpl->getSpadInfo(&spad_count, &spad_type_is_aperture)) { return "SPAD info failed"; }
+    uint8_t spad_count = 0;
+    bool spad_type_is_aperture = false;
+    bool spad_info_result = pimpl->getSpadInfo(&spad_count, &spad_type_is_aperture);
+    if (!spad_info_result) {
+        ESP_LOGE(TAG, "getSpadInfo failed");
+        return "SPAD info failed";
+    } else {
+        ESP_LOGI(TAG, "getSpadInfo success: count %d, aperture %d", spad_count, spad_type_is_aperture);
+    }
 
     uint8_t ref_spad_map[6];
     readMulti(GLOBAL_CONFIG_SPAD_ENABLES_REF_0, ref_spad_map, 6);
@@ -291,10 +309,12 @@ const char* VL53L0X::init() {
             spads_enabled++;
         }
     }
+    ESP_LOGI(TAG, "Processed SPAD map: spads_enabled %d", spads_enabled);
 
     writeMulti(GLOBAL_CONFIG_SPAD_ENABLES_REF_0, ref_spad_map, 6);
 
     // Load tuning settings
+    ESP_LOGI(TAG, "Loading tuning settings");
     writeReg8Bit(0xFF, 0x01);
     writeReg8Bit(0x00, 0x00);
 
@@ -389,24 +409,47 @@ const char* VL53L0X::init() {
     writeReg8Bit(0xFF, 0x00);
     writeReg8Bit(0x80, 0x00);
 
+    ESP_LOGI(TAG, "Tuning settings loaded");
+
     writeReg8Bit(SYSTEM_INTERRUPT_CONFIG_GPIO, 0x04);
-    writeReg8Bit(GPIO_HV_MUX_ACTIVE_HIGH, readReg8Bit(GPIO_HV_MUX_ACTIVE_HIGH) & ~0x10); // active low
+    uint8_t gpio_mux = readReg8Bit(GPIO_HV_MUX_ACTIVE_HIGH);
+    ESP_LOGI(TAG, "Read GPIO_HV_MUX_ACTIVE_HIGH: 0x%02" PRIX8, gpio_mux);
+    writeReg8Bit(GPIO_HV_MUX_ACTIVE_HIGH, gpio_mux & ~0x10); // active low
     writeReg8Bit(SYSTEM_INTERRUPT_CLEAR, 0x01);
 
     pimpl->measurement_timing_budget_us = getMeasurementTimingBudget();
+    ESP_LOGI(TAG, "Measurement timing budget: %" PRIu32 " us", pimpl->measurement_timing_budget_us);
 
     writeReg8Bit(SYSTEM_SEQUENCE_CONFIG, 0xE8);
 
-    setMeasurementTimingBudget(pimpl->measurement_timing_budget_us);
+    const char* timing_budget_result = setMeasurementTimingBudget(pimpl->measurement_timing_budget_us);
+    if (timing_budget_result != nullptr) {
+        ESP_LOGE(TAG, "setMeasurementTimingBudget failed: %s", timing_budget_result);
+    } else {
+        ESP_LOGI(TAG, "setMeasurementTimingBudget success");
+    }
 
     writeReg8Bit(SYSTEM_SEQUENCE_CONFIG, 0x01);
-    if (!performSingleRefCalibration(0x40)) { return "ref calibration failed"; }
+    bool ref_cal_40 = performSingleRefCalibration(0x40);
+    if (!ref_cal_40) {
+        ESP_LOGE(TAG, "performSingleRefCalibration(0x40) failed");
+        return "ref calibration failed";
+    } else {
+        ESP_LOGI(TAG, "performSingleRefCalibration(0x40) success");
+    }
 
     writeReg8Bit(SYSTEM_SEQUENCE_CONFIG, 0x02);
-    if (!performSingleRefCalibration(0x00)) { return "ref calibration failed"; }
+    bool ref_cal_00 = performSingleRefCalibration(0x00);
+    if (!ref_cal_00) {
+        ESP_LOGE(TAG, "performSingleRefCalibration(0x00) failed");
+        return "ref calibration failed";
+    } else {
+        ESP_LOGI(TAG, "performSingleRefCalibration(0x00) success");
+    }
 
     writeReg8Bit(SYSTEM_SEQUENCE_CONFIG, 0xE8);
 
+    ESP_LOGI(TAG, "VL53L0X initialization complete");
     return nullptr;
 }
 
@@ -420,49 +463,64 @@ uint8_t VL53L0X::getAddress() const {
 }
 
 void VL53L0X::writeReg8Bit(uint8_t reg, uint8_t value) {
-    uint8_t buffer[2] = {reg, value};
-    esp_err_t err = i2c_master_write_to_device(pimpl->port, pimpl->address, buffer, 2, pdMS_TO_TICKS(TIMEOUT_MS));
-    if (err != ESP_OK) {
-        pimpl->i2c_fail = true;
-        ESP_LOGE(TAG, "I2C write failed: %s", esp_err_to_name(err));
-    }
+  uint8_t buffer[2] = {reg, value};
+  esp_err_t err = i2c_master_write_to_device(pimpl->port, pimpl->address, buffer, 2, pdMS_TO_TICKS(TIMEOUT_MS));
+  if (err != ESP_OK) {
+    pimpl->i2c_fail = true;
+    ESP_LOGE(TAG, "I2C writeReg8Bit failed for reg 0x%02X: %s", reg, esp_err_to_name(err));
+  } else {
+    ESP_LOGI(TAG, "I2C writeReg8Bit success for reg 0x%02X, value 0x%02X", reg, value);
+  }
 }
 
 void VL53L0X::writeReg16Bit(uint8_t reg, uint16_t value) {
-    uint8_t buffer[3] = {reg, static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value)};
-    esp_err_t err = i2c_master_write_to_device(pimpl->port, pimpl->address, buffer, 3, pdMS_TO_TICKS(TIMEOUT_MS));
-    if (err != ESP_OK) {
-        pimpl->i2c_fail = true;
-    }
+  uint8_t buffer[3] = {reg, static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value)};
+  esp_err_t err = i2c_master_write_to_device(pimpl->port, pimpl->address, buffer, 3, pdMS_TO_TICKS(TIMEOUT_MS));
+  if (err != ESP_OK) {
+    pimpl->i2c_fail = true;
+    ESP_LOGE(TAG, "I2C writeReg16Bit failed for reg 0x%02X: %s", reg, esp_err_to_name(err));
+  } else {
+    ESP_LOGI(TAG, "I2C writeReg16Bit success for reg 0x%02X, value 0x%04X", reg, value);
+  }
 }
 
 void VL53L0X::writeReg32Bit(uint8_t reg, uint32_t value) {
-    uint8_t buffer[5] = {reg, static_cast<uint8_t>(value >> 24), static_cast<uint8_t>(value >> 16),
-                         static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value)};
-    esp_err_t err = i2c_master_write_to_device(pimpl->port, pimpl->address, buffer, 5, pdMS_TO_TICKS(TIMEOUT_MS));
-    if (err != ESP_OK) {
-        pimpl->i2c_fail = true;
-    }
+  uint8_t buffer[5] = {reg, static_cast<uint8_t>(value >> 24), static_cast<uint8_t>(value >> 16),
+                       static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value)};
+  esp_err_t err = i2c_master_write_to_device(pimpl->port, pimpl->address, buffer, 5, pdMS_TO_TICKS(TIMEOUT_MS));
+  if (err != ESP_OK) {
+    pimpl->i2c_fail = true;
+    ESP_LOGE(TAG, "I2C writeReg32Bit failed for reg 0x%02X: %s", reg, esp_err_to_name(err));
+  } else {
+    ESP_LOGI(TAG, "I2C writeReg32Bit success for reg 0x%02" PRIX8 ", value 0x%08" PRIX32, reg, value);
+  }
 }
 
 uint8_t VL53L0X::readReg8Bit(uint8_t reg) {
-    uint8_t value;
-    esp_err_t err = i2c_master_write_read_device(pimpl->port, pimpl->address, &reg, 1, &value, 1, pdMS_TO_TICKS(TIMEOUT_MS));
-    if (err != ESP_OK) {
-        pimpl->i2c_fail = true;
-        return 0;
-    }
+  uint8_t value;
+  esp_err_t err = i2c_master_write_read_device(pimpl->port, pimpl->address, &reg, 1, &value, 1, pdMS_TO_TICKS(TIMEOUT_MS));
+  if (err != ESP_OK) {
+    pimpl->i2c_fail = true;
+    ESP_LOGE(TAG, "I2C readReg8Bit failed for reg 0x%02X: %s", reg, esp_err_to_name(err));
+    return 0;
+  } else {
+    ESP_LOGI(TAG, "I2C readReg8Bit success for reg 0x%02X, value 0x%02X", reg, value);
     return value;
+  }
 }
 
 uint16_t VL53L0X::readReg16Bit(uint8_t reg) {
-    uint8_t buffer[2];
-    esp_err_t err = i2c_master_write_read_device(pimpl->port, pimpl->address, &reg, 1, buffer, 2, pdMS_TO_TICKS(TIMEOUT_MS));
-    if (err != ESP_OK) {
-        pimpl->i2c_fail = true;
-        return 0;
-    }
-    return (static_cast<uint16_t>(buffer[0]) << 8) | buffer[1];
+  uint8_t buffer[2];
+  esp_err_t err = i2c_master_write_read_device(pimpl->port, pimpl->address, &reg, 1, buffer, 2, pdMS_TO_TICKS(TIMEOUT_MS));
+  if (err != ESP_OK) {
+    pimpl->i2c_fail = true;
+    ESP_LOGE(TAG, "I2C readReg16Bit failed for reg 0x%02X: %s", reg, esp_err_to_name(err));
+    return 0;
+  } else {
+    uint16_t value = (static_cast<uint16_t>(buffer[0]) << 8) | buffer[1];
+    ESP_LOGI(TAG, "I2C readReg16Bit success for reg 0x%02X, value 0x%04X", reg, value);
+    return value;
+  }
 }
 
 uint32_t VL53L0X::readReg32Bit(uint8_t reg) {
@@ -481,20 +539,26 @@ uint32_t VL53L0X::readReg32Bit(uint8_t reg) {
 }
 
 void VL53L0X::writeMulti(uint8_t reg, const uint8_t* src, uint8_t count) {
-    std::vector<uint8_t> buffer(count + 1);
-    buffer[0] = reg;
-    std::memcpy(&buffer[1], src, count);
-    esp_err_t err = i2c_master_write_to_device(pimpl->port, pimpl->address, buffer.data(), buffer.size(), pdMS_TO_TICKS(TIMEOUT_MS));
-    if (err != ESP_OK) {
-        pimpl->i2c_fail = true;
-    }
+  std::vector<uint8_t> buffer(count + 1);
+  buffer[0] = reg;
+  std::memcpy(&buffer[1], src, count);
+  esp_err_t err = i2c_master_write_to_device(pimpl->port, pimpl->address, buffer.data(), buffer.size(), pdMS_TO_TICKS(TIMEOUT_MS));
+  if (err != ESP_OK) {
+    pimpl->i2c_fail = true;
+    ESP_LOGE(TAG, "I2C writeMulti failed for reg 0x%02X, count %d: %s", reg, count, esp_err_to_name(err));
+  } else {
+    ESP_LOGI(TAG, "I2C writeMulti success for reg 0x%02X, count %d", reg, count);
+  }
 }
 
 void VL53L0X::readMulti(uint8_t reg, uint8_t* dst, uint8_t count) {
-    esp_err_t err = i2c_master_write_read_device(pimpl->port, pimpl->address, &reg, 1, dst, count, pdMS_TO_TICKS(TIMEOUT_MS));
-    if (err != ESP_OK) {
-        pimpl->i2c_fail = true;
-    }
+  esp_err_t err = i2c_master_write_read_device(pimpl->port, pimpl->address, &reg, 1, dst, count, pdMS_TO_TICKS(TIMEOUT_MS));
+  if (err != ESP_OK) {
+    pimpl->i2c_fail = true;
+    ESP_LOGE(TAG, "I2C readMulti failed for reg 0x%02X, count %d: %s", reg, count, esp_err_to_name(err));
+  } else {
+    ESP_LOGI(TAG, "I2C readMulti success for reg 0x%02X, count %d", reg, count);
+  }
 }
 
 const char* VL53L0X::setSignalRateLimit(float limit_Mcps) {
