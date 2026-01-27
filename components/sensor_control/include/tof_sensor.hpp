@@ -5,60 +5,121 @@
 #include "vl53l0x.hpp"
 #include "sensor_common.hpp"
 #include "driver/gpio.h"
-#include "driver/i2c.h"
+#include "freertos/FreeRTOS.h"
+#include "freertos/semphr.h"
+#include "freertos/task.h"
 
-// Configuration for a single ToF sensor - Updated for new driver interface
+/**
+ * @brief Configuration for a single ToF sensor
+ */
 struct ToFSensorConfig {
-  i2c_port_t i2c_port = I2C_NUM_0;      // I2C port number
-  uint8_t i2c_address = 0x29;           // I2C device address
-  gpio_num_t sda_pin = GPIO_NUM_21;     // SDA pin (required for I2C init)
-  gpio_num_t scl_pin = GPIO_NUM_22;     // SCL pin (required for I2C init)
-  gpio_num_t xshut_pin = GPIO_NUM_NC;   // XSHUT pin (optional)
-  bool io_2v8 = true;                   // IO voltage (true = 2.8V, false = 1.8V)
+    i2c_port_t i2c_port = I2C_NUM_0;
+    uint8_t i2c_address = 0x29;
+    gpio_num_t sda_pin = GPIO_NUM_21;
+    gpio_num_t scl_pin = GPIO_NUM_22;
+    gpio_num_t xshut_pin = GPIO_NUM_NC;
+    bool io_2v8 = true;
+    uint16_t timeout_ms = 500;
+    uint32_t timing_budget_us = 200000;
+    float signal_rate_limit_mcps = 0.25;
 };
 
-// Low-level array manager (talks to driver)
+/**
+ * @brief Low-level array manager for multiple ToF sensors
+ *
+ * Manages multiple VL53L0X sensors without direct I2C access
+ */
 class ToFSensorArray {
 public:
-  explicit ToFSensorArray(uint8_t num_sensors);
+    explicit ToFSensorArray(uint8_t num_sensors);
+    ~ToFSensorArray() = default;
 
-  bool add_sensor(uint8_t index, const ToFSensorConfig& cfg);
-  bool update_readings(std::vector<SensorCommon::Reading>& readings);
+    /**
+     * @brief Add a sensor to the array
+     * @param index Sensor index
+     * @param cfg Sensor configuration
+     * @return true on success, false on failure
+     */
+    bool add_sensor(uint8_t index, const ToFSensorConfig& cfg);
+
+    /**
+     * @brief Update readings from all sensors
+     * @param readings Output vector of readings
+     * @return true if any sensor provided data, false otherwise
+     */
+    bool update_readings(std::vector<SensorCommon::Reading>& readings);
 
 private:
-  std::vector<std::shared_ptr<VL53L0X>> sensors_;
-  uint8_t num_sensors_;
-  bool i2c_initialized_ = false;
+    std::vector<std::unique_ptr<VL53L0X>> sensors_;
+    uint8_t num_sensors_;
 };
 
-// High-level manager with task and queue
+/**
+ * @brief High-level manager with task and queue for ToF sensors
+ *
+ * Provides automatic background reading with FreeRTOS task management
+ */
 class ToFSensorManager {
 public:
-  static ToFSensorManager& instance();
+    static ToFSensorManager& instance();
 
-  bool configure(const ToFSensorConfig* sensor_configs, uint8_t num_sensors);
-  bool start_reading_task(uint32_t read_interval_ms, UBaseType_t priority);
-  bool get_latest_readings(std::vector<SensorCommon::Reading>& readings);
+    /**
+     * @brief Configure the ToF sensor manager
+     * @param sensor_configs Array of sensor configurations
+     * @param num_sensors Number of sensors
+     * @return true on success, false on failure
+     */
+    bool configure(const ToFSensorConfig* sensor_configs, uint8_t num_sensors);
 
-  void pause();
-  void resume();
-  void stop();
+    /**
+     * @brief Start the background reading task
+     * @param read_interval_ms Reading interval in milliseconds
+     * @param priority FreeRTOS task priority
+     * @return true on success, false on failure
+     */
+    bool start_reading_task(uint32_t read_interval_ms, UBaseType_t priority);
+
+    /**
+     * @brief Get latest readings from all sensors
+     * @param readings Output vector of readings
+     * @return true on success, false on failure
+     */
+    bool get_latest_readings(std::vector<SensorCommon::Reading>& readings);
+
+    /**
+     * @brief Pause reading task
+     */
+    void pause();
+
+    /**
+     * @brief Resume reading task
+     */
+    void resume();
+
+    /**
+     * @brief Stop reading task
+     */
+    void stop();
 
 private:
-  ToFSensorManager();
-  ~ToFSensorManager();
+    ToFSensorManager();
+    ~ToFSensorManager();
 
-  static void reading_task(void* param);
+    // Prevent copying
+    ToFSensorManager(const ToFSensorManager&) = delete;
+    ToFSensorManager& operator=(const ToFSensorManager&) = delete;
 
-  struct TaskParams {
-    ToFSensorManager* manager;
-    uint32_t interval_ms;
-  };
+    static void reading_task(void* param);
 
-  ToFSensorArray* array_;
-  std::vector<SensorCommon::Reading> latest_readings_;
-  SemaphoreHandle_t data_mutex_;
-  TaskHandle_t task_handle_;
-  bool running_;
-  bool paused_;
+    struct TaskParams {
+        ToFSensorManager* manager;
+        uint32_t interval_ms;
+    };
+
+    std::unique_ptr<ToFSensorArray> array_;
+    std::vector<SensorCommon::Reading> latest_readings_;
+    SemaphoreHandle_t data_mutex_;
+    TaskHandle_t task_handle_;
+    bool running_;
+    bool paused_;
 };

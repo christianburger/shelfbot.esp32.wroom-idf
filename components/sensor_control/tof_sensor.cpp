@@ -1,13 +1,8 @@
 #include "tof_sensor.hpp"
-#include "i2c_scanner.hpp"  // Add I2C scanner header
 #include "esp_log.h"
-#include "freertos/task.h"
-#include "freertos/semphr.h"
-#include "driver/i2c.h"
 #include "esp_timer.h"
-#include <cstring>
-#include <cinttypes>
 #include "../firmware_version/firmware_version.hpp"
+#include <cinttypes>
 
 static const char* TAG = "ToF_Sensor";
 
@@ -16,8 +11,8 @@ static const char* TAG = "ToF_Sensor";
 // ============================================================================
 
 ToFSensorArray::ToFSensorArray(uint8_t num_sensors)
-    : num_sensors_(num_sensors), i2c_initialized_(false) {
-  sensors_.resize(num_sensors);
+    : num_sensors_(num_sensors) {
+    sensors_.resize(num_sensors);
 }
 
 bool ToFSensorArray::add_sensor(uint8_t index, const ToFSensorConfig& cfg) {
@@ -26,123 +21,35 @@ bool ToFSensorArray::add_sensor(uint8_t index, const ToFSensorConfig& cfg) {
         return false;
     }
 
-    // First, try a quick probe to see if the device is present
-    ESP_LOGI(TAG, "Checking for ToF sensor at address 0x%02X...", cfg.i2c_address);
+    ESP_LOGI(TAG, "Configuring ToF sensor %d at address 0x%02X", index, cfg.i2c_address);
 
-    if (I2CScanner::probe(cfg.i2c_port, cfg.i2c_address, cfg.sda_pin, cfg.scl_pin)) {
-        ESP_LOGI(TAG, "Sensor found at address 0x%02X", cfg.i2c_address);
-    } else {
-        ESP_LOGW(TAG, "Sensor not found at address 0x%02X. Performing full I2C scan...", cfg.i2c_address);
-
-        // Perform full I2C scan
-        std::vector<uint8_t> found_addresses;
-        if (I2CScanner::scan(cfg.i2c_port, found_addresses, cfg.sda_pin, cfg.scl_pin)) {
-            ESP_LOGI(TAG, "I2C scan completed. Found %zu device(s)", found_addresses.size());
-            I2CScanner::printResults(found_addresses);
-
-            // Check if the expected address is present
-            bool address_found = false;
-            for (auto addr : found_addresses) {
-                if (addr == cfg.i2c_address) {
-                    address_found = true;
-                    break;
-                }
-            }
-
-            if (!address_found) {
-                ESP_LOGE(TAG, "Expected sensor address 0x%02X not found in I2C scan!", cfg.i2c_address);
-                return false;
-            }
-        } else {
-            ESP_LOGE(TAG, "I2C scan failed. Check I2C connections and power.");
-            return false;
-        }
-    }
-
-    // Initialize I2C if not already done for this port
-    if (!i2c_initialized_) {
-        i2c_config_t i2c_config = {
-            .mode = I2C_MODE_MASTER,
-            .sda_io_num = cfg.sda_pin,
-            .scl_io_num = cfg.scl_pin,
-            .sda_pullup_en = GPIO_PULLUP_ENABLE,
-            .scl_pullup_en = GPIO_PULLUP_ENABLE,
-            .master = { .clk_speed = 100000 },  // Start with 100kHz for compatibility
-            .clk_flags = 0,
-        };
-
-        esp_err_t err = i2c_param_config(cfg.i2c_port, &i2c_config);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to configure I2C: %s", esp_err_to_name(err));
-            return false;
-        }
-
-        err = i2c_driver_install(cfg.i2c_port, I2C_MODE_MASTER, 0, 0, 0);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to install I2C driver: %s", esp_err_to_name(err));
-            return false;
-        }
-
-        i2c_initialized_ = true;
-        ESP_LOGI(TAG, "I2C initialized on port %d (SDA:%d, SCL:%d, 100kHz)",
-                 cfg.i2c_port, cfg.sda_pin, cfg.scl_pin);
-    }
-
-    // Create the sensor with the actual driver interface
-    sensors_[index] = std::make_shared<VL53L0X>(
+    // Create VL53L0X configuration from ToFSensorConfig
+    VL53L0X::Config vl_config = vl53l0x_default_config(
         cfg.i2c_port,
-        cfg.xshut_pin,
-        cfg.i2c_address,
-        cfg.io_2v8
+        cfg.sda_pin,
+        cfg.scl_pin,
+        cfg.xshut_pin
     );
 
-    // Handle XSHUT pin if configured
-    if (cfg.xshut_pin != GPIO_NUM_NC) {
-        ESP_LOGI(TAG, "Using XSHUT pin GPIO%d to reset sensor", cfg.xshut_pin);
-        gpio_config_t xshut_config = {
-            .pin_bit_mask = (1ULL << cfg.xshut_pin),
-            .mode = GPIO_MODE_OUTPUT,
-            .pull_up_en = GPIO_PULLUP_DISABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type = GPIO_INTR_DISABLE,
-        };
+    vl_config.i2c_address = cfg.i2c_address;
+    vl_config.io_2v8 = cfg.io_2v8;
+    vl_config.timeout_ms = cfg.timeout_ms;
+    vl_config.timing_budget_us = cfg.timing_budget_us;
+    vl_config.signal_rate_limit_mcps = cfg.signal_rate_limit_mcps;
 
-        if (gpio_config(&xshut_config) != ESP_OK) {
-            ESP_LOGW(TAG, "Failed to configure XSHUT pin, continuing without hardware reset");
-        } else {
-            // Reset the sensor using XSHUT
-            gpio_set_level(cfg.xshut_pin, 0);
-            vTaskDelay(pdMS_TO_TICKS(10));
-            gpio_set_level(cfg.xshut_pin, 1);
-            vTaskDelay(pdMS_TO_TICKS(10));
-            ESP_LOGI(TAG, "Sensor reset via XSHUT pin");
-        }
-    }
+    // Create sensor instance
+    sensors_[index] = std::make_unique<VL53L0X>(vl_config);
 
-    // Initialize the sensor
-    ESP_LOGI(TAG, "Initializing ToF sensor...");
-
-    // Set a longer timeout for initialization (500ms)
-    sensors_[index]->setTimeout(500);
-
+    // Initialize sensor
     const char* error = sensors_[index]->init();
     if (error != nullptr) {
         ESP_LOGE(TAG, "Failed to initialize ToF sensor %d: %s", index, error);
 
-        // Try one more time with a longer delay and reset
-        ESP_LOGI(TAG, "Retrying initialization with longer delay...");
+        // Retry once with longer delay
+        ESP_LOGI(TAG, "Retrying initialization after delay...");
         vTaskDelay(pdMS_TO_TICKS(200));
 
-        if (cfg.xshut_pin != GPIO_NUM_NC) {
-            // Reset again
-            gpio_set_level(cfg.xshut_pin, 0);
-            vTaskDelay(pdMS_TO_TICKS(50));
-            gpio_set_level(cfg.xshut_pin, 1);
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
-
         error = sensors_[index]->init();
-
         if (error != nullptr) {
             ESP_LOGE(TAG, "Retry failed: %s", error);
             sensors_[index].reset();
@@ -150,31 +57,14 @@ bool ToFSensorArray::add_sensor(uint8_t index, const ToFSensorConfig& cfg) {
         }
     }
 
-    // Set a longer timeout for measurements (200ms) to account for calibration issues
-    sensors_[index]->setTimeout(200);
+    ESP_LOGI(TAG, "ToF sensor %d initialized successfully", index);
 
-    ESP_LOGI(TAG, "ToF sensor %d initialized successfully at address 0x%02X",
-             index, cfg.i2c_address);
-
-    // Try a test reading
-    ESP_LOGI(TAG, "Performing test reading...");
-    uint16_t test_distance = sensors_[index]->readRangeSingleMillimeters();
-    if (sensors_[index]->i2cFail()) {
-        ESP_LOGW(TAG, "Test reading failed with I2C error");
-    } else if (sensors_[index]->timeoutOccurred()) {
-        ESP_LOGW(TAG, "Test reading timed out");
-        // Try one more test with longer timeout
-        ESP_LOGI(TAG, "Retrying test reading with 500ms timeout...");
-        sensors_[index]->setTimeout(500);
-        test_distance = sensors_[index]->readRangeSingleMillimeters();
-
-        if (sensors_[index]->timeoutOccurred()) {
-            ESP_LOGW(TAG, "Test reading still times out even with 500ms");
-        } else {
-            ESP_LOGI(TAG, "Test reading successful with longer timeout: %d mm", test_distance);
-        }
+    // Perform self-test
+    error = sensors_[index]->selfTest();
+    if (error != nullptr) {
+        ESP_LOGW(TAG, "Self-test warning for sensor %d: %s", index, error);
     } else {
-        ESP_LOGI(TAG, "Test reading successful: %d mm", test_distance);
+        ESP_LOGI(TAG, "Sensor %d self-test passed", index);
     }
 
     return true;
@@ -184,52 +74,61 @@ bool ToFSensorArray::update_readings(std::vector<SensorCommon::Reading>& reading
     readings.resize(num_sensors_);
     bool any_new_data = false;
 
+    ESP_LOGD(TAG, "Updating readings for %d ToF sensors", num_sensors_);
+
     for (uint8_t i = 0; i < num_sensors_; ++i) {
-        if (!sensors_[i]) {
+        if (!sensors_[i] || !sensors_[i]->isReady()) {
             readings[i].distance_cm = SensorCommon::MAX_DISTANCE_CM;
             readings[i].valid = false;
             readings[i].status = 255;  // Not configured
             readings[i].timestamp_us = esp_timer_get_time();
+            ESP_LOGW(TAG, "ToF Sensor %d not ready or not configured", i);
             continue;
         }
 
-        // Read distance using the actual driver interface
-        uint16_t distance_mm = sensors_[i]->readRangeSingleMillimeters();
+        // Read distance using the clean API
+        ESP_LOGD(TAG, "Reading ToF sensor %d...", i);
+        VL53L0X::MeasurementResult result;
+        bool success = sensors_[i]->readSingle(result);
 
-        readings[i].timestamp_us = esp_timer_get_time();
+        readings[i].timestamp_us = result.timestamp_us;
 
-        // Check for I2C failure first
-        if (sensors_[i]->i2cFail()) {
+        if (!success) {
             readings[i].distance_cm = SensorCommon::MAX_DISTANCE_CM;
             readings[i].valid = false;
             readings[i].status = 2;  // I2C error
-            ESP_LOGD(TAG, "Sensor %d I2C failure", i);
+            ESP_LOGW(TAG, "ToF Sensor %d read failed", i);
             continue;
         }
 
-        // Check for timeout (65535 indicates timeout in the driver)
-        if (distance_mm == 65535 || sensors_[i]->timeoutOccurred()) {
+        if (result.timeout_occurred) {
             readings[i].distance_cm = SensorCommon::MAX_DISTANCE_CM;
             readings[i].valid = false;
             readings[i].status = 1;  // Timeout
-            ESP_LOGD(TAG, "Sensor %d timeout", i);
+            ESP_LOGW(TAG, "ToF Sensor %d timeout", i);
             continue;
         }
 
         // Convert mm to cm
-        float distance_cm = static_cast<float>(distance_mm) / 10.0f;
+        float distance_cm = static_cast<float>(result.distance_mm) / 10.0f;
 
         // Validate range
         readings[i].distance_cm = distance_cm;
-        readings[i].valid = (distance_cm >= SensorCommon::MIN_DISTANCE_CM &&
+        readings[i].valid = result.valid &&
+                           (distance_cm >= SensorCommon::MIN_DISTANCE_CM &&
                             distance_cm <= SensorCommon::MAX_DISTANCE_CM);
         readings[i].status = readings[i].valid ? 0 : 3;  // 0 = OK, 3 = out of range
 
         if (readings[i].valid) {
             any_new_data = true;
-            ESP_LOGD(TAG, "Sensor %d: %.1f cm", i, distance_cm);
+            ESP_LOGI(TAG, "[ToF Sensor %d] Distance: %.1f cm (VALID)", i, distance_cm);
+        } else {
+            ESP_LOGW(TAG, "[ToF Sensor %d] Distance: %.1f cm (INVALID)", i, distance_cm);
         }
     }
+
+    ESP_LOGD(TAG, "ToF sensor update complete, any new data: %s",
+             any_new_data ? "YES" : "NO");
 
     return any_new_data;
 }
@@ -249,19 +148,19 @@ ToFSensorManager::ToFSensorManager()
     , task_handle_(nullptr)
     , running_(false)
     , paused_(false) {
-  data_mutex_ = xSemaphoreCreateMutex();
+    data_mutex_ = xSemaphoreCreateMutex();
 
-  // OPTION 1: Using instance method
-  FirmwareVersion fw_version;
-  fw_version.print_firmware_version("ToFSensorManager");
+    FirmwareVersion fw_version;
+    fw_version.print_firmware_version("ToFSensorManager");
 
-  ESP_LOGI(TAG, "ToFSensorManager constructor complete");
+    ESP_LOGI(TAG, "ToFSensorManager constructor complete");
 }
 
 ToFSensorManager::~ToFSensorManager() {
     stop();
-    if (array_) delete array_;
-    if (data_mutex_) vSemaphoreDelete(data_mutex_);
+    if (data_mutex_) {
+        vSemaphoreDelete(data_mutex_);
+    }
 }
 
 bool ToFSensorManager::configure(const ToFSensorConfig* sensor_configs, uint8_t num_sensors) {
@@ -270,7 +169,7 @@ bool ToFSensorManager::configure(const ToFSensorConfig* sensor_configs, uint8_t 
         return false;
     }
 
-    array_ = new ToFSensorArray(num_sensors);
+    array_ = std::make_unique<ToFSensorArray>(num_sensors);
 
     bool any_sensor_configured = false;
     for (uint8_t i = 0; i < num_sensors; i++) {
@@ -279,7 +178,6 @@ bool ToFSensorManager::configure(const ToFSensorConfig* sensor_configs, uint8_t 
             ESP_LOGI(TAG, "ToF sensor %d configured successfully", i);
         } else {
             ESP_LOGE(TAG, "Failed to add ToF sensor %d", i);
-            // Continue to try other sensors
         }
     }
 
@@ -290,15 +188,14 @@ bool ToFSensorManager::configure(const ToFSensorConfig* sensor_configs, uint8_t 
         return true;
     } else {
         ESP_LOGW(TAG, "ToF Manager: No sensors could be configured");
-        delete array_;
-        array_ = nullptr;
+        array_.reset();
         return false;
     }
 }
 
 bool ToFSensorManager::start_reading_task(uint32_t read_interval_ms, UBaseType_t priority) {
     if (!array_) {
-        ESP_LOGE(TAG, "Cannot start task: array is null");
+        ESP_LOGE(TAG, "Cannot start task: array not configured");
         return false;
     }
 
