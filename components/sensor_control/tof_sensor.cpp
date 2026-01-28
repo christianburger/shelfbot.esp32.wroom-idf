@@ -70,6 +70,13 @@ bool ToFSensorArray::add_sensor(uint8_t index, const ToFSensorConfig& cfg) {
     return true;
 }
 
+// ============================================================================
+// FILE: components/sensor_control/tof_sensor.cpp
+// METHOD: ToFSensorArray::update_readings
+// ============================================================================
+
+// REPLACE the update_readings method with this improved version:
+
 bool ToFSensorArray::update_readings(std::vector<SensorCommon::Reading>& readings) {
     readings.resize(num_sensors_);
     bool any_new_data = false;
@@ -112,18 +119,27 @@ bool ToFSensorArray::update_readings(std::vector<SensorCommon::Reading>& reading
         // Convert mm to cm
         float distance_cm = static_cast<float>(result.distance_mm) / 10.0f;
 
-        // Validate range
+        // FIX: Better validation - reject out-of-range readings
+        // VL53L0X returns 8190mm (819.0cm) for out-of-range
+        bool is_in_valid_range = (distance_cm >= SensorCommon::MIN_DISTANCE_CM &&
+                                   distance_cm <= SensorCommon::MAX_DISTANCE_CM);
+
+        // FIX: Also check if distance is the special "no target" value
+        bool is_special_value = (result.distance_mm >= 8190);  // 8190mm = no target detected
+
         readings[i].distance_cm = distance_cm;
-        readings[i].valid = result.valid &&
-                           (distance_cm >= SensorCommon::MIN_DISTANCE_CM &&
-                            distance_cm <= SensorCommon::MAX_DISTANCE_CM);
+        readings[i].valid = result.valid && is_in_valid_range && !is_special_value;
         readings[i].status = readings[i].valid ? 0 : 3;  // 0 = OK, 3 = out of range
 
         if (readings[i].valid) {
             any_new_data = true;
             ESP_LOGI(TAG, "[ToF Sensor %d] Distance: %.1f cm (VALID)", i, distance_cm);
         } else {
-            ESP_LOGW(TAG, "[ToF Sensor %d] Distance: %.1f cm (INVALID)", i, distance_cm);
+            if (is_special_value) {
+                ESP_LOGD(TAG, "[ToF Sensor %d] No target detected (%.1f cm)", i, distance_cm);
+            } else {
+                ESP_LOGW(TAG, "[ToF Sensor %d] Distance: %.1f cm (INVALID - out of range)", i, distance_cm);
+            }
         }
     }
 

@@ -20,5 +20,10 @@ namespace SensorCommon {
   constexpr float MAX_DISTANCE_CM = 400.0f;
   constexpr uint32_t DEFAULT_TIMEOUT_MS = 100;
 
-}  // namespace SensorCommon
+  // ADD THIS: Special value indicating "no target" from VL53L0X
+  constexpr float NO_TARGET_DISTANCE_CM = 819.0f;  // 8190mm converted to cm
+  constexpr uint16_t NO_TARGET_DISTANCE_MM = 8190;  // VL53L0X "no target" value
+
+}
+
 #endif // SHELFBOT_SENSOR_COMMON_H

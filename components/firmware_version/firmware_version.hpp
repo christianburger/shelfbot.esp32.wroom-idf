@@ -8,9 +8,9 @@
 
 // Firmware Version Information
 #define FIRMWARE_VERSION_MAJOR 1
-#define FIRMWARE_VERSION_MINOR 4
+#define FIRMWARE_VERSION_MINOR 8
 #define FIRMWARE_VERSION_PATCH 0
-#define FIRMWARE_VERSION_BUILD 20240127
+#define FIRMWARE_VERSION_BUILD 20260128
 
 // Stringify macros
 #define STRINGIFY(x) #x

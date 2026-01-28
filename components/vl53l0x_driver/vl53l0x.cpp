@@ -535,8 +535,13 @@ const char* VL53L0X::init() {
         return "Implementation not initialized";
     }
 
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "VL53L0X Initialization Starting");
+    ESP_LOGI(TAG, "========================================");
+
     // Handle XSHUT pin if configured
     if (pimpl_->config.xshut_pin != GPIO_NUM_NC) {
+        ESP_LOGD(TAG, "Step 1: Configuring XSHUT pin (GPIO%d)", pimpl_->config.xshut_pin);
         gpio_config_t xshut_config = {
             .pin_bit_mask = (1ULL << pimpl_->config.xshut_pin),
             .mode = GPIO_MODE_OUTPUT,
@@ -553,118 +558,138 @@ const char* VL53L0X::init() {
             vTaskDelay(pdMS_TO_TICKS(10));
             gpio_set_level(pimpl_->config.xshut_pin, 1);
             vTaskDelay(pdMS_TO_TICKS(10));
-            ESP_LOGI(TAG, "Sensor reset via XSHUT");
+            ESP_LOGI(TAG, "Step 1: Sensor reset via XSHUT - OK");
         }
+    } else {
+        ESP_LOGD(TAG, "Step 1: XSHUT pin not configured - skipping reset");
     }
 
     // Initialize I2C bus
-  // Initialize I2C bus
-  i2c_master_bus_config_t bus_config = {
-      .i2c_port = pimpl_->config.i2c_port,
-      .sda_io_num = pimpl_->config.sda_pin,
-      .scl_io_num = pimpl_->config.scl_pin,
-      .clk_source = I2C_CLK_SRC_DEFAULT,
-      .glitch_ignore_cnt = 7,
-      .intr_priority = 0,  // Added
-      .trans_queue_depth = 0,  // Added
-      .flags = {
-        .enable_internal_pullup = true,
-      },
+    ESP_LOGD(TAG, "Step 2: Creating I2C bus...");
+    ESP_LOGD(TAG, "  Port: I2C_%d", pimpl_->config.i2c_port);
+    ESP_LOGD(TAG, "  SDA: GPIO%d, SCL: GPIO%d", pimpl_->config.sda_pin, pimpl_->config.scl_pin);
+    ESP_LOGD(TAG, "  Frequency: %lu Hz", pimpl_->config.i2c_freq_hz);
+
+    i2c_master_bus_config_t bus_config = {
+        .i2c_port = pimpl_->config.i2c_port,
+        .sda_io_num = pimpl_->config.sda_pin,
+        .scl_io_num = pimpl_->config.scl_pin,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .intr_priority = 0,
+        .trans_queue_depth = 0,
+        .flags = {
+            .enable_internal_pullup = true,
+        },
     };
 
     esp_err_t err = i2c_new_master_bus(&bus_config, &pimpl_->bus_handle);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to create I2C bus: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "FAILED to create I2C bus: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "Troubleshooting:");
+        ESP_LOGE(TAG, "  1. Check if I2C_%d is already initialized elsewhere", pimpl_->config.i2c_port);
+        ESP_LOGE(TAG, "  2. Verify GPIO pins are not in use by other peripherals");
+        ESP_LOGE(TAG, "  3. Check ESP32 I2C hardware availability");
         return "I2C bus creation failed";
     }
     pimpl_->i2c_owned = true;
+    ESP_LOGI(TAG, "Step 2: I2C bus created - OK");
 
     // Add device to bus
+    ESP_LOGD(TAG, "Step 3: Adding device at address 0x%02X to bus...", pimpl_->config.i2c_address);
     i2c_device_config_t dev_config = {
-      .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-      .device_address = pimpl_->config.i2c_address,
-      .scl_speed_hz = pimpl_->config.i2c_freq_hz,
-      .scl_wait_us = 0,  // Added
-      .flags = {0},  // Added
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = pimpl_->config.i2c_address,
+        .scl_speed_hz = pimpl_->config.i2c_freq_hz,
+        .scl_wait_us = 0,
+        .flags = {0},
     };
 
     err = i2c_master_bus_add_device(pimpl_->bus_handle, &dev_config, &pimpl_->dev_handle);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to add I2C device: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "FAILED to add I2C device: %s", esp_err_to_name(err));
         i2c_del_master_bus(pimpl_->bus_handle);
         pimpl_->bus_handle = nullptr;
         return "I2C device add failed";
     }
-
-    ESP_LOGI(TAG, "Initializing VL53L0X at address 0x%02X", pimpl_->config.i2c_address);
+    ESP_LOGI(TAG, "Step 3: Device added to bus - OK");
 
     // Verify device presence using I2C scanner
-    ESP_LOGI(TAG, "Verifying device at address 0x%02X...", pimpl_->config.i2c_address);
+    ESP_LOGI(TAG, "Step 4: Verifying device presence...");
+    ESP_LOGI(TAG, "  Expected address: 0x%02X (VL53L0X)", pimpl_->config.i2c_address);
+
     if (!I2CScanner::probeWithBus(pimpl_->bus_handle, pimpl_->config.i2c_address, pimpl_->config.i2c_freq_hz)) {
-        ESP_LOGE(TAG, "Device not found at address 0x%02X", pimpl_->config.i2c_address);
-        ESP_LOGE(TAG, "Performing full I2C scan to find devices...");
+        ESP_LOGE(TAG, "FAILED: Device not responding at address 0x%02X", pimpl_->config.i2c_address);
+        ESP_LOGE(TAG, "Running full I2C bus scan for diagnostics...");
 
-        // Perform a full scan to help debug
+        // Perform full diagnostic scan
         std::vector<uint8_t> found_addresses;
+        I2CScanner::scan(pimpl_->config.i2c_port, found_addresses,
+                        pimpl_->config.sda_pin, pimpl_->config.scl_pin,
+                        100000);  // Use 100kHz for compatibility
 
-        // Create temporary bus for scanning
-        i2c_master_bus_config_t scan_bus_config = {
-            .i2c_port = pimpl_->config.i2c_port,
-            .sda_io_num = pimpl_->config.sda_pin,
-            .scl_io_num = pimpl_->config.scl_pin,
-            .clk_source = I2C_CLK_SRC_DEFAULT,
-            .glitch_ignore_cnt = 7,
-            .intr_priority = 0,  // Added
-            .trans_queue_depth = 0,  // Added
-            .flags = {
-            .enable_internal_pullup = true,
-          },
-        };
-
-        i2c_master_bus_handle_t scan_bus;
-        if (i2c_new_master_bus(&scan_bus_config, &scan_bus) == ESP_OK) {
-            // Scan using the scan bus
-            for (uint8_t addr = 0x08; addr <= 0x77; addr++) {
-                if (I2CScanner::probeWithBus(scan_bus, addr, 100000)) {
-                    found_addresses.push_back(addr);
-                }
-            }
-            i2c_del_master_bus(scan_bus);
-
-            if (!found_addresses.empty()) {
-                I2CScanner::printResults(found_addresses);
-            } else {
-                ESP_LOGE(TAG, "No I2C devices found on the bus!");
-                ESP_LOGE(TAG, "Check: power, pull-ups, connections");
-            }
+        if (found_addresses.empty()) {
+            ESP_LOGE(TAG, "No I2C devices found on bus!");
+            ESP_LOGE(TAG, "Critical checks:");
+            ESP_LOGE(TAG, "  [ ] VL53L0X has power (2.6V-3.5V)");
+            ESP_LOGE(TAG, "  [ ] Pull-up resistors present (4.7kΩ typical)");
+            ESP_LOGE(TAG, "  [ ] SDA/SCL connections correct and solid");
+            ESP_LOGE(TAG, "  [ ] Ground connection established");
+            ESP_LOGE(TAG, "  [ ] No short circuits");
+        } else {
+            ESP_LOGW(TAG, "Found %zu device(s) but NOT at expected address 0x%02X",
+                     found_addresses.size(), pimpl_->config.i2c_address);
+            ESP_LOGW(TAG, "Possible causes:");
+            ESP_LOGW(TAG, "  - Wrong I2C address configured");
+            ESP_LOGW(TAG, "  - Different sensor model (check part number)");
+            ESP_LOGW(TAG, "  - Address conflict or bus contention");
         }
 
         return "Device not responding at expected address";
     }
-    ESP_LOGI(TAG, "Device verified at address 0x%02X", pimpl_->config.i2c_address);
+    ESP_LOGI(TAG, "Step 4: Device verified at address 0x%02X - OK", pimpl_->config.i2c_address);
 
     // Check model ID
+    ESP_LOGD(TAG, "Step 5: Reading model ID register...");
     uint8_t model_id;
     err = pimpl_->readReg8(Reg::IDENTIFICATION_MODEL_ID, &model_id);
-    if (err != ESP_OK || model_id != 0xEE) {
-        ESP_LOGE(TAG, "Model ID check failed (got 0x%02X, expected 0xEE)", model_id);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "FAILED to read model ID: %s", esp_err_to_name(err));
+        return "Model ID read failed";
+    }
+
+    if (model_id != 0xEE) {
+        ESP_LOGE(TAG, "FAILED: Model ID mismatch!");
+        ESP_LOGE(TAG, "  Expected: 0xEE (VL53L0X)");
+        ESP_LOGE(TAG, "  Got: 0x%02X", model_id);
+        ESP_LOGE(TAG, "This may indicate:");
+        ESP_LOGE(TAG, "  - Wrong sensor model (VL53L1X = 0xEA, VL53L4CD = 0xEB)");
+        ESP_LOGE(TAG, "  - Communication error");
+        ESP_LOGE(TAG, "  - Defective sensor");
         return "Model ID mismatch";
     }
-    ESP_LOGI(TAG, "Model ID verified: 0x%02X", model_id);
+    ESP_LOGI(TAG, "Step 5: Model ID verified: 0x%02X - OK", model_id);
 
     // Read and store stop variable
+    ESP_LOGD(TAG, "Step 6: Reading sensor configuration...");
     err = pimpl_->readReg8(0x91, &pimpl_->stop_variable);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to read stop variable: %s", esp_err_to_name(err));
         return "Failed to read stop variable";
     }
+    ESP_LOGD(TAG, "Step 6: Configuration read - OK");
 
     // Load and execute initialization sequence
+    ESP_LOGD(TAG, "Step 7: Loading initialization sequence...");
     err = pimpl_->loadInitSequence();
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "FAILED: Initialization sequence error");
         return "Initialization sequence failed";
     }
+    ESP_LOGI(TAG, "Step 7: Initialization sequence complete - OK");
 
     // Disable MSRC and TCC
+    ESP_LOGD(TAG, "Step 8: Configuring measurement modes...");
     uint8_t msrc_config;
     err = pimpl_->readReg8(Reg::MSRC_CONFIG_CONTROL, &msrc_config);
     if (err == ESP_OK) {
@@ -673,44 +698,60 @@ const char* VL53L0X::init() {
 
     // Set signal rate limit
     setSignalRateLimit(pimpl_->config.signal_rate_limit_mcps);
+    ESP_LOGD(TAG, "Step 8: Measurement configuration - OK");
 
     // Configure SPAD
+    ESP_LOGD(TAG, "Step 9: Configuring SPAD array...");
     uint8_t spad_count;
     bool spad_type_is_aperture;
     err = pimpl_->configureSPAD(&spad_count, &spad_type_is_aperture);
     if (err != ESP_OK) {
         ESP_LOGW(TAG, "SPAD configuration warning (continuing anyway)");
+    } else {
+        ESP_LOGD(TAG, "Step 9: SPAD configured - OK");
     }
 
     // Set interrupt config
+    ESP_LOGD(TAG, "Step 10: Configuring interrupts...");
     pimpl_->writeReg8(Reg::SYSTEM_INTERRUPT_CONFIG_GPIO, 0x04);
     uint8_t gpio_mux;
     pimpl_->readReg8(Reg::GPIO_HV_MUX_ACTIVE_HIGH, &gpio_mux);
     pimpl_->writeReg8(Reg::GPIO_HV_MUX_ACTIVE_HIGH, gpio_mux & ~0x10);
     pimpl_->writeReg8(Reg::SYSTEM_INTERRUPT_CLEAR, 0x01);
+    ESP_LOGD(TAG, "Step 10: Interrupts configured - OK");
 
     // Get and set timing budget
+    ESP_LOGD(TAG, "Step 11: Setting timing budget...");
     pimpl_->measurement_timing_budget_us = getMeasurementTimingBudget();
     pimpl_->writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0xE8);
     setMeasurementTimingBudget(pimpl_->config.timing_budget_us);
+    ESP_LOGD(TAG, "Step 11: Timing budget set to %lu us - OK", pimpl_->config.timing_budget_us);
 
     // Perform calibrations
+    ESP_LOGD(TAG, "Step 12: Running VHV calibration...");
     pimpl_->writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0x01);
     err = pimpl_->performSingleRefCalibration(0x40);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "VHV calibration FAILED");
         return "VHV calibration failed";
     }
+    ESP_LOGD(TAG, "Step 12: VHV calibration - OK");
 
+    ESP_LOGD(TAG, "Step 13: Running phase calibration...");
     pimpl_->writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0x02);
     err = pimpl_->performSingleRefCalibration(0x00);
     if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Phase calibration FAILED");
         return "Phase calibration failed";
     }
+    ESP_LOGD(TAG, "Step 13: Phase calibration - OK");
 
     pimpl_->writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0xE8);
 
     pimpl_->initialized = true;
-    ESP_LOGI(TAG, "VL53L0X initialization complete");
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "VL53L0X Initialization Complete - SUCCESS");
+    ESP_LOGI(TAG, "========================================");
     return nullptr;
 }
 

@@ -6,18 +6,21 @@
 #include "esp_timer.h"
 #include "driver/gpio.h"
 #include <vector>
+#include "i2c_scanner.hpp"
 
 static const char* TAG = "sensor_control";
 
 // --- Configuration ---
-const float COLLISION_THRESHOLD_CM = 20.0;
+const float COLLISION_THRESHOLD_CM = 2.0;
+static int64_t last_emergency_stop_time_us = 0;
+static const int64_t EMERGENCY_STOP_COOLDOWN_US = 500000; // 500ms cooldown
+
 
 // --- Global Queues ---
 QueueHandle_t unified_sensor_data_queue = nullptr;
 QueueHandle_t motor_stop_queue = nullptr;
 QueueHandle_t distance_data_queue = nullptr;  // Legacy queue
 
-// --- Sensor Reading Task ---
 static void sensor_reader_task(void* arg) {
   std::vector<SensorCommon::Reading> ultrasonic_readings;
   std::vector<SensorCommon::Reading> tof_readings;
@@ -25,7 +28,8 @@ static void sensor_reader_task(void* arg) {
 
   for (;;) {
     bool obstacle_detected = false;
-    packet.timestamp_us = esp_timer_get_time();
+    int64_t current_time = esp_timer_get_time();
+    packet.timestamp_us = current_time;
 
     // Initialize arrays to invalid values
     for (int i = 0; i < NUM_ULTRASONIC_SENSORS; i++) {
@@ -43,9 +47,13 @@ static void sensor_reader_task(void* arg) {
         packet.ultrasonic_distances_cm[i] = ultrasonic_readings[i].distance_cm;
         packet.ultrasonic_valid[i] = ultrasonic_readings[i].valid;
 
+        // Only trigger on VALID, CLOSE readings
         if (ultrasonic_readings[i].valid &&
+            ultrasonic_readings[i].distance_cm >= SensorCommon::MIN_DISTANCE_CM &&
             ultrasonic_readings[i].distance_cm < COLLISION_THRESHOLD_CM) {
           obstacle_detected = true;
+          ESP_LOGW(TAG, "Obstacle: Ultrasonic[%zu] = %.1f cm (VALID, CLOSE)",
+                   i, ultrasonic_readings[i].distance_cm);
         }
       }
     }
@@ -56,9 +64,13 @@ static void sensor_reader_task(void* arg) {
         packet.tof_distances_cm[i] = tof_readings[i].distance_cm;
         packet.tof_valid[i] = tof_readings[i].valid;
 
+        // Only trigger on VALID, CLOSE readings
         if (tof_readings[i].valid &&
+            tof_readings[i].distance_cm >= SensorCommon::MIN_DISTANCE_CM &&
             tof_readings[i].distance_cm < COLLISION_THRESHOLD_CM) {
           obstacle_detected = true;
+          ESP_LOGW(TAG, "Obstacle: ToF[%zu] = %.1f cm (VALID, CLOSE)",
+                   i, tof_readings[i].distance_cm);
         }
       }
     }
@@ -73,11 +85,18 @@ static void sensor_reader_task(void* arg) {
     }
     xQueueOverwrite(distance_data_queue, &legacy_distances);
 
-    // Emergency stop if obstacle detected
+    // FIX: Only send emergency stop if cooldown has expired
     if (obstacle_detected) {
-      int stop_signal = 1;
-      xQueueSend(motor_stop_queue, &stop_signal, 0);
-      ESP_LOGW(TAG, "Obstacle detected! Emergency stop triggered.");
+      int64_t time_since_last_stop = current_time - last_emergency_stop_time_us;
+
+      if (time_since_last_stop >= EMERGENCY_STOP_COOLDOWN_US) {
+        int stop_signal = 1;
+        xQueueSend(motor_stop_queue, &stop_signal, 0);
+        last_emergency_stop_time_us = current_time;
+        ESP_LOGW(TAG, "Emergency stop triggered - valid obstacle within %.1f cm",
+                 COLLISION_THRESHOLD_CM);
+      }
+      // else: cooldown active, skip logging to reduce spam
     }
 
     vTaskDelay(pdMS_TO_TICKS(100));
@@ -91,6 +110,17 @@ void sensor_control_init() {
   unified_sensor_data_queue = xQueueCreate(1, sizeof(SensorDataPacket));
   motor_stop_queue = xQueueCreate(1, sizeof(int));
   distance_data_queue = xQueueCreate(1, sizeof(float[NUM_ULTRASONIC_SENSORS]));
+
+  // === ADD: I2C Bus Diagnostic Scan ===
+  ESP_LOGI(TAG, "========================================");
+  ESP_LOGI(TAG, "Running I2C Bus Diagnostic Scan");
+  ESP_LOGI(TAG, "========================================");
+  std::vector<uint8_t> found_devices;
+  I2CScanner::scan(I2C_NUM_0, found_devices, GPIO_NUM_21, GPIO_NUM_22, 100000);
+  ESP_LOGI(TAG, "========================================");
+  ESP_LOGI(TAG, "I2C Diagnostic Complete - Found %zu device(s)", found_devices.size());
+  ESP_LOGI(TAG, "========================================");
+  // === END DIAGNOSTIC SCAN ===
 
   // Configure Ultrasonic Sensors
   UltrasonicSensorConfig ultrasonic_configs[NUM_ULTRASONIC_SENSORS] = {
