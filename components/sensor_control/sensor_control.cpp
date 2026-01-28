@@ -6,7 +6,7 @@
 #include "esp_timer.h"
 #include "driver/gpio.h"
 #include <vector>
-#include "i2c_scanner.hpp"
+#include "include/i2c_scanner.hpp"
 
 static const char* TAG = "sensor_control";
 
@@ -142,21 +142,28 @@ void sensor_control_init() {
     ESP_LOGE(TAG, "Failed to configure ultrasonic sensors");
   }
 
-  // Configure ToF Sensors
+  // Configure ToF Sensors with mixed VL53L0X and VL53L1
   ToFSensorConfig tof_configs[NUM_TOF_SENSORS] = {
-    {
-      .i2c_port = I2C_NUM_0,
-      .i2c_address = 0x29,
-      .sda_pin = GPIO_NUM_21,
-      .scl_pin = GPIO_NUM_22,
-      .xshut_pin = GPIO_NUM_25,
-      .io_2v8 = true
-    }
-  };
+  {
+          .i2c_port = I2C_NUM_0,
+          .i2c_address = 0x29,
+          .sda_pin = GPIO_NUM_21,
+          .scl_pin = GPIO_NUM_22,
+          .xshut_pin = GPIO_NUM_25,
 
-  if (!ToFSensorManager::instance().configure(tof_configs, NUM_TOF_SENSORS)) {
-    ESP_LOGE(TAG, "Failed to configure ToF sensors");
-  }
+          // VL53L1 specific (TOF400F module)
+          .use_vl53l1 = true,             // Use VL53L1 instead of VL53L0X
+          .uart_port = UART_NUM_1,
+          .uart_tx_pin = GPIO_NUM_17,
+          .uart_rx_pin = GPIO_NUM_16,
+          .ranging_mode = VL53L1::RangingMode::HIGH_PRECISION
+      }
+      };
+
+      if (!ToFSensorManager::instance().configure(tof_configs, NUM_TOF_SENSORS)) {
+        ESP_LOGE(TAG, "Failed to configure ToF sensors");
+      }
+    }
 
   ESP_LOGI(TAG, "Sensor control initialized");
 }

@@ -1,6 +1,6 @@
     idf_component_register(
       SRCS
-      "vl53l0x.cpp"
+      "vl53l1.cpp"
       INCLUDE_DIRS
       "."
       "include"

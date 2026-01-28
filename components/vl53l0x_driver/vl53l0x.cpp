@@ -1,5 +1,4 @@
 #include "vl53l0x.hpp"
-#include "i2c_scanner.hpp"
 #include <cstring>
 #include <algorithm>
 #include <vector>
@@ -647,6 +646,7 @@ const char* VL53L0X::init() {
 
         return "Device not responding at expected address";
     }
+
     ESP_LOGI(TAG, "Step 4: Device verified at address 0x%02X - OK", pimpl_->config.i2c_address);
 
     // Check model ID
