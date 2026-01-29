@@ -124,4 +124,3 @@ private:
     void set_speed_subscription_callback(const void * msin);
     void led_subscription_callback(const void * msin);
 };
-

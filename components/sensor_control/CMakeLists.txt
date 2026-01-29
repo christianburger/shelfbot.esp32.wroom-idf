@@ -1,14 +1,18 @@
 idf_component_register(
   SRCS
   "ultrasonic_sensor.cpp"
+  "tof400f_modbus.cpp"
   "tof_sensor.cpp"
   "sensor_control.cpp"
+  "i2c_scanner.cpp"
   INCLUDE_DIRS
   "include"
   "."
   REQUIRES
   vl53l0x_driver
+  vl53l1_driver
   firmware_version
+  duart_modbus
   driver
   esp_timer
   freertos

@@ -1,0 +1,11 @@
+    idf_component_register(
+      SRCS
+      "duart_modbus.cpp"
+      INCLUDE_DIRS
+      "."
+      "include"
+      REQUIRES
+      driver
+      freertos
+      esp_timer
+    )

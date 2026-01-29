@@ -11,7 +11,7 @@
  *
  * Uses the new ESP-IDF I2C master driver API for reliable device detection.
  * This is useful for debugging and verifying sensor connectivity.
- * 
+ *
  * Also includes support for TOF400F module mode switching from UART to I2C.
  */
 class I2CScanner {
@@ -97,17 +97,17 @@ public:
 
     /**
      * @brief Switch TOF400F module from UART to I2C mode
-     * 
+     *
      * The TOF400F module (containing VL53L1 sensor) defaults to UART/Modbus mode.
      * This function sends a Modbus command via UART to enable I2C mode.
      * After this command, the VL53L1 sensor becomes accessible via I2C at 0x29.
-     * 
+     *
      * Procedure:
      * 1. Initialize UART with specified pins and baud rate
      * 2. Send Modbus write command to register 0x0009 with value 0x0001
      * 3. Wait for module to switch modes (~200ms)
      * 4. Clean up UART resources
-     * 
+     *
      * @param uart_port UART port number
      * @param tx_pin UART TX pin (connects to module RX)
      * @param rx_pin UART RX pin (connects to module TX)
@@ -123,7 +123,7 @@ public:
 
 private:
     static const char* TAG;
-    
+
     // Modbus helper functions for TOF400F
     static uint16_t calculateModbusCRC(const uint8_t* data, size_t length);
     static size_t buildModbusWriteCommand(uint8_t* buffer, uint8_t slave_addr,

@@ -256,11 +256,11 @@ size_t I2CScanner::buildModbusWriteCommand(uint8_t* buffer, uint8_t slave_addr,
     buffer[3] = reg_addr & 0xFF;
     buffer[4] = (value >> 8) & 0xFF;
     buffer[5] = value & 0xFF;
-    
+
     uint16_t crc = calculateModbusCRC(buffer, 6);
     buffer[6] = crc & 0xFF;
     buffer[7] = (crc >> 8) & 0xFF;
-    
+
     return 8;
 }
 
@@ -280,7 +280,7 @@ bool I2CScanner::switchTOF400FToI2CMode(uart_port_t uart_port,
 
     // Step 1: Configure UART
     ESP_LOGI(TAG, "Step 1: Configuring UART...");
-    
+
     uart_config_t uart_config = {
         .baud_rate = (int)baud_rate,
         .data_bits = UART_DATA_8_BITS,
@@ -297,7 +297,7 @@ bool I2CScanner::switchTOF400FToI2CMode(uart_port_t uart_port,
         return false;
     }
 
-    err = uart_set_pin(uart_port, tx_pin, rx_pin, 
+    err = uart_set_pin(uart_port, tx_pin, rx_pin,
                        UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "UART set pin failed: %s", esp_err_to_name(err));
@@ -309,7 +309,7 @@ bool I2CScanner::switchTOF400FToI2CMode(uart_port_t uart_port,
         ESP_LOGE(TAG, "UART driver install failed: %s", esp_err_to_name(err));
         return false;
     }
-    
+
     ESP_LOGI(TAG, "Step 1: UART configured - OK");
 
     // Small delay for module to be ready
@@ -319,10 +319,10 @@ bool I2CScanner::switchTOF400FToI2CMode(uart_port_t uart_port,
     ESP_LOGI(TAG, "Step 2: Sending I2C mode enable command...");
     ESP_LOGI(TAG, "  Command: Write register 0x0009 = 0x0001");
     ESP_LOGI(TAG, "  (Register name 'DISABLE_IIC' enables I2C when set to 1)");
-    
+
     uint8_t cmd[8];
     size_t cmd_len = buildModbusWriteCommand(cmd, slave_addr, 0x0009, 0x0001);
-    
+
     // Log command bytes
     ESP_LOGD(TAG, "  Modbus command:");
     for (size_t i = 0; i < cmd_len; i++) {
@@ -339,24 +339,24 @@ bool I2CScanner::switchTOF400FToI2CMode(uart_port_t uart_port,
         uart_driver_delete(uart_port);
         return false;
     }
-    
+
     ESP_LOGI(TAG, "  Command sent (%zu bytes)", cmd_len);
 
     // Step 3: Wait for response
     ESP_LOGI(TAG, "Step 3: Waiting for response...");
-    
+
     uint8_t response[8];
-    int len = uart_read_bytes(uart_port, response, sizeof(response), 
+    int len = uart_read_bytes(uart_port, response, sizeof(response),
                              pdMS_TO_TICKS(500));
-    
+
     if (len < 0) {
         ESP_LOGW(TAG, "No response from module (timeout)");
         uart_driver_delete(uart_port);
         return false;
     }
-    
+
     ESP_LOGI(TAG, "  Received %d bytes", len);
-    
+
     // Log response bytes
     if (len > 0) {
         ESP_LOGD(TAG, "  Response:");
@@ -371,7 +371,7 @@ bool I2CScanner::switchTOF400FToI2CMode(uart_port_t uart_port,
         // Verify CRC
         uint16_t received_crc = response[6] | (response[7] << 8);
         uint16_t calculated_crc = calculateModbusCRC(response, 6);
-        
+
         if (received_crc == calculated_crc) {
             // Check if response matches command (successful write echoes command)
             if (memcmp(cmd, response, 8) == 0) {
@@ -398,7 +398,7 @@ bool I2CScanner::switchTOF400FToI2CMode(uart_port_t uart_port,
         ESP_LOGI(TAG, "VL53L1 sensor should now be accessible at I2C address 0x29");
         ESP_LOGI(TAG, "Wait ~200ms before attempting I2C communication");
         ESP_LOGI(TAG, "========================================");
-        
+
         // Wait for mode switch to complete
         vTaskDelay(pdMS_TO_TICKS(200));
         return true;
@@ -407,7 +407,7 @@ bool I2CScanner::switchTOF400FToI2CMode(uart_port_t uart_port,
         ESP_LOGW(TAG, "TOF400F: Mode switch command sent but response unclear");
         ESP_LOGW(TAG, "Module may have switched modes anyway - verify with I2C scan");
         ESP_LOGW(TAG, "========================================");
-        
+
         // Still wait in case it worked
         vTaskDelay(pdMS_TO_TICKS(200));
         return false;

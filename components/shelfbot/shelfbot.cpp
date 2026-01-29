@@ -208,24 +208,41 @@ void Shelfbot::destroy_entities() {
     rmw_context_t * rmw_context = rcl_context_get_rmw_context(&support.context);
     (void) rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
 
-    rcl_publisher_fini(&heartbeat_publisher, &node);
-    rcl_publisher_fini(&motor_position_publisher, &node);
-    rcl_publisher_fini(&distance_sensors_publisher, &node);
-    rcl_publisher_fini(&led_state_publisher, &node);
-    rcl_publisher_fini(&tof_distance_publisher, &node);
+    // Explicitly ignore return values with (void) cast
+    rcl_ret_t ret;
 
-    rcl_subscription_fini(&motor_command_subscription, &node);
-    rcl_subscription_fini(&set_speed_subscription, &node);
-    rcl_subscription_fini(&led_subscription, &node);
+    ret = rcl_publisher_fini(&heartbeat_publisher, &node);
+    (void)ret;
+    ret = rcl_publisher_fini(&motor_position_publisher, &node);
+    (void)ret;
+    ret = rcl_publisher_fini(&distance_sensors_publisher, &node);
+    (void)ret;
+    ret = rcl_publisher_fini(&led_state_publisher, &node);
+    (void)ret;
+    ret = rcl_publisher_fini(&tof_distance_publisher, &node);
+    (void)ret;
 
-    rcl_timer_fini(&heartbeat_timer);
-    rcl_timer_fini(&motor_position_timer);
-    rcl_timer_fini(&distance_sensors_timer);
-    rcl_timer_fini(&led_state_timer);
-    rcl_timer_fini(&tof_timer);
+    ret = rcl_subscription_fini(&motor_command_subscription, &node);
+    (void)ret;
+    ret = rcl_subscription_fini(&set_speed_subscription, &node);
+    (void)ret;
+    ret = rcl_subscription_fini(&led_subscription, &node);
+    (void)ret;
+
+    ret = rcl_timer_fini(&heartbeat_timer);
+    (void)ret;
+    ret = rcl_timer_fini(&motor_position_timer);
+    (void)ret;
+    ret = rcl_timer_fini(&distance_sensors_timer);
+    (void)ret;
+    ret = rcl_timer_fini(&led_state_timer);
+    (void)ret;
+    ret = rcl_timer_fini(&tof_timer);
+    (void)ret;
 
     rclc_executor_fini(&executor);
-    rcl_node_fini(&node);
+    ret = rcl_node_fini(&node);
+    (void)ret;
     rclc_support_fini(&support);
 }
 
@@ -237,16 +254,29 @@ void Shelfbot::micro_ros_task_impl() {
             case WAITING_AGENT:
                 if (query_mdns_host("gentoo-laptop")) {
                      rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
-                     rcl_init_options_init(&init_options, allocator);
+
+                     // Check and handle return value
+                     rcl_ret_t ret = rcl_init_options_init(&init_options, allocator);
+                     if (ret != RCL_RET_OK) {
+                         ESP_LOGE(TAG, "Failed to initialize rcl init options: %ld", ret);
+                         break;
+                     }
+
                      rmw_uros_options_set_udp_address(agent_ip_str, "8888", rcl_init_options_get_rmw_init_options(&init_options));
 
                      if (rclc_support_init_with_options(&support , 0, NULL, &init_options, &allocator) == RCL_RET_OK) {
-state = AGENT_CONNECTED;
-}
-rcl_init_options_fini(&init_options);
-}
-vTaskDelay(pdMS_TO_TICKS(2000));
-break;
+                         state = AGENT_CONNECTED;
+                     }
+
+                     // Check and handle return value
+                     ret = rcl_init_options_fini(&init_options);
+                     if (ret != RCL_RET_OK) {
+                         ESP_LOGE(TAG, "Failed to finalize rcl init options: %ld", ret);
+                     }
+                }
+                vTaskDelay(pdMS_TO_TICKS(2000));
+                break;
+
         case AGENT_CONNECTED:
              if (!entities_created) {
                  create_entities();
