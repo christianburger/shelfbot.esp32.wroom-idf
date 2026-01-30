@@ -82,6 +82,13 @@ public:
      */
     uint8_t getDeviceAddress() const { return config_.modbus_address; }
 
+  /**
+   * @brief Read measurement result register
+   * @param distance_mm Output parameter for distance in millimeters
+   * @return nullptr on success, error string on failure
+   */
+  const char* readMeasurement(uint16_t& distance_mm);  // ADD THIS
+
     /**
      * @brief Perform self-test of MODBUS communication
      * @return Detailed test results

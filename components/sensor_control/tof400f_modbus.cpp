@@ -80,25 +80,37 @@ const char* Tof400fModbus::switchToI2CMode(bool verify) {
         return "MODBUS not initialized";
     }
 
+    ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "Switching TOF400F to I2C mode via MODBUS");
+    ESP_LOGI(TAG, "========================================");
 
-    // First, read current value to log
+    // Step 1: Read current value
+    ESP_LOGI(TAG, "Step 1: Reading current I2C mode register...");
     uint16_t current_value = 0;
     if (readAndLogRegister(config_.registers.disable_iic, current_value, "current I2C mode")) {
-        ESP_LOGI(TAG, "Current I2C mode register value: 0x%04X", current_value);
+        ESP_LOGI(TAG, "  Register 0x%04X current value: 0x%04X",
+                 config_.registers.disable_iic, current_value);
+
+        const char* mode_str = (current_value == ENABLE_I2C_VALUE) ? "I2C MODE" : "UART MODE";
+        ESP_LOGI(TAG, "  Current mode: %s", mode_str);
+    } else {
+        ESP_LOGW(TAG, "  Failed to read current value");
     }
 
-    // Write 1 to DISABLE_IIC register to enable I2C mode
-    // Note: The register name is misleading. Writing 1 actually enables I2C mode.
-    ESP_LOGI(TAG, "Writing 0x%04X to register 0x%04X (DISABLE_IIC)",
-            ENABLE_I2C_VALUE, config_.registers.disable_iic);
+    // Step 2: Write new value
+    ESP_LOGI(TAG, "Step 2: Writing I2C enable command...");
+    ESP_LOGI(TAG, "  Register: 0x%04X", config_.registers.disable_iic);
+    ESP_LOGI(TAG, "  Value to write: 0x%04X (ENABLE_I2C_VALUE)", ENABLE_I2C_VALUE);
 
     auto write_func = [this](uint16_t read_value) {
-        // Verify that I2C mode is enabled (value should be 1)
+        ESP_LOGI(TAG, "  Write verification: read back value = 0x%04X", read_value);
+
         bool success = (read_value == ENABLE_I2C_VALUE);
         if (!success) {
-            ESP_LOGE(TAG, "I2C mode verification failed: read 0x%04X, expected 0x%04X",
-                    read_value, ENABLE_I2C_VALUE);
+            ESP_LOGE(TAG, "  ❌ Verification FAILED: expected 0x%04X, got 0x%04X",
+                    ENABLE_I2C_VALUE, read_value);
+        } else {
+            ESP_LOGI(TAG, "  ✓ Verification SUCCESS");
         }
         return success;
     };
@@ -111,6 +123,20 @@ const char* Tof400fModbus::switchToI2CMode(bool verify) {
         config_.uart_config.timeout_ms
     );
 
+    // Step 3: Analyze response
+    ESP_LOGI(TAG, "Step 3: Analyzing MODBUS response...");
+    ESP_LOGI(TAG, "  Success: %s", response.success ? "YES" : "NO");
+    ESP_LOGI(TAG, "  ESP Error: %s (%d)", esp_err_to_name(response.esp_error), response.esp_error);
+
+    if (response.error_code != 0) {
+        ESP_LOGI(TAG, "  MODBUS Error Code: 0x%02X", response.error_code);
+    }
+
+    if (response.data.size() >= 2) {
+        uint16_t returned_value = (response.data[0] << 8) | response.data[1];
+        ESP_LOGI(TAG, "  Returned value: 0x%04X", returned_value);
+    }
+
     if (!response.success) {
         std::stringstream ss;
         ss << "Failed to switch to I2C mode: ";
@@ -119,22 +145,27 @@ const char* Tof400fModbus::switchToI2CMode(bool verify) {
             ss << ", MODBUS error: 0x" << std::hex << (int)response.error_code;
         }
         setError(ss.str());
+        ESP_LOGE(TAG, "%s", last_error_.c_str());
         return last_error_.c_str();
     }
 
-    ESP_LOGI(TAG, "TOF400F switched to I2C mode successfully");
+    ESP_LOGI(TAG, "✓ TOF400F switched to I2C mode successfully");
+    ESP_LOGI(TAG, "========================================");
 
-    // Optional: Verify by trying to read the register again
+    // Optional verification
     if (verify) {
-        vTaskDelay(pdMS_TO_TICKS(200));  // Give module time to switch
+        vTaskDelay(pdMS_TO_TICKS(200));
 
+        ESP_LOGI(TAG, "Additional verification: Reading register again...");
         uint16_t verified_value = 0;
         if (readAndLogRegister(config_.registers.disable_iic, verified_value, "verify I2C mode")) {
+            ESP_LOGI(TAG, "  Verified value: 0x%04X", verified_value);
+
             if (verified_value == ENABLE_I2C_VALUE) {
-                ESP_LOGI(TAG, "I2C mode verified: register value = 0x%04X", verified_value);
+                ESP_LOGI(TAG, "  ✓ I2C mode confirmed");
             } else {
-                ESP_LOGW(TAG, "I2C mode verification warning: unexpected value 0x%04X",
-                        verified_value);
+                ESP_LOGW(TAG, "  ⚠ Unexpected value: expected 0x%04X, got 0x%04X",
+                        ENABLE_I2C_VALUE, verified_value);
             }
         }
     }
@@ -346,6 +377,42 @@ bool Tof400fModbus::readAndLogRegister(uint16_t reg, uint16_t& value, const std:
     return false;
 }
 
+const char* Tof400fModbus::readMeasurement(uint16_t& distance_mm) {
+  if (!initialized_ || !modbus_->isReady()) {
+    return "MODBUS not initialized";
+  }
+
+  // Read measurement result register (0x0010)
+  auto response = modbus_->readHoldingRegisters(
+      config_.modbus_address,
+      0x0010,  // Measurement result register
+      1,       // Read 1 register (16-bit)
+      config_.uart_config.timeout_ms
+  );
+
+  if (!response.success) {
+    std::stringstream ss;
+    ss << "Failed to read measurement: ";
+    ss << "ESP error: " << esp_err_to_name(response.esp_error);
+    if (response.error_code != 0) {
+      ss << ", MODBUS error: 0x" << std::hex << (int)response.error_code;
+    }
+    setError(ss.str());
+    return last_error_.c_str();
+  }
+
+  if (response.data.size() < 2) {
+    setError("Invalid response size when reading measurement");
+    return last_error_.c_str();
+  }
+
+  // Parse distance (16-bit big-endian, millimeters)
+  distance_mm = (response.data[0] << 8) | response.data[1];
+
+  clearError();
+  return nullptr;
+}
+
 std::string Tof400fModbus::selfTest() {
     std::stringstream ss;
 
@@ -448,3 +515,5 @@ void Tof400fModbus::setError(const std::string& error) {
 void Tof400fModbus::clearError() {
     last_error_.clear();
 }
+
+

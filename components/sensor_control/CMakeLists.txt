@@ -2,6 +2,7 @@ idf_component_register(
   SRCS
   "ultrasonic_sensor.cpp"
   "tof400f_modbus.cpp"
+  "tof400f_modbus_sensor.cpp"  # ADD THIS LINE
   "tof_sensor.cpp"
   "sensor_control.cpp"
   "i2c_scanner.cpp"
