@@ -336,62 +336,71 @@ bool UltrasonicSensorManager::configure(const UltrasonicSensorConfig* sensor_con
 }
 
 bool UltrasonicSensorManager::start_reading_task(uint32_t read_interval_ms, UBaseType_t priority) {
-    if (!array_ || task_handle_) {
-        return false;
-    }
+  if (task_handle_) {
+    return false;
+  }
 
-    running_ = true;
-    paused_ = false;
+  // Dynamically allocate TaskParams to avoid stack invalidation
+  TaskParams* params = new TaskParams{this, read_interval_ms};
+  if (!params) {
+    ESP_LOGE(TAG, "Failed to allocate TaskParams");
+    return false;
+  }
 
-    TaskParams* params = new TaskParams{this, read_interval_ms};
+  running_ = true;
+  paused_ = false;
 
-    BaseType_t result = xTaskCreate(reading_task, "ultrasonic_reading", 4096, params, priority, &task_handle_);
-    if (result != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create reading task");
-        delete params;
-        running_ = false;
-        return false;
-    }
+  BaseType_t res = xTaskCreate(reading_task, "usonic_read", 4096, params, priority, &task_handle_);
+  if (res != pdPASS) {
+    delete params;  // Clean up on failure
+    running_ = false;
+    return false;
+  }
 
-    ESP_LOGI(TAG, "Reading task started with interval %" PRIu32 " ms", read_interval_ms);
-    return true;
+  ESP_LOGI(TAG, "Reading task started with interval %lu ms", read_interval_ms);
+  return true;
 }
 
 void UltrasonicSensorManager::reading_task(void* param) {
-    auto* params = static_cast<TaskParams*>(param);
-    UltrasonicSensorManager* self = params->manager;
-    uint32_t interval_ms = params->interval_ms;
-    delete params;
+  TaskParams* params = static_cast<TaskParams*>(param);
+  UltrasonicSensorManager* self = params->manager;
+  uint32_t interval_ms = params->interval_ms;
 
-    std::vector<SensorCommon::Reading> readings(self->latest_readings_.size());
+  ESP_LOGI(TAG, "Ultrasonic reading task running");
 
-    while (self->running_) {
-        if (!self->paused_) {
-            if (self->array_->read_all_single(readings, interval_ms)) {
-                if (xSemaphoreTake(self->data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-                    self->latest_readings_ = readings;
-                    xSemaphoreGive(self->data_mutex_);
-                }
+  std::vector<SensorCommon::Reading> readings(self->latest_readings_.size());
 
-                if (self->callback_) {
-                    self->callback_(readings);
-                }
-
-                // Legacy queue
-                float distances[NUM_ULTRASONIC_SENSORS];
-                size_t size = std::min(readings.size(), static_cast<size_t>(NUM_ULTRASONIC_SENSORS));
-                for (size_t j = 0; j < size; ++j) {
-                    distances[j] = readings[j].distance_cm;
-                }
-                xQueueOverwrite(distance_data_queue, distances);
-            }
+  while (self->running_) {
+    if (!self->paused_) {
+      if (self->array_->read_all_single(readings, interval_ms)) {
+        if (xSemaphoreTake(self->data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+          self->latest_readings_ = readings;
+          xSemaphoreGive(self->data_mutex_);
         }
 
-        vTaskDelay(pdMS_TO_TICKS(interval_ms));
+        if (self->callback_) {
+          self->callback_(readings);
+        }
+
+        // Legacy queue
+        float distances[NUM_ULTRASONIC_SENSORS];
+        size_t size = std::min(readings.size(), static_cast<size_t>(NUM_ULTRASONIC_SENSORS));
+        for (size_t j = 0; j < size; ++j) {
+          distances[j] = readings[j].distance_cm;
+        }
+        xQueueOverwrite(distance_data_queue, distances);
+      }
     }
 
-    ESP_LOGI(TAG, "Ultrasonic reading task exiting");
-    vTaskDelete(NULL);
+    vTaskDelay(pdMS_TO_TICKS(interval_ms));
+  }
+
+  ESP_LOGI(TAG, "Ultrasonic reading task exiting");
+
+  // Clean up the dynamically allocated params
+  delete params;
+
+  vTaskDelete(NULL);
 }
 
 bool UltrasonicSensorManager::get_latest_readings(std::vector<SensorCommon::Reading>& readings) {

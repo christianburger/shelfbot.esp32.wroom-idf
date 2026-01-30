@@ -694,55 +694,58 @@ bool ToFSensorManager::configure(const ToFSensorConfig* sensor_configs, uint8_t 
 }
 
 bool ToFSensorManager::start_reading_task(uint32_t read_interval_ms, UBaseType_t priority) {
-    if (!array_ || task_handle_) {
-        ESP_LOGE(TAG, "Cannot start reading task (array: %p, task: %p)", 
-                 (void*)array_, (void*)task_handle_);
-        return false;
-    }
+  if (task_handle_) return false;
 
-    running_ = true;
-    paused_ = false;
+  // Dynamically allocate TaskParams to avoid stack invalidation
+  TaskParams* params = new TaskParams{this, read_interval_ms};
+  if (!params) {
+    ESP_LOGE(TAG, "Failed to allocate TaskParams");
+    return false;
+  }
 
-    TaskParams* params = new TaskParams{this, read_interval_ms};
+  running_ = true;
+  paused_ = false;
 
-    BaseType_t result = xTaskCreate(reading_task, "tof_reading", 4096, params, priority, &task_handle_);
-    if (result != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create reading task");
-        delete params;
-        running_ = false;
-        return false;
-    }
+  BaseType_t res = xTaskCreate(reading_task, "tof_read", 4096, params, priority, &task_handle_);
+  if (res != pdPASS) {
+    delete params;  // Clean up on failure
+    running_ = false;
+    return false;
+  }
 
-    ESP_LOGI(TAG, "ToF reading task started (interval: %" PRIu32 " ms)", read_interval_ms);
-    return true;
+  ESP_LOGI(TAG, "ToF reading task started (interval: %lu ms)", read_interval_ms);
+  return true;
 }
 
 void ToFSensorManager::reading_task(void* param) {
-    auto* params = static_cast<TaskParams*>(param);
-    ToFSensorManager* self = params->manager;
-    uint32_t interval_ms = params->interval_ms;
-    delete params;
+  TaskParams* params = static_cast<TaskParams*>(param);
+  ToFSensorManager* self = params->manager;
+  uint32_t interval_ms = params->interval_ms;
 
-    std::vector<SensorCommon::Reading> readings(self->latest_readings_.size());
+  ESP_LOGI(TAG, "ToF reading task running");
 
-    ESP_LOGI(TAG, "ToF reading task running");
+  while (self->running_) {
+    if (!self->paused_) {
+      std::vector<SensorCommon::Reading> readings(self->latest_readings_.size());  // ADD THIS LINE
 
-    while (self->running_) {
-        if (!self->paused_) {
-            if (self->array_->update_readings(readings)) {
-                // Update latest readings with mutex protection
-                if (xSemaphoreTake(self->data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-                    self->latest_readings_ = readings;
-                    xSemaphoreGive(self->data_mutex_);
-                }
-            }
+      if (self->array_->update_readings(readings)) {
+        // Update latest readings with mutex protection
+        if (xSemaphoreTake(self->data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+          self->latest_readings_ = readings;
+          xSemaphoreGive(self->data_mutex_);
         }
-
-        vTaskDelay(pdMS_TO_TICKS(interval_ms));
+      }
     }
 
-    ESP_LOGI(TAG, "ToF reading task exiting");
-    vTaskDelete(NULL);
+    vTaskDelay(pdMS_TO_TICKS(interval_ms));
+  }
+
+  ESP_LOGI(TAG, "ToF reading task exiting");
+
+  // Clean up the dynamically allocated params
+  delete params;
+
+  vTaskDelete(NULL);
 }
 
 bool ToFSensorManager::get_latest_readings(std::vector<SensorCommon::Reading>& readings) {
