@@ -303,6 +303,16 @@ void Shelfbot::micro_ros_task_impl() {
 }
 // --- Main Entry Point ---
 void Shelfbot::begin() {
+
+esp_task_wdt_config_t twdt_config = {
+    .timeout_ms = 5000,  // 5 second timeout
+    .idle_core_mask = 0, // Check both cores
+    .trigger_panic = false  // Don't panic, just reset
+};
+
+esp_task_wdt_init(&twdt_config);
+esp_task_wdt_add(nullptr);  // Add current task to watchdog
+
 // 1. Initialize Subsystems (Hardware Abstraction)
 led_control_init();
 motor_control_begin();

@@ -1,282 +1,409 @@
 #include "sensor_control.hpp"
 #include "ultrasonic_sensor.hpp"
-#include "tof_sensor.hpp"
-#include "tof400f_modbus_sensor.hpp"
-#include "esp_log.h"
-#include "freertos/task.h"
-#include "esp_timer.h"
-#include "driver/gpio.h"
+#include "vl53l1_modbus.hpp"
 #include <vector>
+#include "esp_log.h"
+#include "driver/gpio.h"
+#include "driver/i2c_master.h"
+#include "driver/uart.h"
 
-static const char* TAG = "sensor_control";
+const char* SensorControl::TAG = "SensorControl";
 
-// --- Configuration ---
-const float COLLISION_THRESHOLD_CM = 2.0;
-static int64_t last_emergency_stop_time_us = 0;
-static const int64_t EMERGENCY_STOP_COOLDOWN_US = 500000;
+// Simple TOF sensor implementation using VL53L1_Modbus
+class TofSensorImpl {
+private:
+    std::unique_ptr<VL53L1_Modbus> driver_;
+    VL53L1_Modbus::Config config_;
+    static constexpr const char* TAG = "TofSensorImpl";
 
-// --- Global Queues ---
-QueueHandle_t unified_sensor_data_queue = nullptr;
-QueueHandle_t motor_stop_queue = nullptr;
-QueueHandle_t distance_data_queue = nullptr;
+public:
+    TofSensorImpl() {
+        config_ = vl53l1_modbus_default_config(
+            I2C_NUM_0,
+            GPIO_NUM_21,
+            GPIO_NUM_22,
+            UART_NUM_1,
+            GPIO_NUM_17,
+            GPIO_NUM_16
+        );
 
-// Global pointer to MODBUS ToF sensor
-static Tof400fModbusSensor* g_tof_sensor = nullptr;
+        driver_ = std::make_unique<VL53L1_Modbus>(config_);
+    }
 
-static void sensor_reader_task(void* arg) {
-    std::vector<SensorCommon::Reading> ultrasonic_readings;
-
-    SensorDataPacket packet;
-    uint32_t log_counter = 0;
-    const uint32_t LOG_INTERVAL = 10;
-
-    for (;;) {
-        bool obstacle_detected = false;
-        int64_t current_time = esp_timer_get_time();
-        packet.timestamp_us = current_time;
-
-        // Initialize arrays to invalid values
-        for (int i = 0; i < NUM_ULTRASONIC_SENSORS; i++) {
-            packet.ultrasonic_distances_cm[i] = SensorCommon::MAX_DISTANCE_CM;
-            packet.ultrasonic_valid[i] = false;
+    esp_err_t initialize() {
+        const char* err = driver_->init();
+        if (err != nullptr) {
+            ESP_LOGE(TAG, "TOF sensor init failed: %s", err);
+            return ESP_FAIL;
         }
-        for (int i = 0; i < NUM_TOF_SENSORS; i++) {
-            packet.tof_distances_cm[i] = SensorCommon::MAX_DISTANCE_CM;
-            packet.tof_valid[i] = false;
-        }
+        return ESP_OK;
+    }
 
-        // Read Ultrasonic Sensors
-        if (UltrasonicSensorManager::instance().get_latest_readings(ultrasonic_readings)) {
-            for (size_t i = 0; i < ultrasonic_readings.size() && i < NUM_ULTRASONIC_SENSORS; i++) {
-                packet.ultrasonic_distances_cm[i] = ultrasonic_readings[i].distance_cm;
-                packet.ultrasonic_valid[i] = ultrasonic_readings[i].valid;
+    bool is_ready() const {
+        return driver_ && driver_->isReady();
+    }
 
-                if (log_counter == 0) {
-                    if (ultrasonic_readings[i].valid) {
-                        ESP_LOGI(TAG, "Ultrasonic[%zu]: %.1f cm", i, ultrasonic_readings[i].distance_cm);
-                    } else {
-                        ESP_LOGD(TAG, "Ultrasonic[%zu]: INVALID (%.1f cm)", i, ultrasonic_readings[i].distance_cm);
-                    }
-                }
-
-                if (ultrasonic_readings[i].valid &&
-                    ultrasonic_readings[i].distance_cm >= SensorCommon::MIN_DISTANCE_CM &&
-                    ultrasonic_readings[i].distance_cm < COLLISION_THRESHOLD_CM) {
-                    obstacle_detected = true;
-                    ESP_LOGW(TAG, "Obstacle: Ultrasonic[%zu] = %.1f cm (VALID, CLOSE)",
-                             i, ultrasonic_readings[i].distance_cm);
-                }
-            }
+    esp_err_t read_measurement(uint16_t& distance_mm, bool& valid, uint8_t& status) {
+        if (!driver_) {
+            return ESP_ERR_INVALID_STATE;
         }
 
-        // Read ToF Sensors (I2C has priority, MODBUS is fallback)
-        bool tof_read_success = false;
-
-        // Priority 1: Try I2C ToF sensors first
-        std::vector<SensorCommon::Reading> tof_readings;
-        if (ToFSensorManager::instance().get_latest_readings(tof_readings) && !tof_readings.empty()) {
-            packet.tof_distances_cm[0] = tof_readings[0].distance_cm;
-            packet.tof_valid[0] = tof_readings[0].valid;
-            tof_read_success = true;
-
-            if (log_counter == 0) {
-                if (tof_readings[0].valid) {
-                    ESP_LOGI(TAG, "ToF[0] (I2C): %.1f cm", tof_readings[0].distance_cm);
-                } else {
-                    ESP_LOGD(TAG, "ToF[0] (I2C): INVALID (%.1f cm)", tof_readings[0].distance_cm);
-                }
-            }
-
-            if (tof_readings[0].valid &&
-                tof_readings[0].distance_cm >= SensorCommon::MIN_DISTANCE_CM &&
-                tof_readings[0].distance_cm < COLLISION_THRESHOLD_CM) {
-                obstacle_detected = true;
-                ESP_LOGW(TAG, "Obstacle: ToF[0] = %.1f cm (VALID, CLOSE)", tof_readings[0].distance_cm);
-            }
+        VL53L1_Modbus::Measurement result;
+        if (!driver_->readContinuous(result)) {
+            return ESP_ERR_INVALID_RESPONSE;
         }
 
-        // Priority 2: If I2C not available, try MODBUS sensor
-        if (!tof_read_success && g_tof_sensor && g_tof_sensor->isReady()) {
-            SensorCommon::Reading tof_reading;
-            if (g_tof_sensor->readSingle(tof_reading)) {
-                packet.tof_distances_cm[0] = tof_reading.distance_cm;
-                packet.tof_valid[0] = tof_reading.valid;
-                tof_read_success = true;
+        distance_mm = result.distance_mm;
+        valid = result.valid;
+        status = result.range_status;
+        return ESP_OK;
+    }
 
-                if (log_counter == 0) {
-                    if (tof_reading.valid) {
-                        ESP_LOGI(TAG, "ToF[0] (MODBUS): %.1f cm", tof_reading.distance_cm);
-                    } else {
-                        ESP_LOGD(TAG, "ToF[0] (MODBUS): INVALID (%.1f cm)", tof_reading.distance_cm);
-                    }
-                }
-
-                if (tof_reading.valid &&
-                    tof_reading.distance_cm >= SensorCommon::MIN_DISTANCE_CM &&
-                    tof_reading.distance_cm < COLLISION_THRESHOLD_CM) {
-                    obstacle_detected = true;
-                    ESP_LOGW(TAG, "Obstacle: ToF[0] = %.1f cm (VALID, CLOSE)", tof_reading.distance_cm);
-                }
-            }
+    esp_err_t set_mode(bool long_distance) {
+        if (!driver_) {
+            return ESP_ERR_INVALID_STATE;
         }
 
-        if (!tof_read_success && log_counter == 0) {
-            ESP_LOGD(TAG, "No ToF sensors available (neither MODBUS nor I2C)");
+        VL53L1_Modbus::RangingMode mode = long_distance
+            ? VL53L1_Modbus::RangingMode::LONG_DISTANCE
+            : VL53L1_Modbus::RangingMode::HIGH_PRECISION;
+
+        const char* err = driver_->setRangingMode(mode);
+        return (err == nullptr) ? ESP_OK : ESP_FAIL;
+    }
+
+    esp_err_t start_continuous() {
+        if (!driver_) {
+            return ESP_ERR_INVALID_STATE;
         }
 
-        // Increment and wrap log counter
-        log_counter = (log_counter + 1) % LOG_INTERVAL;
+        return driver_->startContinuous() ? ESP_OK : ESP_FAIL;
+    }
 
-        // Send unified data to queue
-        xQueueOverwrite(unified_sensor_data_queue, &packet);
-
-        // Legacy queue support
-        float legacy_distances[NUM_ULTRASONIC_SENSORS];
-        for (int i = 0; i < NUM_ULTRASONIC_SENSORS; i++) {
-            legacy_distances[i] = packet.ultrasonic_distances_cm[i];
-        }
-        xQueueOverwrite(distance_data_queue, &legacy_distances);
-
-        // Emergency stop with cooldown
-        if (obstacle_detected) {
-            int64_t time_since_last_stop = current_time - last_emergency_stop_time_us;
-
-            if (time_since_last_stop >= EMERGENCY_STOP_COOLDOWN_US) {
-                int stop_signal = 1;
-                xQueueSend(motor_stop_queue, &stop_signal, 0);
-                last_emergency_stop_time_us = current_time;
-                ESP_LOGW(TAG, "Emergency stop triggered - valid obstacle within %.1f cm",
-                         COLLISION_THRESHOLD_CM);
-            }
+    esp_err_t stop_continuous() {
+        if (!driver_) {
+            return ESP_ERR_INVALID_STATE;
         }
 
-        vTaskDelay(pdMS_TO_TICKS(100));
+        return driver_->stopContinuous() ? ESP_OK : ESP_FAIL;
+    }
+
+    bool probe() {
+        return driver_ && driver_->probe();
+    }
+};
+
+// Constructor - Fixed initialization order to match member declaration order
+SensorControl::SensorControl(const Config& config)
+    : config_(config),
+      ultrasonic_array_(nullptr),
+      tof_sensor_(nullptr),
+      initialized_(false),
+      continuous_mode_(false),
+      continuous_task_handle_(nullptr) {}
+
+SensorControl::~SensorControl() {
+    stop_continuous();
+
+    if (continuous_task_handle_) {
+        vTaskDelete(continuous_task_handle_);
+    }
+
+    if (tof_sensor_) {
+        delete static_cast<TofSensorImpl*>(tof_sensor_);
     }
 }
 
-void sensor_control_init() {
-    ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "Initializing Unified Sensor Control");
-    ESP_LOGI(TAG, "========================================");
-
-    // Create queues
-    unified_sensor_data_queue = xQueueCreate(1, sizeof(SensorDataPacket));
-    motor_stop_queue = xQueueCreate(1, sizeof(int));
-    distance_data_queue = xQueueCreate(1, sizeof(float[NUM_ULTRASONIC_SENSORS]));
-
-    // ========================================
-    // Configure Ultrasonic Sensors
-    // ========================================
-    ESP_LOGI(TAG, "Configuring %d ultrasonic sensor(s)...", NUM_ULTRASONIC_SENSORS);
-
-    UltrasonicSensorConfig ultrasonic_configs[NUM_ULTRASONIC_SENSORS] = {
-        {
-            .trig_pin = GPIO_NUM_32,
-            .echo_pin = GPIO_NUM_34,
-            .collision_threshold_cm = COLLISION_THRESHOLD_CM,
-            .timeout_us = 30000
-        },
-        {
-            .trig_pin = GPIO_NUM_5,
-            .echo_pin = GPIO_NUM_35,
-            .collision_threshold_cm = COLLISION_THRESHOLD_CM,
-            .timeout_us = 30000
-        }
-    };
-
-    if (!UltrasonicSensorManager::instance().configure(ultrasonic_configs, NUM_ULTRASONIC_SENSORS)) {
-        ESP_LOGE(TAG, "Failed to configure ultrasonic sensors");
-    } else {
-        ESP_LOGI(TAG, "Ultrasonic sensors configured successfully");
+esp_err_t SensorControl::initialize_ultrasonic() {
+    if (config_.ultrasonic_configs.empty()) {
+        ESP_LOGW(TAG, "No ultrasonic sensors configured");
+        return ESP_OK;
     }
 
-    // ========================================
-    // Configure ToF Sensors (I2C first, then MODBUS fallback)
-    // ========================================
-    ESP_LOGI(TAG, "Configuring %d ToF sensor(s)...", NUM_TOF_SENSORS);
+    ESP_LOGI(TAG, "Initializing %zu ultrasonic sensor(s)...",
+             config_.ultrasonic_configs.size());
 
-    // Priority 1: Scan I2C bus for VL53L0X/VL53L1 sensors
-    ESP_LOGI(TAG, "Scanning I2C bus for ToF sensors...");
+    ultrasonic_array_ = std::make_unique<UltrasonicSensorArray>();
 
-    ToFSensorConfig tof_configs[NUM_TOF_SENSORS] = {
-        {
-            .i2c_port = I2C_NUM_0,
-            .i2c_address = 0x29,
-            .sda_pin = GPIO_NUM_21,
-            .scl_pin = GPIO_NUM_22,
-            .xshut_pin = GPIO_NUM_25,
-            .uart_port = UART_NUM_1,
-            .uart_tx_pin = GPIO_NUM_17,
-            .uart_rx_pin = GPIO_NUM_16,
-            .ranging_mode = VL53L1::RangingMode::HIGH_PRECISION,
-            .io_2v8 = true,
-            .timeout_ms = 500,
-            .timing_budget_us = 200000,
-            .signal_rate_limit_mcps = 0.25
-        }
-    };
+    for (size_t i = 0; i < config_.ultrasonic_configs.size(); i++) {
+        const auto& uconfig = config_.ultrasonic_configs[i];
 
-    bool i2c_sensor_found = ToFSensorManager::instance().configure(tof_configs, NUM_TOF_SENSORS);
-
-    if (i2c_sensor_found) {
-        ESP_LOGI(TAG, "I2C ToF sensor found and configured - using I2C");
-        g_tof_sensor = nullptr;  // Don't use MODBUS
-    } else {
-        // Priority 2: No I2C sensor found, try MODBUS TOF400F as fallback
-        ESP_LOGI(TAG, "No I2C ToF sensors found, trying MODBUS...");
-
-        static Tof400fModbusSensor::Config tof_modbus_config = {
-            .uart_port = UART_NUM_1,
-            .tx_pin = GPIO_NUM_17,
-            .rx_pin = GPIO_NUM_16,
-            .baud_rate = 115200,
-            .modbus_address = 0x01,
-            .ranging_mode = Tof400fModbus::RangingMode::HIGH_PRECISION,
-            .timeout_ms = 500
+        // Use UltrasonicSensorConfig from ultrasonic_sensor.hpp
+        UltrasonicSensorConfig sensor_config = {
+            .trig_pin = static_cast<gpio_num_t>(uconfig.trig_pin),
+            .echo_pin = static_cast<gpio_num_t>(uconfig.echo_pin),
+            .collision_threshold_cm = 20.0f,  // Default threshold
+            .timeout_us = uconfig.timeout_us,
+            .state = SENSOR_IDLE,
+            .start_time = 0,
+            .pulse_duration = 0
         };
 
-        static Tof400fModbusSensor tof_sensor_instance(tof_modbus_config);
-        g_tof_sensor = &tof_sensor_instance;
-
-        const char* error = g_tof_sensor->init();
-        if (error) {
-            ESP_LOGW(TAG, "MODBUS TOF400F not available: %s", error);
-            g_tof_sensor = nullptr;
-            ESP_LOGW(TAG, "No ToF sensors found (neither I2C nor MODBUS)");
-        } else {
-            ESP_LOGI(TAG, "MODBUS TOF400F sensor configured - using MODBUS");
+        // Add sensor to the array
+        if (!ultrasonic_array_->add_sensor(i, sensor_config)) {
+            ESP_LOGE(TAG, "Failed to add ultrasonic sensor %zu", i);
+            return ESP_FAIL;
         }
+
+        ESP_LOGD(TAG, "Added ultrasonic sensor %zu: TRIG=GPIO%d, ECHO=GPIO%d",
+                i, uconfig.trig_pin, uconfig.echo_pin);
     }
 
-    ESP_LOGI(TAG, "========================================");
+    // Initialize the array
+    if (!ultrasonic_array_->init()) {
+        ESP_LOGE(TAG, "Failed to initialize ultrasonic sensors");
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Ultrasonic sensors initialized successfully");
+    return ESP_OK;
+}
+
+esp_err_t SensorControl::initialize_tof() {
+    ESP_LOGI(TAG, "Initializing TOF sensor...");
+
+    tof_sensor_ = new TofSensorImpl();
+    esp_err_t err = static_cast<TofSensorImpl*>(tof_sensor_)->initialize();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "TOF sensor initialization failed");
+        delete static_cast<TofSensorImpl*>(tof_sensor_);
+        tof_sensor_ = nullptr;
+        return err;
+    }
+
+    ESP_LOGI(TAG, "TOF sensor initialized successfully");
+    return ESP_OK;
+}
+
+esp_err_t SensorControl::initialize() {
+    if (initialized_) {
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "=========================================");
+    ESP_LOGI(TAG, "Initializing Unified Sensor Control");
+    ESP_LOGI(TAG, "=========================================");
+
+    esp_err_t err = initialize_ultrasonic();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Ultrasonic initialization failed");
+        return err;
+    }
+
+    err = initialize_tof();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "TOF initialization failed");
+        ESP_LOGW(TAG, "Continuing without TOF sensor");
+    }
+
+    initialized_ = true;
+
+    ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "Sensor Control Initialization Complete");
-    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "=========================================");
+
+    return ESP_OK;
 }
 
-void sensor_control_start_task() {
-    ESP_LOGI(TAG, "Starting sensor reading tasks...");
+bool SensorControl::is_ready() const {
+    bool ultrasonic_ready = config_.ultrasonic_configs.empty() ||
+                           (ultrasonic_array_ != nullptr);
 
-    // Start ultrasonic reading task
-    if (!UltrasonicSensorManager::instance().start_reading_task(100, 5)) {
-        ESP_LOGE(TAG, "Failed to start ultrasonic reading task");
-    } else {
-        ESP_LOGI(TAG, "Ultrasonic reading task started");
+    bool tof_ready = (tof_sensor_ == nullptr) ||
+                    (static_cast<TofSensorImpl*>(tof_sensor_)->is_ready());
+
+    return initialized_ && ultrasonic_ready && tof_ready;
+}
+
+esp_err_t SensorControl::read_ultrasonic(std::vector<uint16_t>& distances) {
+    distances.clear();
+
+    if (!ultrasonic_array_ || config_.ultrasonic_configs.empty()) {
+        return ESP_ERR_INVALID_STATE;
     }
 
-    // Start I2C ToF reading task ONLY if I2C sensors configured (not MODBUS)
-    if (!g_tof_sensor) {  // If g_tof_sensor is null, we're using I2C
-        if (!ToFSensorManager::instance().start_reading_task(400, 5)) {
-            ESP_LOGD(TAG, "I2C ToF reading task not started (no sensors)");
-        } else {
-            ESP_LOGI(TAG, "I2C ToF reading task started (400ms interval)");
+    // Read from ultrasonic sensor array
+    std::vector<SensorCommon::Reading> readings;
+    if (!ultrasonic_array_->read_all_single(readings, SensorCommon::DEFAULT_TIMEOUT_MS)) {
+        ESP_LOGE(TAG, "Failed to read ultrasonic sensors");
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    // Convert readings to distances in mm
+    for (const auto& reading : readings) {
+        // Convert cm to mm and ensure it's within uint16_t range
+        uint16_t distance_mm = static_cast<uint16_t>(reading.distance_cm * 10);
+        distances.push_back(distance_mm);
+    }
+
+    return ESP_OK;
+}
+
+esp_err_t SensorControl::read_tof(uint16_t& distance_mm, bool& valid, uint8_t& status) {
+    if (!tof_sensor_) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return static_cast<TofSensorImpl*>(tof_sensor_)->read_measurement(distance_mm, valid, status);
+}
+
+esp_err_t SensorControl::read_all(std::vector<uint16_t>& ultrasonic_distances,
+                                 uint16_t& tof_distance_mm, bool& tof_valid, uint8_t& tof_status) {
+    esp_err_t err = ESP_OK;
+
+    esp_err_t ultrasonic_err = read_ultrasonic(ultrasonic_distances);
+    if (ultrasonic_err != ESP_OK && ultrasonic_array_) {
+        err = ultrasonic_err;
+    }
+
+    esp_err_t tof_err = read_tof(tof_distance_mm, tof_valid, tof_status);
+    if (tof_err != ESP_OK && tof_sensor_) {
+        err = tof_err;
+    }
+
+    return err;
+}
+
+void SensorControl::continuous_read_loop() {
+    ESP_LOGI(TAG, "Starting continuous sensor reading...");
+
+    TickType_t last_ultrasonic_wake = xTaskGetTickCount();
+    TickType_t last_tof_wake = xTaskGetTickCount();
+
+    while (continuous_mode_) {
+        TickType_t now = xTaskGetTickCount();
+
+        if ((now - last_ultrasonic_wake) * portTICK_PERIOD_MS >= config_.ultrasonic_read_interval_ms) {
+            std::vector<uint16_t> ultrasonic_distances;
+            if (read_ultrasonic(ultrasonic_distances) == ESP_OK &&
+                config_.ultrasonic_callback) {
+                config_.ultrasonic_callback(ultrasonic_distances);
+            }
+            last_ultrasonic_wake = now;
+        }
+
+        if ((now - last_tof_wake) * portTICK_PERIOD_MS >= config_.tof_read_interval_ms) {
+            uint16_t distance_mm;
+            bool valid;
+            uint8_t status;
+            if (read_tof(distance_mm, valid, status) == ESP_OK &&
+                config_.tof_callback) {
+                config_.tof_callback(distance_mm, valid, status);
+            }
+            last_tof_wake = now;
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    ESP_LOGI(TAG, "Continuous reading stopped");
+}
+
+void SensorControl::continuous_read_task(void* arg) {
+    SensorControl* instance = static_cast<SensorControl*>(arg);
+    if (instance) {
+        instance->continuous_read_loop();
+    }
+    vTaskDelete(nullptr);
+}
+
+esp_err_t SensorControl::start_continuous() {
+    if (continuous_mode_) {
+        return ESP_OK;
+    }
+
+    if (!is_ready()) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    if (tof_sensor_) {
+        esp_err_t err = static_cast<TofSensorImpl*>(tof_sensor_)->start_continuous();
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to start TOF continuous mode");
+            return err;
         }
     }
 
-    // Start unified sensor reader task
-    xTaskCreate(sensor_reader_task, "sensor_reader", 4096, NULL, 5, NULL);
-    ESP_LOGI(TAG, "Unified sensor reader task started");
+    continuous_mode_ = true;
+
+    BaseType_t result = xTaskCreate(
+        continuous_read_task,
+        "sensor_read_task",
+        4096,
+        this,
+        tskIDLE_PRIORITY + 1,
+        &continuous_task_handle_
+    );
+
+    if (result != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create continuous reading task");
+        continuous_mode_ = false;
+        if (tof_sensor_) {
+            static_cast<TofSensorImpl*>(tof_sensor_)->stop_continuous();
+        }
+        return ESP_FAIL;
+    }
+
+    ESP_LOGI(TAG, "Continuous reading started");
+    return ESP_OK;
 }
 
-bool sensor_control_get_latest_data(SensorDataPacket* packet) {
-    return xQueueReceive(unified_sensor_data_queue, packet, 0) == pdTRUE;
+esp_err_t SensorControl::stop_continuous() {
+    if (!continuous_mode_) {
+        return ESP_OK;
+    }
+
+    continuous_mode_ = false;
+    vTaskDelay(pdMS_TO_TICKS(100));
+
+    if (tof_sensor_) {
+        static_cast<TofSensorImpl*>(tof_sensor_)->stop_continuous();
+    }
+
+    ESP_LOGI(TAG, "Continuous reading stopped");
+    return ESP_OK;
+}
+
+bool SensorControl::is_continuous() const {
+    return continuous_mode_;
+}
+
+esp_err_t SensorControl::set_tof_mode(bool long_distance) {
+    if (!tof_sensor_) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    return static_cast<TofSensorImpl*>(tof_sensor_)->set_mode(long_distance);
+}
+
+size_t SensorControl::get_ultrasonic_count() const {
+    return config_.ultrasonic_configs.size();
+}
+
+bool SensorControl::is_tof_ready() const {
+    return tof_sensor_ && static_cast<TofSensorImpl*>(tof_sensor_)->is_ready();
+}
+
+bool SensorControl::is_ultrasonic_ready() const {
+    return ultrasonic_array_ != nullptr;
+}
+
+esp_err_t SensorControl::self_test() {
+    esp_err_t overall_result = ESP_OK;
+
+    if (tof_sensor_) {
+        bool probe_result = tof_probe();
+        if (!probe_result) {
+            ESP_LOGE(TAG, "TOF probe failed");
+            overall_result = ESP_FAIL;
+        } else {
+            ESP_LOGI(TAG, "TOF probe passed");
+        }
+    }
+
+    return overall_result;
+}
+
+bool SensorControl::tof_probe() {
+    return tof_sensor_ && static_cast<TofSensorImpl*>(tof_sensor_)->probe();
 }

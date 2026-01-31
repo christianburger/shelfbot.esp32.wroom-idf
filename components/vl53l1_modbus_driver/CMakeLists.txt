@@ -1,10 +1,12 @@
     idf_component_register(
       SRCS
-      "vl53l1.cpp"
+      "vl53l1_modbus.cpp"
       INCLUDE_DIRS
       "include"
       REQUIRES
       driver
       freertos
       esp_timer
+      vl53l1_driver
+      duart_modbus
     )

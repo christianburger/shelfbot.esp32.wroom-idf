@@ -341,7 +341,7 @@ bool UltrasonicSensorManager::start_reading_task(uint32_t read_interval_ms, UBas
   }
 
   // Dynamically allocate TaskParams to avoid stack invalidation
-  TaskParams* params = new TaskParams{this, read_interval_ms};
+  auto* params = new TaskParams{this, read_interval_ms};
   if (!params) {
     ESP_LOGE(TAG, "Failed to allocate TaskParams");
     return false;
@@ -400,7 +400,7 @@ void UltrasonicSensorManager::reading_task(void* param) {
   // Clean up the dynamically allocated params
   delete params;
 
-  vTaskDelete(NULL);
+  vTaskDelete(nullptr);
 }
 
 bool UltrasonicSensorManager::get_latest_readings(std::vector<SensorCommon::Reading>& readings) {
