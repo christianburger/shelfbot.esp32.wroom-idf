@@ -1,8 +1,5 @@
 #pragma once
-
-#include <cstdint>
-#include <memory>
-#include "esp_err.h"
+#include <idf_c_includes.hpp>
 
 /**
  * @brief Abstract interface for Time-of-Flight (ToF) distance sensors

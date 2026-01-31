@@ -1,14 +1,4 @@
 #include "vl53l1.hpp"
-
-#include <vector>
-#include <cstring>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_timer.h"
-#include "esp_err.h"
-#include "esp_log.h"
-#include "esp_task_wdt.h"
-
 static const char* TAG = "VL53L1";
 
 // VL53L1 Register Map

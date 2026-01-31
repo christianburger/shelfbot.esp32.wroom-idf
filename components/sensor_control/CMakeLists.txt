@@ -3,7 +3,6 @@ idf_component_register(
   "ultrasonic_sensor.cpp"
   "tof_sensor.cpp"
   "sensor_control.cpp"
-  "sensor_control_facade.cpp"
   "i2c_scanner.cpp"
   INCLUDE_DIRS
   "include"
@@ -12,6 +11,7 @@ idf_component_register(
   vl53l0x_driver
   vl53l1_driver
   vl53l1_modbus_driver
+  idf_includes
   firmware_version
   duart_modbus
   driver

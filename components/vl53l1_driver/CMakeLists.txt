@@ -4,6 +4,7 @@
       INCLUDE_DIRS
       "include"
       REQUIRES
+      idf_includes
       driver
       freertos
       esp_timer

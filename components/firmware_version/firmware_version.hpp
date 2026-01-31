@@ -3,8 +3,7 @@
 #ifndef FIRMWARE_VERSION_HPP
 #define FIRMWARE_VERSION_HPP
 
-#include <cstdint>
-#include "esp_log.h"
+#include "idf_c_includes.hpp"
 
 // Firmware Version Information
 #define FIRMWARE_VERSION_MAJOR 1

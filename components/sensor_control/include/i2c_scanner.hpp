@@ -1,11 +1,5 @@
 #pragma once
-
-#include <vector>
-#include "driver/i2c_master.h"
-#include "driver/gpio.h"
-#include "driver/uart.h"
-#include "esp_log.h"
-
+#include <idf_c_includes.hpp>
 /**
  * @brief I2C Scanner utility for detecting devices on the I2C bus
  *

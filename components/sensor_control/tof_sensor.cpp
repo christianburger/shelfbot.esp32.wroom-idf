@@ -1,10 +1,5 @@
 #include "tof_sensor.hpp"
 #include "vl53l1_modbus.hpp"
-#include <memory>
-#include "esp_log.h"
-#include "driver/gpio.h"
-#include "driver/i2c_master.h"
-#include "driver/uart.h"
 
 static const char* TAG = "TofSensor";
 

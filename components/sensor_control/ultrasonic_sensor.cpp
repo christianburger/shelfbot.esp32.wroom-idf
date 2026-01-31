@@ -1,13 +1,5 @@
 // Complete ultrasonic_sensor.cpp
 #include "ultrasonic_sensor.hpp"
-#include "esp_log.h"
-#include "freertos/task.h"
-#include "freertos/semphr.h"
-#include "driver/gpio.h"
-#include "driver/gptimer.h"
-#include "esp_timer.h"
-#include <vector>
-#include <cstring>
 
 static const char* TAG = "Ultrasonic_Sensor";
 
@@ -27,7 +19,7 @@ static UltrasonicSensorArray* g_array = nullptr;  // Global for ISRs to access c
 
 static void IRAM_ATTR echo_isr_handler(void* arg) {
     int sensor_idx = (int)(intptr_t)arg;
-    if (sensor_idx < 0 || sensor_idx >= NUM_ULTRASONIC_SENSORS || !g_array) return;
+    if (sensor_idx < 0 || sensor_idx >= SensorCommon::NUM_ULTRASONIC_SENSORS || !g_array) return;
 
     UltrasonicSensorConfig& cfg = g_array->configs_[sensor_idx];
     uint32_t gpio_level = gpio_get_level(cfg.echo_pin);
@@ -43,7 +35,7 @@ static void IRAM_ATTR echo_isr_handler(void* arg) {
 }
 
 static bool IRAM_ATTR timeout_timer_isr(gptimer_handle_t timer, const gptimer_alarm_event_data_t* edata, void* user_data) {
-    if (active_sensor_index >= 0 && active_sensor_index < NUM_ULTRASONIC_SENSORS && g_array) {
+    if (active_sensor_index >= 0 && active_sensor_index < SensorCommon::NUM_ULTRASONIC_SENSORS && g_array) {
         UltrasonicSensorConfig& cfg = g_array->configs_[active_sensor_index];
         cfg.pulse_duration = cfg.timeout_us;  // Indicate timeout
         cfg.state = SENSOR_IDLE;
@@ -383,8 +375,8 @@ void UltrasonicSensorManager::reading_task(void* param) {
         }
 
         // Legacy queue
-        float distances[NUM_ULTRASONIC_SENSORS];
-        size_t size = std::min(readings.size(), static_cast<size_t>(NUM_ULTRASONIC_SENSORS));
+        float distances[SensorCommon::NUM_ULTRASONIC_SENSORS];
+        size_t size = std::min(readings.size(), static_cast<size_t>(SensorCommon::NUM_ULTRASONIC_SENSORS));
         for (size_t j = 0; j < size; ++j) {
           distances[j] = readings[j].distance_cm;
         }

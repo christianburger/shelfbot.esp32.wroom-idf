@@ -4,6 +4,7 @@
 #include <memory>
 #include "driver/i2c_master.h"
 #include "driver/gpio.h"
+#include "idf_c_includes.hpp"
 
 class VL53L1 {
 public:

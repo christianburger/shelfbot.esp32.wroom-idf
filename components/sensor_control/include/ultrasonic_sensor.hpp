@@ -1,19 +1,10 @@
-// Corrected ultrasonic_sensor.h
 #pragma once
 
 #ifndef SHELFBOT_ULTRASONIC_SENSOR_H
 #define SHELFBOT_ULTRASONIC_SENSOR_H
 
-#include <cstdint>
-#include <functional>
-#include <vector>
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
-#include "freertos/semphr.h"
-#include "driver/gpio.h"
-#include "sensor_common.hpp"
-
-#define NUM_ULTRASONIC_SENSORS 2
+#include "idf_c_includes.hpp"
+#include "sensor_common.hpp"   // Reading, NUM_ULTRASONIC_SENSORS, constants
 
 // Forward declaration
 class UltrasonicSensorArray;
@@ -51,8 +42,8 @@ struct UltrasonicSensorConfig {
 
 class UltrasonicSensorArray {
 public:
-    UltrasonicSensorConfig configs_[NUM_ULTRASONIC_SENSORS];
-    explicit UltrasonicSensorArray(uint8_t num_sensors = NUM_ULTRASONIC_SENSORS);
+    UltrasonicSensorConfig configs_[SensorCommon::NUM_ULTRASONIC_SENSORS];
+    explicit UltrasonicSensorArray(uint8_t num_sensors = SensorCommon::NUM_ULTRASONIC_SENSORS);
     ~UltrasonicSensorArray();
 
     bool init();

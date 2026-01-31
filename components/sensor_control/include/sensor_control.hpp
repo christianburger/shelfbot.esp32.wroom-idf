@@ -1,12 +1,5 @@
 #pragma once
-
-#include <memory>
-#include <vector>
-#include <functional>
-#include "esp_err.h"
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include <idf_c_includes.hpp>
 
 // Forward declarations
 class UltrasonicSensorArray;

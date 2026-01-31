@@ -1,11 +1,13 @@
 #pragma once
 #ifndef SHELFBOT_SENSOR_COMMON_H
 #define SHELFBOT_SENSOR_COMMON_H
-
-#include <cstdint>
-#include <vector>
+#include <idf_c_includes.hpp>
 
 namespace SensorCommon {
+
+    constexpr int NUM_ULTRASONIC_SENSORS = 4;
+    constexpr int NUM_TOF_SENSORS = 1;
+    constexpr int NUM_SENSORS = 5;
 
   // Unified reading structure (distance in cm for consistency)
   struct Reading {

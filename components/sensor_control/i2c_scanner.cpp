@@ -1,7 +1,4 @@
 #include "include/i2c_scanner.hpp"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include <cstring>
 
 const char* I2CScanner::TAG = "I2C_SCANNER";
 

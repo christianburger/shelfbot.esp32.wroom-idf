@@ -2,6 +2,8 @@
 #include <rcl/allocator.h>
 #include <rmw_microros/init_options.h>
 
+#include "sensor_control.hpp"
+
 static const char* TAG = "shelfbot";
 
 // --- Helper Functions ---
@@ -81,13 +83,13 @@ void Shelfbot::motor_position_timer_callback(rcl_timer_t * timer, int64_t last_c
 void Shelfbot::distance_sensors_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     (void) last_call_time;
     if (timer != nullptr) {
-        SensorDataPacket sensor_data;
-        if (SensorControlFacade::get_latest_data(sensor_data)) {
+        SensorCommon::SensorDataPacket sensor_data;
+        if (SensorCommon::Facade::get_latest_data(sensor_data)) {
             size_t idx = 0;
-            for (int i = 0; i < NUM_ULTRASONIC_SENSORS && idx < static_cast<size_t>(NUM_SENSORS); i++, idx++) {
+            for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS && idx < static_cast<size_t>(SensorCommon::NUM_SENSORS); i++, idx++) {
                 distance_sensors_data[idx] = sensor_data.ultrasonic_distances_cm[i];
             }
-            for (int i = 0; i < NUM_TOF_SENSORS && idx < static_cast<size_t>(NUM_SENSORS); i++, idx++) {
+            for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS && idx < static_cast<size_t>(SensorCommon::NUM_SENSORS); i++, idx++) {
                 distance_sensors_data[idx] = sensor_data.tof_distances_cm[i];
             }
             distance_sensors_msg.data.size = idx;
@@ -107,8 +109,8 @@ void Shelfbot::led_state_timer_callback(rcl_timer_t * timer, int64_t last_call_t
 void Shelfbot::tof_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     (void) last_call_time;
     if (timer != nullptr) {
-        SensorDataPacket sensor_data;
-        if (SensorControlFacade::get_latest_data(sensor_data)) {
+        SensorCommon::SensorDataPacket sensor_data;
+        if (SensorCommon::Facade::get_latest_data(sensor_data)) {
             if (sensor_data.tof_valid[0]) {
                 tof_distance_msg.data = sensor_data.tof_distances_cm[0];
             } else {
@@ -198,7 +200,7 @@ void Shelfbot::create_entities() {
 
     // Initialize msg memory
     init_multi_array(motor_position_msg, motor_pos_data, 2);
-    init_multi_array(distance_sensors_msg, distance_sensors_data, NUM_SENSORS);
+    init_multi_array(distance_sensors_msg, distance_sensors_data, SensorCommon::NUM_SENSORS);
 }
 
 void Shelfbot::destroy_entities() {
@@ -328,8 +330,8 @@ void Shelfbot::begin() {
     start_webserver();
 
     // 3. Initialize High-Level Sensor Control
-    SensorControlFacade::init();           // <-- was sensor_control_init();
-    SensorControlFacade::start_task();     // <-- was sensor_control_start_task();
+    SensorControl::initialize();
+    SensorCommon::Facade::start_task();
 
     // 4. Start Application Task (Micro-ROS)
     xTaskCreate(micro_ros_task_wrapper, "uros_task", 16000, this, 5, nullptr);
