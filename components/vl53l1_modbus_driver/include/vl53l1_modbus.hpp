@@ -1,93 +1,134 @@
 #pragma once
+#include "idf_c_includes.hpp"
+#include "duart_modbus.hpp"
 
-#include <cstdint>
-#include <memory>
-#include "driver/gpio.h"
-#include "driver/i2c_master.h"
-#include "driver/uart.h"
-#include "esp_err.h"
-
+/**
+ * @brief VL53L1 ToF sensor driver using Modbus/UART protocol (TOF400F module)
+ * 
+ * This driver communicates with the TOF400F module EXCLUSIVELY via Modbus over UART.
+ * It does NOT switch to I2C mode - it stays in Modbus mode for all operations.
+ * 
+ * The TOF400F module contains a VL53L1 sensor and provides a Modbus interface for:
+ * - Configuration (ranging mode, continuous output, etc.)
+ * - Calibration (offset, crosstalk)
+ * - Distance measurement readout
+ */
 class VL53L1_Modbus {
 public:
-    enum class RangingMode : uint8_t {
-        HIGH_PRECISION = 0,  // ~1.3m range, 30ms period (Mode 0)
-        LONG_DISTANCE = 1    // ~4.0m range, 200ms period (Mode 1)
+    enum class RangingMode {
+        HIGH_PRECISION,   // 30ms period, 1.3m range
+        LONG_DISTANCE     // 200ms period, 4.0m range
     };
 
     struct Config {
-        // I2C configuration for VL53L1 chip
-        i2c_port_t i2c_port = I2C_NUM_0;
-        gpio_num_t sda_pin = GPIO_NUM_21;
-        gpio_num_t scl_pin = GPIO_NUM_22;
-        uint8_t i2c_address = 0x29;
-        uint32_t i2c_freq_hz = 400000;
-
-        // UART/Modbus configuration for TOF400F module
-        uart_port_t uart_port = UART_NUM_1;
-        gpio_num_t uart_tx_pin = GPIO_NUM_17;
-        gpio_num_t uart_rx_pin = GPIO_NUM_16;
-        uint32_t uart_baud_rate = 115200;
-
-        // TOF400F module configuration
-        uint8_t modbus_slave_address = 0x01;
-        RangingMode ranging_mode = RangingMode::LONG_DISTANCE;
-        uint16_t timeout_ms = 500;
-        bool enable_continuous = true;
+        // UART/Modbus configuration
+        uart_port_t uart_port;
+        gpio_num_t uart_tx_pin;
+        gpio_num_t uart_rx_pin;
+        uint8_t modbus_slave_address;
+        
+        // Sensor configuration
+        RangingMode ranging_mode;
+        uint16_t timeout_ms;
+        bool enable_continuous;
     };
 
     struct Measurement {
         uint16_t distance_mm;
-        bool valid;
         uint8_t range_status;
+        bool valid;
         int64_t timestamp_us;
-
-        Measurement() : distance_mm(0), valid(false), range_status(0), timestamp_us(0) {}
     };
 
     explicit VL53L1_Modbus(const Config& config);
     ~VL53L1_Modbus();
 
-    VL53L1_Modbus(const VL53L1_Modbus&) = delete;
-    VL53L1_Modbus& operator=(const VL53L1_Modbus&) = delete;
-
-    VL53L1_Modbus(VL53L1_Modbus&& other) noexcept;
-    VL53L1_Modbus& operator=(VL53L1_Modbus&& other) noexcept;
-
+    /**
+     * @brief Initialize the sensor via Modbus
+     * @return nullptr on success, error message on failure
+     */
     const char* init();
-    bool isReady() const;
 
-    bool readSingle(Measurement& result);
+    /**
+     * @brief Check if sensor is ready
+     */
+    bool isReady() const { return initialized_; }
+
+    /**
+     * @brief Start continuous measurements
+     */
     bool startContinuous();
+
+    /**
+     * @brief Stop continuous measurements
+     */
     bool stopContinuous();
+
+    /**
+     * @brief Read latest measurement
+     */
     bool readContinuous(Measurement& result);
 
-    const char* setRangingMode(RangingMode mode);
-    RangingMode getRangingMode() const;
-
-    void setTimeout(uint16_t timeout_ms);
-    uint16_t getTimeout() const;
-
-    bool setAddress(uint8_t new_addr);
-    uint8_t getAddress() const;
-
+    /**
+     * @brief Probe if sensor is responding
+     */
     bool probe();
-    const char* selfTest();
-    bool timeoutOccurred();
 
-    bool loadFactoryCalibration();
-    bool setAutoOutput(bool enable, uint16_t interval_ms = 0);
-    bool rebootModule();
+    /**
+     * @brief Set ranging mode
+     */
+    const char* setRangingMode(RangingMode mode);
+
+    /**
+     * @brief Set timeout for Modbus communication
+     */
+    void setTimeout(uint16_t timeout_ms);
+
+    /**
+     * @brief Run self-test
+     */
+    const char* selfTest();
+
+    /**
+     * @brief Check if last operation timed out
+     */
+    bool timeoutOccurred() const { return timeout_occurred_; }
 
 private:
-    struct Impl;
-    std::unique_ptr<Impl> pimpl_;
+    Config config_;
+    DuartModbus* modbus_;
+    bool initialized_;
+    bool timeout_occurred_;
+
+    static const char* TAG;
+
+    // Initialization steps
+    const char* initModbus();
+    const char* testCommunication();
+    const char* readCurrentConfiguration();
+    const char* configureRangingMode();
+    const char* configureContinuousMode();
+    const char* verifyConfiguration();
+
+    // Helper functions
+    void logModbusResponse(const char* operation, const DuartModbus::ModbusResponse& response);
+
+    // Prevent copying
+    VL53L1_Modbus(const VL53L1_Modbus&) = delete;
+    VL53L1_Modbus& operator=(const VL53L1_Modbus&) = delete;
 };
 
+/**
+ * @brief Create default configuration
+ * 
+ * Note: i2c_port, i2c_sda, i2c_scl parameters are present for API compatibility
+ * but are NOT USED by this driver. VL53L1_Modbus uses ONLY UART/Modbus.
+ */
 VL53L1_Modbus::Config vl53l1_modbus_default_config(
     i2c_port_t i2c_port = I2C_NUM_0,
-    gpio_num_t sda_pin = GPIO_NUM_21,
-    gpio_num_t scl_pin = GPIO_NUM_22,
+    gpio_num_t i2c_sda = GPIO_NUM_21,
+    gpio_num_t i2c_scl = GPIO_NUM_22,
     uart_port_t uart_port = UART_NUM_1,
-    gpio_num_t uart_tx_pin = GPIO_NUM_17,
-    gpio_num_t uart_rx_pin = GPIO_NUM_16
+    gpio_num_t uart_tx = GPIO_NUM_17,
+    gpio_num_t uart_rx = GPIO_NUM_16
 );

@@ -16,16 +16,10 @@ extern "C" void app_main(void)
 
   ESP_LOGI("app_main", "Shelfbot instance obtained.");
   shelfbot.begin();
-  ESP_LOGI("app_main", "Shelfbot begin() returned. Entering safety loop.");
+  ESP_LOGI("app_main", "Shelfbot begin() returned. Entering main loop.");
 
-  // Optional: Safety loop for emergency stop handling
-  int stop_signal;
+  // Main loop - just delay to keep task alive
   while (1) {
-    // Wait for emergency stop signal with timeout
-    if (xQueueReceive(motor_stop_queue, &stop_signal, pdMS_TO_TICKS(1000)) == pdPASS) {
-
-      ESP_LOGW("app_main", "EMERGENCY STOP SIGNAL RECEIVED! Stopping all motors.");
-      motor_control_stop_all_motors();
-    }
+    vTaskDelay(pdMS_TO_TICKS(1000));
   }
 }

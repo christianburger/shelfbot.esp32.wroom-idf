@@ -1,4 +1,5 @@
 #include "include/http_server.hpp"
+#include "sensor_common.hpp"
 
 static const char *TAG = "http_server";
 
@@ -164,22 +165,21 @@ static esp_err_t all_motors_move_handler(httpd_req_t *req) {
 }
 
 static esp_err_t tof_handler(httpd_req_t *req) {
-    std::vector<SensorCommon::Reading> readings;
-
     cJSON *root = cJSON_CreateObject();
 
-    if (ToFSensorManager::instance().get_latest_readings(readings) && !readings.empty()) {
-        const auto& reading = readings[0];
-
-        cJSON_AddNumberToObject(root, "distance_cm", reading.distance_cm);
-        cJSON_AddNumberToObject(root, "status", reading.status);
-        cJSON_AddBoolToObject(root, "valid", reading.valid);
-        cJSON_AddNumberToObject(root, "timestamp_us", reading.timestamp_us);
+    // Get sensor data from sensor_control module
+    SensorCommon::SensorDataPacket sensor_data;
+    if (sensor_control_get_latest_data(&sensor_data)) {
+        // Use first ToF sensor
+        cJSON_AddNumberToObject(root, "distance_cm", sensor_data.tof_distances_cm[0]);
+        cJSON_AddNumberToObject(root, "status", sensor_data.tof_status[0]);
+        cJSON_AddBoolToObject(root, "valid", sensor_data.tof_valid[0]);
+        cJSON_AddNumberToObject(root, "timestamp_us", sensor_data.timestamp_us);
 
         const char* status_text;
-        if (!reading.valid) {
+        if (!sensor_data.tof_valid[0]) {
             status_text = "INVALID";
-        } else if (reading.status == 0) {
+        } else if (sensor_data.tof_status[0] == 0) {
             status_text = "OK";
         } else {
             status_text = "ERROR";
@@ -204,13 +204,13 @@ static esp_err_t health_handler(httpd_req_t *req) {
     cJSON *sensors = cJSON_CreateObject();
     cJSON_AddItemToObject(root, "sensors", sensors);
 
-    // Check ToF sensor
-    std::vector<SensorCommon::Reading> tof_readings;
+    // Check ToF sensor via sensor_control
+    SensorCommon::SensorDataPacket sensor_data;
     bool tof_healthy = false;
-    if (ToFSensorManager::instance().get_latest_readings(tof_readings) && !tof_readings.empty()) {
-        tof_healthy = tof_readings[0].valid;
+    if (sensor_control_get_latest_data(&sensor_data)) {
+        tof_healthy = sensor_data.tof_valid[0];
         cJSON_AddStringToObject(sensors, "tof", tof_healthy ? "HEALTHY" : "UNHEALTHY");
-        cJSON_AddNumberToObject(sensors, "tof_distance", tof_readings[0].distance_cm);
+        cJSON_AddNumberToObject(sensors, "tof_distance", sensor_data.tof_distances_cm[0]);
     } else {
         cJSON_AddStringToObject(sensors, "tof", "OFFLINE");
     }

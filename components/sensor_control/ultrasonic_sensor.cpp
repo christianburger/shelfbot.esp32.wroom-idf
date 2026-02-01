@@ -3,9 +3,8 @@
 
 static const char* TAG = "Ultrasonic_Sensor";
 
-// Globals for queues - EXTERN DECLARATIONS (definitions are in sensor_control.cpp)
-extern QueueHandle_t distance_data_queue;
-extern QueueHandle_t motor_stop_queue;
+// Queue definition - distance_data_queue only
+QueueHandle_t distance_data_queue = nullptr;
 
 // Shared resources for ISRs
 static gptimer_handle_t shared_timeout_timer = NULL;
@@ -96,12 +95,16 @@ bool UltrasonicSensorArray::init() {
         return false;
     }
 
-    // Configure timeout timer
+    // Configure timeout timer - with all fields initialized
     gptimer_config_t timer_config = {
         .clk_src = GPTIMER_CLK_SRC_DEFAULT,
         .direction = GPTIMER_COUNT_UP,
         .resolution_hz = 1000000, // 1 MHz, 1us per tick
-        .flags = { .intr_shared = false }
+        .intr_priority = 0,
+        .flags = {
+            .intr_shared = false,
+            .backup_before_sleep = false
+        }
     };
 
     esp_err_t ret = gptimer_new_timer(&timer_config, &shared_timeout_timer);
@@ -289,6 +292,14 @@ UltrasonicSensorManager::UltrasonicSensorManager()
     if (!data_mutex_) {
         ESP_LOGE(TAG, "Failed to create data mutex");
     }
+
+    // Create the distance_data_queue if not already created
+    if (!distance_data_queue) {
+        distance_data_queue = xQueueCreate(1, sizeof(float) * SensorCommon::NUM_ULTRASONIC_SENSORS);
+        if (!distance_data_queue) {
+            ESP_LOGE(TAG, "Failed to create distance_data_queue");
+        }
+    }
 }
 
 UltrasonicSensorManager::~UltrasonicSensorManager() {
@@ -375,12 +386,14 @@ void UltrasonicSensorManager::reading_task(void* param) {
         }
 
         // Legacy queue
-        float distances[SensorCommon::NUM_ULTRASONIC_SENSORS];
-        size_t size = std::min(readings.size(), static_cast<size_t>(SensorCommon::NUM_ULTRASONIC_SENSORS));
-        for (size_t j = 0; j < size; ++j) {
-          distances[j] = readings[j].distance_cm;
+        if (distance_data_queue) {
+          float distances[SensorCommon::NUM_ULTRASONIC_SENSORS];
+          size_t size = std::min(readings.size(), static_cast<size_t>(SensorCommon::NUM_ULTRASONIC_SENSORS));
+          for (size_t j = 0; j < size; ++j) {
+            distances[j] = readings[j].distance_cm;
+          }
+          xQueueOverwrite(distance_data_queue, distances);
         }
-        xQueueOverwrite(distance_data_queue, distances);
       }
     }
 

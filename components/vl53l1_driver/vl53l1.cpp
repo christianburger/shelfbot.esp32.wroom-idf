@@ -183,7 +183,7 @@ bool VL53L1::Impl::waitForBoot() {
         }
 
         if ((esp_timer_get_time() - start) / 1000 > config.timeout_ms) {
-            ESP_LOGE(TAG, "Boot timeout");
+            ESP_LOGE(TAG, "VL53L1::Impl::waitForBoot:Boot timeout");
             return false;
         }
         vTaskDelay(pdMS_TO_TICKS(10));

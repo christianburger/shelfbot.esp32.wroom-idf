@@ -13,9 +13,6 @@ class UltrasonicSensorManager;
 // Queue for sending sensor data to the ROS publisher
 extern QueueHandle_t distance_data_queue;
 
-// Queue for sending emergency stop signals to the main loop
-extern QueueHandle_t motor_stop_queue;
-
 // ============================================================================
 // Configuration Structures
 // ============================================================================

@@ -2,8 +2,14 @@
 #include "sensor_control.hpp"
 #include "ultrasonic_sensor.hpp"
 #include "vl53l1_modbus.hpp"
+#include "sensor_common.hpp"
 
 const char* SensorControl::TAG = "SensorControl";
+
+// Global instance for C-style interface
+static SensorControl* g_sensor_control = nullptr;
+static SensorCommon::SensorDataPacket g_latest_data = {};
+static SemaphoreHandle_t g_data_mutex = nullptr;
 
 // Simple TOF sensor implementation using VL53L1_Modbus
 class TofSensorImpl {
@@ -269,24 +275,44 @@ void SensorControl::continuous_read_loop() {
     while (continuous_mode_) {
         TickType_t now = xTaskGetTickCount();
 
-        if ((now - last_ultrasonic_wake) * portTICK_PERIOD_MS >= config_.ultrasonic_read_interval_ms) {
+        // Read all sensors and update global data packet
+        if (xSemaphoreTake(g_data_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            // Read ultrasonic sensors
             std::vector<uint16_t> ultrasonic_distances;
-            if (read_ultrasonic(ultrasonic_distances) == ESP_OK &&
-                config_.ultrasonic_callback) {
-                config_.ultrasonic_callback(ultrasonic_distances);
+            if (read_ultrasonic(ultrasonic_distances) == ESP_OK) {
+                for (size_t i = 0; i < ultrasonic_distances.size() && i < SensorCommon::NUM_ULTRASONIC_SENSORS; i++) {
+                    g_latest_data.ultrasonic_distances_cm[i] = ultrasonic_distances[i] / 10.0f;  // mm to cm
+                }
             }
-            last_ultrasonic_wake = now;
-        }
 
-        if ((now - last_tof_wake) * portTICK_PERIOD_MS >= config_.tof_read_interval_ms) {
-            uint16_t distance_mm;
-            bool valid;
-            uint8_t status;
-            if (read_tof(distance_mm, valid, status) == ESP_OK &&
-                config_.tof_callback) {
-                config_.tof_callback(distance_mm, valid, status);
+            // Read ToF sensor
+            uint16_t tof_distance_mm;
+            bool tof_valid;
+            uint8_t tof_status;
+            if (read_tof(tof_distance_mm, tof_valid, tof_status) == ESP_OK) {
+                g_latest_data.tof_distances_cm[0] = tof_distance_mm / 10.0f;  // mm to cm
+                g_latest_data.tof_valid[0] = tof_valid;
+                g_latest_data.tof_status[0] = tof_status;
             }
-            last_tof_wake = now;
+
+            g_latest_data.timestamp_us = esp_timer_get_time();
+
+            xSemaphoreGive(g_data_mutex);
+
+            // Call legacy callbacks if set
+            if ((now - last_ultrasonic_wake) * portTICK_PERIOD_MS >= config_.ultrasonic_read_interval_ms) {
+                if (config_.ultrasonic_callback) {
+                    config_.ultrasonic_callback(ultrasonic_distances);
+                }
+                last_ultrasonic_wake = now;
+            }
+
+            if ((now - last_tof_wake) * portTICK_PERIOD_MS >= config_.tof_read_interval_ms) {
+                if (config_.tof_callback) {
+                    config_.tof_callback(tof_distance_mm, tof_valid, tof_status);
+                }
+                last_tof_wake = now;
+            }
         }
 
         vTaskDelay(pdMS_TO_TICKS(10));
@@ -403,3 +429,80 @@ esp_err_t SensorControl::self_test() {
 bool SensorControl::tof_probe() {
     return tof_sensor_ && static_cast<TofSensorImpl*>(tof_sensor_)->probe();
 }
+
+// =============================================================================
+// C-style interface implementation
+// =============================================================================
+
+extern "C" {
+
+void sensor_control_init(void) {
+    if (g_sensor_control != nullptr) {
+        ESP_LOGW("sensor_control", "Already initialized");
+        return;
+    }
+
+    // Create mutex for data access
+    g_data_mutex = xSemaphoreCreateMutex();
+    if (!g_data_mutex) {
+        ESP_LOGE("sensor_control", "Failed to create data mutex");
+        return;
+    }
+
+    // Configure with default ultrasonic sensors
+    SensorControl::Config config;
+
+    // Add 4 ultrasonic sensors (adjust pins as needed)
+    config.ultrasonic_configs = {
+        {.trig_pin = 25, .echo_pin = 26, .timeout_us = 30000, .max_distance_mm = 4000},
+        {.trig_pin = 27, .echo_pin = 14, .timeout_us = 30000, .max_distance_mm = 4000},
+        {.trig_pin = 12, .echo_pin = 13, .timeout_us = 30000, .max_distance_mm = 4000},
+        {.trig_pin = 32, .echo_pin = 33, .timeout_us = 30000, .max_distance_mm = 4000}
+    };
+
+    config.ultrasonic_read_interval_ms = 100;
+    config.tof_read_interval_ms = 200;
+
+    g_sensor_control = new SensorControl(config);
+
+    esp_err_t err = g_sensor_control->initialize();
+    if (err != ESP_OK) {
+        ESP_LOGE("sensor_control", "Initialization failed");
+        delete g_sensor_control;
+        g_sensor_control = nullptr;
+        return;
+    }
+
+    ESP_LOGI("sensor_control", "Initialized successfully");
+}
+
+void sensor_control_start_task(void) {
+    if (g_sensor_control == nullptr) {
+        ESP_LOGE("sensor_control", "Not initialized - call sensor_control_init() first");
+        return;
+    }
+
+    esp_err_t err = g_sensor_control->start_continuous();
+    if (err != ESP_OK) {
+        ESP_LOGE("sensor_control", "Failed to start continuous reading");
+        return;
+    }
+
+    ESP_LOGI("sensor_control", "Continuous reading task started");
+}
+
+bool sensor_control_get_latest_data(SensorCommon::SensorDataPacket* data) {
+    if (!data || !g_data_mutex) {
+        return false;
+    }
+
+    if (xSemaphoreTake(g_data_mutex, pdMS_TO_TICKS(100)) == pdTRUE) {
+        *data = g_latest_data;
+        xSemaphoreGive(g_data_mutex);
+        return true;
+    }
+
+    return false;
+}
+
+} // extern "C"

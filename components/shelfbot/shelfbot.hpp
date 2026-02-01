@@ -17,8 +17,7 @@
 #include "motor_control.hpp"
 #include "../http_server/include/http_server.hpp"
 #include "led_control.hpp"
-#include "sensor_common.hpp"   // SensorCommon::Facade, SensorDataPacket,
-                                //   NUM_SENSORS, NUM_ULTRASONIC_SENSORS, NUM_TOF_SENSORS
+#include "sensor_common.hpp"
 
 #include <rcl/rcl.h>
 #include <rclc/rclc.h>
@@ -92,7 +91,7 @@ private:
     std_msgs__msg__Bool led_msg;
 
     float motor_pos_data[2];
-    float distance_sensors_data[SensorCommon::NUM_SENSORS];   // constant now in SensorCommon
+    float distance_sensors_data[SensorCommon::NUM_SENSORS];
 
     void initialise_mdns();
     bool query_mdns_host(const char * host_name);

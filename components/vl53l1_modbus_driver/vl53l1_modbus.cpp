@@ -1,396 +1,636 @@
+// vl53l1_modbus.cpp - Pure Modbus implementation with extensive troubleshooting
+
 #include "vl53l1_modbus.hpp"
 
-#include "vl53l1.hpp"
-#include "duart_modbus.hpp"
+const char* VL53L1_Modbus::TAG = "VL53L1_Modbus";
 
-#include <vector>
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_timer.h"
-#include "esp_err.h"
-#include "esp_log.h"
-#include "esp_task_wdt.h"
-
-static const char* TAG = "VL53L1_Modbus";
-
-namespace TOF400FReg {
-    constexpr uint16_t RESTORE_DEFAULT     = 0x0001;
-    constexpr uint16_t DEVICE_ADDRESS      = 0x0002;
-    constexpr uint16_t BAUD_RATE           = 0x0003;
-    constexpr uint16_t RANGE_MODE          = 0x0004;
-    constexpr uint16_t AUTO_OUTPUT         = 0x0005;
-    constexpr uint16_t LOAD_CALIBRATION    = 0x0006;
-    constexpr uint16_t OFFSET_CALIBRATION  = 0x0007;
-    constexpr uint16_t XTALK_CALIBRATION   = 0x0008;
-    constexpr uint16_t I2C_ENABLE          = 0x0009;
-    constexpr uint16_t MEASUREMENT_RESULT  = 0x0010;
-}
-
-struct VL53L1_Modbus::Impl {
-    VL53L1_Modbus::Config config;
-    std::unique_ptr<DuartModbus> modbus;
-    std::unique_ptr<VL53L1> vl53l1;
-    bool initialized;
-    bool i2c_owned;
-    bool did_timeout;
-
-    Impl() : initialized(false), i2c_owned(false), did_timeout(false) {}
-
-    bool sendModbusCommand(uint16_t reg, uint16_t value) {
-        if (!modbus || !modbus->isReady()) {
-            ESP_LOGE(TAG, "Modbus not ready");
-            return false;
-        }
-
-        auto response = modbus->writeSingleRegister(config.modbus_slave_address, reg, value, true);
-        if (!response.success) {
-            ESP_LOGE(TAG, "Modbus command failed: reg=0x%04X, value=0x%04X", reg, value);
-            return false;
-        }
-
-        ESP_LOGD(TAG, "Modbus success: reg=0x%04X, value=0x%04X", reg, value);
-        return true;
-    }
-
-    bool verifyModbusRegister(uint16_t reg, uint16_t expected_value) {
-        if (!modbus || !modbus->isReady()) {
-            return false;
-        }
-
-        auto response = modbus->readHoldingRegisters(config.modbus_slave_address, reg, 1);
-        if (!response.success || response.data.size() < 2) {
-            return false;
-        }
-
-        uint16_t read_value = (response.data[0] << 8) | response.data[1];
-        bool matches = (read_value == expected_value);
-
-        if (!matches) {
-            ESP_LOGW(TAG, "Register 0x%04X mismatch: expected 0x%04X, got 0x%04X",
-                    reg, expected_value, read_value);
-        }
-
-        return matches;
-    }
-
-    bool configureModule() {
-        ESP_LOGI(TAG, "Configuring TOF400F module via Modbus...");
-
-        DuartModbus::Config modbus_config = {
-            .uart_port = config.uart_port,
-            .tx_pin = config.uart_tx_pin,
-            .rx_pin = config.uart_rx_pin,
-            .baud_rate = config.uart_baud_rate,
-            .parity = 0,
-            .stop_bits = 1,
-            .data_bits = 8,
-            .timeout_ms = config.timeout_ms,
-            .max_retries = 3
-        };
-
-        modbus = std::make_unique<DuartModbus>(modbus_config);
-        const char* modbus_err = modbus->init();
-        if (modbus_err != nullptr) {
-            ESP_LOGE(TAG, "Modbus initialization failed: %s", modbus_err);
-            return false;
-        }
-
-        vTaskDelay(pdMS_TO_TICKS(100));
-
-        ESP_LOGD(TAG, "Loading factory calibration...");
-        if (!sendModbusCommand(TOF400FReg::LOAD_CALIBRATION, 0x0001)) {
-            ESP_LOGE(TAG, "Failed to load calibration");
-            return false;
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-
-        uint16_t mode_value = (config.ranging_mode == RangingMode::LONG_DISTANCE) ? 0x0001 : 0x0000;
-        ESP_LOGD(TAG, "Setting ranging mode: %s",
-                 (mode_value == 0x0001) ? "LONG_DISTANCE" : "HIGH_PRECISION");
-
-        if (!sendModbusCommand(TOF400FReg::RANGE_MODE, mode_value)) {
-            ESP_LOGE(TAG, "Failed to set ranging mode");
-            return false;
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-
-        if (!sendModbusCommand(TOF400FReg::AUTO_OUTPUT, 0x0000)) {
-            ESP_LOGW(TAG, "Failed to disable auto output (non-critical)");
-        }
-        vTaskDelay(pdMS_TO_TICKS(100));
-
-        ESP_LOGD(TAG, "Enabling I2C mode...");
-        if (!sendModbusCommand(TOF400FReg::I2C_ENABLE, 0x0001)) {
-            ESP_LOGE(TAG, "Failed to enable I2C mode");
-            return false;
-        }
-
-        ESP_LOGI(TAG, "TOF400F module configured successfully");
-        return true;
-    }
-
-    bool waitForI2CMode(uint32_t timeout_ms = 1000) {
-        ESP_LOGD(TAG, "Waiting for module to switch to I2C mode...");
-
-        uint64_t start_time = esp_timer_get_time() / 1000;
-        while ((esp_timer_get_time() / 1000 - start_time) < timeout_ms) {
-            if (vl53l1 && vl53l1->probe()) {
-                ESP_LOGD(TAG, "VL53L1 detected on I2C bus");
-                return true;
-            }
-            vTaskDelay(pdMS_TO_TICKS(50));
-        }
-
-        ESP_LOGE(TAG, "Timeout waiting for I2C mode");
-        return false;
-    }
-
-    bool initializeVL53L1() {
-        ESP_LOGI(TAG, "Initializing VL53L1 via I2C...");
-
-        // FIXED: Use the correct number of arguments for vl53l1_default_config
-        VL53L1::Config vl53l1_config = vl53l1_default_config(
-            config.i2c_port,
-            config.sda_pin,
-            config.scl_pin
-        );
-
-        // Manually set additional config parameters that aren't in the default config
-        vl53l1_config.i2c_address = config.i2c_address;
-        vl53l1_config.i2c_freq_hz = config.i2c_freq_hz;
-
-        // Convert RangingMode
-        vl53l1_config.ranging_mode = (config.ranging_mode == RangingMode::LONG_DISTANCE)
-            ? VL53L1::RangingMode::LONG_DISTANCE
-            : VL53L1::RangingMode::HIGH_PRECISION;
-
-        vl53l1_config.timeout_ms = config.timeout_ms;
-
-        vl53l1 = std::make_unique<VL53L1>(vl53l1_config);
-        const char* err = vl53l1->init();
-        if (err != nullptr) {
-            ESP_LOGE(TAG, "VL53L1 initialization failed: %s", err);
-            return false;
-        }
-
-        return true;
-    }
-};
+// Register addresses from TOF400F datasheet
+constexpr uint16_t REG_SPECIAL = 0x0001;
+constexpr uint16_t REG_DEVICE_ADDR = 0x0002;
+constexpr uint16_t REG_BAUD_RATE = 0x0003;
+constexpr uint16_t REG_RANGE_MODE = 0x0004;
+constexpr uint16_t REG_CONTINUOUS_OUTPUT = 0x0005;
+constexpr uint16_t REG_LOAD_CALIBRATION = 0x0006;
+constexpr uint16_t REG_OFFSET_CORRECTION = 0x0007;
+constexpr uint16_t REG_XTALK_CORRECTION = 0x0008;
+constexpr uint16_t REG_DISABLE_IIC = 0x0009;
+constexpr uint16_t REG_MEASUREMENT = 0x0010;
+constexpr uint16_t REG_OFFSET_CALIBRATION = 0x0020;
+constexpr uint16_t REG_XTALK_CALIBRATION = 0x0021;
 
 VL53L1_Modbus::VL53L1_Modbus(const Config& config)
-    : pimpl_(std::make_unique<Impl>()) {
-    pimpl_->config = config;
+    : config_(config),
+      modbus_(nullptr),
+      initialized_(false),
+      timeout_occurred_(false) {
+
+    ESP_LOGI(TAG, "VL53L1_Modbus instance created");
+    ESP_LOGI(TAG, "Configuration:");
+    ESP_LOGI(TAG, "  UART: %d, TX: GPIO%d, RX: GPIO%d", config_.uart_port, config_.uart_tx_pin, config_.uart_rx_pin);
+    ESP_LOGI(TAG, "  Slave address: 0x%02X", config_.modbus_slave_address);
+    ESP_LOGI(TAG, "  Ranging mode: %s", config_.ranging_mode == RangingMode::HIGH_PRECISION ? "High Precision" : "Long Distance");
 }
 
-VL53L1_Modbus::~VL53L1_Modbus() = default;
-
-VL53L1_Modbus::VL53L1_Modbus(VL53L1_Modbus&& other) noexcept = default;
-VL53L1_Modbus& VL53L1_Modbus::operator=(VL53L1_Modbus&& other) noexcept = default;
+VL53L1_Modbus::~VL53L1_Modbus() {
+    if (modbus_) {
+        delete modbus_;
+        modbus_ = nullptr;
+    }
+}
 
 const char* VL53L1_Modbus::init() {
-    if (pimpl_->initialized) {
-        return nullptr;
-    }
-
     ESP_LOGI(TAG, "===== Starting VL53L1_Modbus Initialization =====");
 
-    esp_task_wdt_reset();
-
-    if (!pimpl_->configureModule()) {
-        ESP_LOGE(TAG, "TOF400F module configuration failed");
-        return "TOF400F module configuration failed";
+    // Step 1: Initialize Modbus/UART communication
+    ESP_LOGI(TAG, "Step 1: Initializing Modbus UART communication...");
+    const char* err = initModbus();
+    if (err != nullptr) {
+        ESP_LOGE(TAG, "FAILED at Step 1: %s", err);
+        return err;
     }
+    ESP_LOGI(TAG, "Step 1: SUCCESS - Modbus UART initialized");
 
-    esp_task_wdt_reset();
-
-    if (!pimpl_->waitForI2CMode()) {
-        ESP_LOGE(TAG, "Failed to switch to I2C mode");
-        return "Failed to switch to I2C mode";
+    // Step 2: Test basic communication
+    ESP_LOGI(TAG, "Step 2: Testing basic Modbus communication...");
+    err = testCommunication();
+    if (err != nullptr) {
+        ESP_LOGE(TAG, "FAILED at Step 2: %s", err);
+        return err;
     }
+    ESP_LOGI(TAG, "Step 2: SUCCESS - Device is responding to Modbus commands");
 
-    esp_task_wdt_reset();
-
-    if (!pimpl_->initializeVL53L1()) {
-        ESP_LOGE(TAG, "VL53L1 initialization failed");
-        return "VL53L1 initialization failed";
+    // Step 3: Read and verify current configuration
+    ESP_LOGI(TAG, "Step 3: Reading current device configuration...");
+    err = readCurrentConfiguration();
+    if (err != nullptr) {
+        ESP_LOGE(TAG, "FAILED at Step 3: %s", err);
+        return err;
     }
+    ESP_LOGI(TAG, "Step 3: SUCCESS - Current configuration read");
 
-    esp_task_wdt_reset();
-
-    if (pimpl_->config.enable_continuous) {
-        if (!startContinuous()) {
-            ESP_LOGE(TAG, "Failed to start continuous mode");
-            return "Failed to start continuous mode";
-        }
+    // Step 4: Configure ranging mode
+    ESP_LOGI(TAG, "Step 4: Configuring ranging mode...");
+    err = configureRangingMode();
+    if (err != nullptr) {
+        ESP_LOGE(TAG, "FAILED at Step 4: %s", err);
+        return err;
     }
+    ESP_LOGI(TAG, "Step 4: SUCCESS - Ranging mode configured");
 
-    pimpl_->initialized = true;
+    // Step 5: Configure continuous measurement
+    ESP_LOGI(TAG, "Step 5: Configuring continuous measurement...");
+    err = configureContinuousMode();
+    if (err != nullptr) {
+        ESP_LOGE(TAG, "FAILED at Step 5: %s", err);
+        return err;
+    }
+    ESP_LOGI(TAG, "Step 5: SUCCESS - Continuous mode configured");
 
-    ESP_LOGI(TAG, "===== VL53L1_Modbus Initialization SUCCESS =====");
+    // Step 6: Verify final configuration
+    ESP_LOGI(TAG, "Step 6: Verifying final configuration...");
+    err = verifyConfiguration();
+    if (err != nullptr) {
+        ESP_LOGE(TAG, "FAILED at Step 6: %s", err);
+        return err;
+    }
+    ESP_LOGI(TAG, "Step 6: SUCCESS - Configuration verified");
+
+    initialized_ = true;
+    ESP_LOGI(TAG, "===== VL53L1_Modbus Initialization Complete =====");
+
     return nullptr;
 }
 
-bool VL53L1_Modbus::isReady() const {
-    return pimpl_->initialized && pimpl_->vl53l1 && pimpl_->vl53l1->isReady();
+const char* VL53L1_Modbus::initModbus() {
+    // Configure Modbus with TOF400F defaults from datasheet
+    DuartModbus::Config modbus_config = {
+        .uart_port = config_.uart_port,
+        .tx_pin = config_.uart_tx_pin,
+        .rx_pin = config_.uart_rx_pin,
+        .baud_rate = 115200,  // TOF400F default from datasheet
+        .parity = 0,          // No parity
+        .stop_bits = 1,       // 1 stop bit
+        .data_bits = 8,       // 8 data bits
+        .timeout_ms = config_.timeout_ms,
+        .max_retries = 3
+    };
+
+    ESP_LOGI(TAG, "  Creating Modbus instance with:");
+    ESP_LOGI(TAG, "    Baud rate: %lu", (unsigned long)modbus_config.baud_rate);
+    ESP_LOGI(TAG, "    Data bits: %d, Parity: %d, Stop bits: %d",
+             modbus_config.data_bits, modbus_config.parity, modbus_config.stop_bits);
+    ESP_LOGI(TAG, "    Timeout: %lu ms, Retries: %d",
+             (unsigned long)modbus_config.timeout_ms, modbus_config.max_retries);
+
+    modbus_ = new DuartModbus(modbus_config);
+    const char* err = modbus_->init();
+    if (err != nullptr) {
+        ESP_LOGE(TAG, "  Modbus initialization failed: %s", err);
+        return "Modbus init failed";
+    }
+
+    ESP_LOGI(TAG, "  Modbus driver initialized successfully");
+    return nullptr;
 }
 
-bool VL53L1_Modbus::readSingle(Measurement& result) {
-    return readContinuous(result);
+const char* VL53L1_Modbus::testCommunication() {
+    ESP_LOGI(TAG, "  Testing communication with slave 0x%02X...", config_.modbus_slave_address);
+
+    // Test 1: Read special register (0x0001)
+    ESP_LOGI(TAG, "  Test 1: Reading SPECIAL register (0x0001)...");
+    auto response = modbus_->readHoldingRegisters(
+        config_.modbus_slave_address,
+        REG_SPECIAL,
+        1,
+        config_.timeout_ms
+    );
+
+    logModbusResponse("Read SPECIAL", response);
+
+    if (!response.success) {
+        ESP_LOGE(TAG, "  FAILED: Device not responding to read commands");
+        ESP_LOGE(TAG, "  Troubleshooting hints:");
+        ESP_LOGE(TAG, "    - Check TX/RX wiring (TX->RX, RX->TX)");
+        ESP_LOGE(TAG, "    - Verify device has power (3.3V-5V)");
+        ESP_LOGE(TAG, "    - Check slave address (default is 0x01)");
+        ESP_LOGE(TAG, "    - Verify baud rate (default is 115200)");
+        return "Device not responding";
+    }
+
+    // Test 2: Read device address register (0x0002)
+    ESP_LOGI(TAG, "  Test 2: Reading DEVICE_ADDR register (0x0002)...");
+    response = modbus_->readHoldingRegisters(
+        config_.modbus_slave_address,
+        REG_DEVICE_ADDR,
+        1,
+        config_.timeout_ms
+    );
+
+    logModbusResponse("Read DEVICE_ADDR", response);
+
+    if (response.success && response.data.size() >= 2) {
+        uint16_t device_addr = (response.data[0] << 8) | response.data[1];
+        ESP_LOGI(TAG, "  Current device address: 0x%04X", device_addr);
+
+        if (device_addr != config_.modbus_slave_address && device_addr != 0x0000) {
+            ESP_LOGW(TAG, "  WARNING: Device address (0x%04X) doesn't match expected (0x%02X)",
+                     device_addr, config_.modbus_slave_address);
+        }
+    }
+
+    ESP_LOGI(TAG, "  Communication test PASSED");
+    return nullptr;
+}
+
+const char* VL53L1_Modbus::readCurrentConfiguration() {
+    ESP_LOGI(TAG, "  Reading current configuration from device...");
+
+    // Read ranging mode (0x0004)
+    ESP_LOGI(TAG, "  Reading RANGE_MODE register (0x0004)...");
+    auto response = modbus_->readHoldingRegisters(
+        config_.modbus_slave_address,
+        REG_RANGE_MODE,
+        1,
+        config_.timeout_ms
+    );
+
+    logModbusResponse("Read RANGE_MODE", response);
+
+    if (response.success && response.data.size() >= 2) {
+        uint16_t mode = (response.data[0] << 8) | response.data[1];
+        ESP_LOGI(TAG, "  Current ranging mode: 0x%04X (%s)",
+                 mode, mode == 0x0000 ? "High Precision (30ms, 1.3m)" : "Long Distance (200ms, 4.0m)");
+    }
+
+    // Read continuous output setting (0x0005)
+    ESP_LOGI(TAG, "  Reading CONTINUOUS_OUTPUT register (0x0005)...");
+    response = modbus_->readHoldingRegisters(
+        config_.modbus_slave_address,
+        REG_CONTINUOUS_OUTPUT,
+        1,
+        config_.timeout_ms
+    );
+
+    logModbusResponse("Read CONTINUOUS_OUTPUT", response);
+
+    if (response.success && response.data.size() >= 2) {
+        uint16_t output = (response.data[0] << 8) | response.data[1];
+        ESP_LOGI(TAG, "  Current continuous output: 0x%04X (%s)",
+                 output, output == 0x0000 ? "Disabled" : "Enabled");
+    }
+
+    // Read IIC disable setting (0x0009)
+    ESP_LOGI(TAG, "  Reading DISABLE_IIC register (0x0009)...");
+    response = modbus_->readHoldingRegisters(
+        config_.modbus_slave_address,
+        REG_DISABLE_IIC,
+        1,
+        config_.timeout_ms
+    );
+
+    logModbusResponse("Read DISABLE_IIC", response);
+
+    if (response.success && response.data.size() >= 2) {
+        uint16_t iic_state = (response.data[0] << 8) | response.data[1];
+        ESP_LOGI(TAG, "  Current IIC state: 0x%04X (%s mode)",
+                 iic_state, iic_state == 0x0000 ? "UART/Modbus" : "I2C");
+
+        if (iic_state != 0x0000) {
+            ESP_LOGW(TAG, "  Device is currently in I2C mode");
+            ESP_LOGI(TAG, "  Switching device back to UART/Modbus mode...");
+
+            // Write 0x0000 to register 0x0009 to enable UART mode
+            auto write_response = modbus_->writeSingleRegister(
+                config_.modbus_slave_address,
+                REG_DISABLE_IIC,
+                0x0000,  // 0 = UART/Modbus mode
+                false,
+                config_.timeout_ms
+            );
+
+            logModbusResponse("Write DISABLE_IIC (enable UART)", write_response);
+
+            if (!write_response.success) {
+                ESP_LOGE(TAG, "  FAILED: Could not switch to UART mode");
+                return "Failed to switch to UART mode";
+            }
+
+            // Small delay for mode switch
+            vTaskDelay(pdMS_TO_TICKS(100));
+
+            // Verify the switch
+            ESP_LOGI(TAG, "  Verifying mode switch...");
+            response = modbus_->readHoldingRegisters(
+                config_.modbus_slave_address,
+                REG_DISABLE_IIC,
+                1,
+                config_.timeout_ms
+            );
+
+            logModbusResponse("Read DISABLE_IIC (after switch)", response);
+
+            if (response.success && response.data.size() >= 2) {
+                uint16_t new_state = (response.data[0] << 8) | response.data[1];
+                if (new_state != 0x0000) {
+                    ESP_LOGE(TAG, "  VERIFICATION FAILED: Still in I2C mode (0x%04X)", new_state);
+                    ESP_LOGE(TAG, "  Power cycle the device to reset");
+                    return "Device stuck in I2C mode";
+                }
+                ESP_LOGI(TAG, "  Mode switch successful - now in UART mode");
+            } else {
+                ESP_LOGE(TAG, "  Could not verify mode switch");
+                return "Mode verification failed";
+            }
+        }
+    }
+
+    return nullptr;
+}
+
+const char* VL53L1_Modbus::configureRangingMode() {
+    uint16_t desired_mode = (config_.ranging_mode == RangingMode::HIGH_PRECISION) ? 0x0000 : 0x0001;
+    const char* mode_name = (config_.ranging_mode == RangingMode::HIGH_PRECISION) ?
+                            "High Precision (30ms, 1.3m)" : "Long Distance (200ms, 4.0m)";
+
+    ESP_LOGI(TAG, "  Setting ranging mode to: %s (0x%04X)", mode_name, desired_mode);
+
+    // Read current mode first
+    ESP_LOGI(TAG, "  Reading current mode before write...");
+    auto read_response = modbus_->readHoldingRegisters(
+        config_.modbus_slave_address,
+        REG_RANGE_MODE,
+        1,
+        config_.timeout_ms
+    );
+
+    logModbusResponse("Read RANGE_MODE (before)", read_response);
+
+    uint16_t current_mode = 0xFFFF;
+    if (read_response.success && read_response.data.size() >= 2) {
+        current_mode = (read_response.data[0] << 8) | read_response.data[1];
+        ESP_LOGI(TAG, "  Current mode: 0x%04X", current_mode);
+
+        if (current_mode == desired_mode) {
+            ESP_LOGI(TAG, "  Mode already set correctly, skipping write");
+            return nullptr;
+        }
+    }
+
+    // Write new mode
+    ESP_LOGI(TAG, "  Writing new mode: 0x%04X...", desired_mode);
+    auto write_response = modbus_->writeSingleRegister(
+        config_.modbus_slave_address,
+        REG_RANGE_MODE,
+        desired_mode,
+        false,  // Don't use driver's built-in verify, we'll do it manually
+        config_.timeout_ms
+    );
+
+    logModbusResponse("Write RANGE_MODE", write_response);
+
+    if (!write_response.success) {
+        ESP_LOGE(TAG, "  FAILED: Could not write ranging mode");
+        return "Failed to write ranging mode";
+    }
+
+    // Small delay for register to update
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Verify the write
+    ESP_LOGI(TAG, "  Verifying write by reading back...");
+    read_response = modbus_->readHoldingRegisters(
+        config_.modbus_slave_address,
+        REG_RANGE_MODE,
+        1,
+        config_.timeout_ms
+    );
+
+    logModbusResponse("Read RANGE_MODE (after)", read_response);
+
+    if (read_response.success && read_response.data.size() >= 2) {
+        uint16_t verified_mode = (read_response.data[0] << 8) | read_response.data[1];
+        ESP_LOGI(TAG, "  Verified mode: 0x%04X", verified_mode);
+
+        if (verified_mode != desired_mode) {
+            ESP_LOGE(TAG, "  VERIFICATION FAILED: Read 0x%04X but expected 0x%04X",
+                     verified_mode, desired_mode);
+            return "Ranging mode verification failed";
+        }
+
+        ESP_LOGI(TAG, "  Verification PASSED");
+    } else {
+        ESP_LOGE(TAG, "  VERIFICATION FAILED: Could not read back");
+        return "Could not verify ranging mode";
+    }
+
+    return nullptr;
+}
+
+const char* VL53L1_Modbus::configureContinuousMode() {
+    // For continuous mode, we want the device to continuously measure
+    // Set output interval based on ranging mode
+    uint16_t output_interval;
+
+    if (config_.ranging_mode == RangingMode::HIGH_PRECISION) {
+        output_interval = 30;  // 30ms for high precision mode
+    } else {
+        output_interval = 200; // 200ms for long distance mode
+    }
+
+    ESP_LOGI(TAG, "  Setting continuous output interval to: %d ms", output_interval);
+
+    // Read current setting first
+    ESP_LOGI(TAG, "  Reading current continuous output setting...");
+    auto read_response = modbus_->readHoldingRegisters(
+        config_.modbus_slave_address,
+        REG_CONTINUOUS_OUTPUT,
+        1,
+        config_.timeout_ms
+    );
+
+    logModbusResponse("Read CONTINUOUS_OUTPUT (before)", read_response);
+
+    // Write new setting
+    ESP_LOGI(TAG, "  Writing continuous output interval: %d ms...", output_interval);
+    auto write_response = modbus_->writeSingleRegister(
+        config_.modbus_slave_address,
+        REG_CONTINUOUS_OUTPUT,
+        output_interval,
+        false,
+        config_.timeout_ms
+    );
+
+    logModbusResponse("Write CONTINUOUS_OUTPUT", write_response);
+
+    if (!write_response.success) {
+        ESP_LOGE(TAG, "  FAILED: Could not write continuous output setting");
+        return "Failed to configure continuous mode";
+    }
+
+    // Small delay
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Verify the write
+    ESP_LOGI(TAG, "  Verifying write by reading back...");
+    read_response = modbus_->readHoldingRegisters(
+        config_.modbus_slave_address,
+        REG_CONTINUOUS_OUTPUT,
+        1,
+        config_.timeout_ms
+    );
+
+    logModbusResponse("Read CONTINUOUS_OUTPUT (after)", read_response);
+
+    if (read_response.success && read_response.data.size() >= 2) {
+        uint16_t verified_interval = (read_response.data[0] << 8) | read_response.data[1];
+        ESP_LOGI(TAG, "  Verified interval: %d ms", verified_interval);
+
+        if (verified_interval != output_interval) {
+            ESP_LOGE(TAG, "  VERIFICATION FAILED: Read %d but expected %d",
+                     verified_interval, output_interval);
+            return "Continuous mode verification failed";
+        }
+
+        ESP_LOGI(TAG, "  Verification PASSED");
+    } else {
+        ESP_LOGE(TAG, "  VERIFICATION FAILED: Could not read back");
+        return "Could not verify continuous mode";
+    }
+
+    return nullptr;
+}
+
+const char* VL53L1_Modbus::verifyConfiguration() {
+    ESP_LOGI(TAG, "  Performing final configuration verification...");
+
+    // Verify ranging mode
+    auto response = modbus_->readHoldingRegisters(
+        config_.modbus_slave_address,
+        REG_RANGE_MODE,
+        1,
+        config_.timeout_ms
+    );
+
+    if (!response.success) {
+        return "Final verification failed - cannot read ranging mode";
+    }
+
+    uint16_t mode = (response.data[0] << 8) | response.data[1];
+    uint16_t expected_mode = (config_.ranging_mode == RangingMode::HIGH_PRECISION) ? 0x0000 : 0x0001;
+
+    if (mode != expected_mode) {
+        ESP_LOGE(TAG, "  Final check: Ranging mode mismatch (got 0x%04X, expected 0x%04X)",
+                 mode, expected_mode);
+        return "Final ranging mode mismatch";
+    }
+
+    ESP_LOGI(TAG, "  Final verification: All settings correct");
+    return nullptr;
+}
+
+void VL53L1_Modbus::logModbusResponse(const char* operation, const DuartModbus::ModbusResponse& response) {
+    ESP_LOGI(TAG, "    %s:", operation);
+    ESP_LOGI(TAG, "      Success: %s", response.success ? "YES" : "NO");
+    ESP_LOGI(TAG, "      ESP Error: %s", esp_err_to_name(response.esp_error));
+
+    if (response.success) {
+        ESP_LOGI(TAG, "      Slave Address: 0x%02X", response.slave_address);
+        ESP_LOGI(TAG, "      Function Code: 0x%02X", response.function_code);
+        ESP_LOGI(TAG, "      Data bytes: %zu", response.data.size());
+
+        if (!response.data.empty()) {
+            char hex_str[256] = {0};
+            size_t offset = 0;
+            for (size_t i = 0; i < response.data.size() && offset < sizeof(hex_str) - 4; i++) {
+                offset += snprintf(hex_str + offset, sizeof(hex_str) - offset, "%02X ", response.data[i]);
+            }
+            ESP_LOGI(TAG, "      Data: %s", hex_str);
+        }
+    } else {
+        ESP_LOGE(TAG, "      Error Code: 0x%02X", response.error_code);
+        ESP_LOGE(TAG, "      ESP Error: %s", esp_err_to_name(response.esp_error));
+    }
 }
 
 bool VL53L1_Modbus::startContinuous() {
-    if (!isReady()) {
+    if (!initialized_) {
+        ESP_LOGE(TAG, "Cannot start continuous - not initialized");
         return false;
     }
 
-    return pimpl_->vl53l1->startContinuous();
+    // Continuous mode is already configured in init()
+    ESP_LOGI(TAG, "Continuous measurement already active");
+    return true;
 }
 
 bool VL53L1_Modbus::stopContinuous() {
-    if (!isReady()) {
+    if (!initialized_) {
         return false;
     }
 
-    return pimpl_->vl53l1->stopContinuous();
+    ESP_LOGI(TAG, "Stopping continuous measurement...");
+
+    auto response = modbus_->writeSingleRegister(
+        config_.modbus_slave_address,
+        REG_CONTINUOUS_OUTPUT,
+        0x0000,  // Disable continuous output
+        false,
+        config_.timeout_ms
+    );
+
+    logModbusResponse("Stop Continuous", response);
+
+    return response.success;
 }
 
 bool VL53L1_Modbus::readContinuous(Measurement& result) {
-    if (!isReady()) {
+    if (!initialized_) {
+        ESP_LOGE(TAG, "Cannot read - not initialized");
         return false;
     }
 
-    VL53L1::MeasurementResult vl53_result;
-    if (!pimpl_->vl53l1->readContinuous(vl53_result)) {
+    timeout_occurred_ = false;
+
+    // Read measurement result from register 0x0010
+    auto response = modbus_->readHoldingRegisters(
+        config_.modbus_slave_address,
+        REG_MEASUREMENT,
+        1,
+        config_.timeout_ms
+    );
+
+    if (!response.success) {
+        ESP_LOGD(TAG, "Failed to read measurement");
+        timeout_occurred_ = (response.esp_error == ESP_ERR_TIMEOUT);
         return false;
     }
 
-    result.distance_mm = vl53_result.distance_mm;
-    result.valid = vl53_result.valid;
-    result.range_status = vl53_result.range_status;
-    result.timestamp_us = vl53_result.timestamp_us;
+    if (response.data.size() < 2) {
+        ESP_LOGW(TAG, "Insufficient data in response");
+        return false;
+    }
+
+    // Parse distance value (in mm)
+    result.distance_mm = (response.data[0] << 8) | response.data[1];
+    result.range_status = 0;  // Modbus interface doesn't provide detailed status
+    result.valid = (result.distance_mm > 0 && result.distance_mm < 8190);  // 8190 = no target
+    result.timestamp_us = esp_timer_get_time();
+
+    ESP_LOGD(TAG, "Read distance: %d mm, valid: %s",
+             result.distance_mm, result.valid ? "yes" : "no");
 
     return true;
 }
 
-const char* VL53L1_Modbus::setRangingMode(RangingMode mode) {
-    if (!isReady()) {
-        return "Sensor not ready";
+bool VL53L1_Modbus::probe() {
+    if (!modbus_) {
+        return false;
     }
 
-    VL53L1::RangingMode vl53_mode = (mode == RangingMode::LONG_DISTANCE)
-        ? VL53L1::RangingMode::LONG_DISTANCE
-        : VL53L1::RangingMode::HIGH_PRECISION;
+    // Try to read any register to check if device responds
+    auto response = modbus_->readHoldingRegisters(
+        config_.modbus_slave_address,
+        REG_SPECIAL,
+        1,
+        config_.timeout_ms
+    );
 
-    const char* err = pimpl_->vl53l1->setRangingMode(vl53_mode);
-    if (err == nullptr) {
-        pimpl_->config.ranging_mode = mode;
-    }
-
-    return err;
+    return response.success;
 }
 
-VL53L1_Modbus::RangingMode VL53L1_Modbus::getRangingMode() const {
-    return pimpl_->config.ranging_mode;
+const char* VL53L1_Modbus::setRangingMode(RangingMode mode) {
+    if (!initialized_) {
+        return "Not initialized";
+    }
+
+    config_.ranging_mode = mode;
+    return configureRangingMode();
 }
 
 void VL53L1_Modbus::setTimeout(uint16_t timeout_ms) {
-    pimpl_->config.timeout_ms = timeout_ms;
-    if (pimpl_->vl53l1) {
-        pimpl_->vl53l1->setTimeout(timeout_ms);
-    }
-}
-
-uint16_t VL53L1_Modbus::getTimeout() const {
-    return pimpl_->config.timeout_ms;
-}
-
-bool VL53L1_Modbus::setAddress(uint8_t new_addr) {
-    if (!isReady()) {
-        return false;
-    }
-
-    bool success = pimpl_->vl53l1->setAddress(new_addr);
-    if (success) {
-        pimpl_->config.i2c_address = new_addr;
-    }
-
-    return success;
-}
-
-uint8_t VL53L1_Modbus::getAddress() const {
-    return pimpl_->config.i2c_address;
-}
-
-bool VL53L1_Modbus::probe() {
-    if (!pimpl_->vl53l1) {
-        return false;
-    }
-
-    return pimpl_->vl53l1->probe();
+    config_.timeout_ms = timeout_ms;
 }
 
 const char* VL53L1_Modbus::selfTest() {
-    if (!isReady()) {
-        return "Sensor not ready";
+    if (!initialized_) {
+        return "Not initialized";
     }
 
-    return pimpl_->vl53l1->selfTest();
-}
+    ESP_LOGI(TAG, "Running self-test...");
 
-bool VL53L1_Modbus::timeoutOccurred() {
-    if (!pimpl_->vl53l1) {
-        return false;
+    // Test 1: Read configuration registers
+    auto response = modbus_->readHoldingRegisters(
+        config_.modbus_slave_address,
+        REG_RANGE_MODE,
+        1,
+        config_.timeout_ms
+    );
+
+    if (!response.success) {
+        return "Self-test failed - cannot communicate";
     }
 
-    return pimpl_->vl53l1->timeoutOccurred();
+    ESP_LOGI(TAG, "Self-test PASSED");
+    return nullptr;
 }
 
-bool VL53L1_Modbus::loadFactoryCalibration() {
-    if (!pimpl_->modbus || !pimpl_->modbus->isReady()) {
-        return false;
-    }
-
-    return pimpl_->sendModbusCommand(TOF400FReg::LOAD_CALIBRATION, 0x0001);
-}
-
-bool VL53L1_Modbus::setAutoOutput(bool enable, uint16_t interval_ms) {
-    if (!pimpl_->modbus || !pimpl_->modbus->isReady()) {
-        return false;
-    }
-
-    uint16_t value = enable ? interval_ms : 0x0000;
-    return pimpl_->sendModbusCommand(TOF400FReg::AUTO_OUTPUT, value);
-}
-
-bool VL53L1_Modbus::rebootModule() {
-    if (!pimpl_->modbus || !pimpl_->modbus->isReady()) {
-        return false;
-    }
-
-    return pimpl_->sendModbusCommand(TOF400FReg::RESTORE_DEFAULT, 0x1000);
-}
-
+// Helper function to create default configuration
 VL53L1_Modbus::Config vl53l1_modbus_default_config(
     i2c_port_t i2c_port,
-    gpio_num_t sda_pin,
-    gpio_num_t scl_pin,
+    gpio_num_t i2c_sda,
+    gpio_num_t i2c_scl,
     uart_port_t uart_port,
-    gpio_num_t uart_tx_pin,
-    gpio_num_t uart_rx_pin) {
-
-    return VL53L1_Modbus::Config{
-        .i2c_port = i2c_port,
-        .sda_pin = sda_pin,
-        .scl_pin = scl_pin,
-        .i2c_address = 0x29,
-        .i2c_freq_hz = 400000,
-        .uart_port = uart_port,
-        .uart_tx_pin = uart_tx_pin,
-        .uart_rx_pin = uart_rx_pin,
-        .uart_baud_rate = 115200,
-        .modbus_slave_address = 0x01,
-        .ranging_mode = VL53L1_Modbus::RangingMode::LONG_DISTANCE,
-        .timeout_ms = 500,
-        .enable_continuous = true
-    };
+    gpio_num_t uart_tx,
+    gpio_num_t uart_rx)
+{
+    VL53L1_Modbus::Config config;
+    // NOTE: I2C parameters are ignored for VL53L1_Modbus - this driver uses ONLY Modbus/UART
+    config.uart_port = uart_port;
+    config.uart_tx_pin = uart_tx;
+    config.uart_rx_pin = uart_rx;
+    config.modbus_slave_address = 0x01;  // TOF400F default address
+    config.ranging_mode = VL53L1_Modbus::RangingMode::LONG_DISTANCE;
+    config.timeout_ms = 500;
+    config.enable_continuous = true;
+    return config;
 }

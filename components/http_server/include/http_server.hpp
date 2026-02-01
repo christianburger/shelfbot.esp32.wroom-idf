@@ -2,7 +2,6 @@
 #define HTTP_SERVER_H
 
 #include "motor_control.hpp"
-#include "tof_sensor.hpp"
 #include "esp_http_server.h"
 #include "esp_log.h"
 #include "cJSON.h"
