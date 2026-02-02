@@ -1,4 +1,3 @@
-// [file name]: sensor_control.cpp
 #include <idf_c_includes.hpp>
 #include "sensor_control.hpp"
 #include "ultrasonic_sensor.hpp"
@@ -94,9 +93,6 @@ esp_err_t SensorControl::initialize_tof() {
                                      TofSensor::Mode::HIGH_PRECISION;
         tof_config.sensors[i].timeout_ms = sensor_config.timeout_ms;
         tof_config.sensors[i].device_address = sensor_config.device_address;
-        tof_config.sensors[i].uart_port = sensor_config.uart_port;
-        tof_config.sensors[i].uart_tx_pin = sensor_config.tx_pin;
-        tof_config.sensors[i].uart_rx_pin = sensor_config.rx_pin;
         tof_config.sensors[i].enabled = true;
     }
 

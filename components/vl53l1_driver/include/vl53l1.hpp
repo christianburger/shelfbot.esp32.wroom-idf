@@ -1,6 +1,14 @@
 #pragma once
 #include "idf_c_includes.hpp"
 
+// ===== VL53L1 I2C Hardware Configuration =====
+#define VL53L1_I2C_PORT         I2C_NUM_0
+#define VL53L1_SDA_PIN          GPIO_NUM_21
+#define VL53L1_SCL_PIN          GPIO_NUM_22
+#define VL53L1_I2C_FREQ_HZ      400000
+#define VL53L1_I2C_ADDRESS      0x29
+// =============================================
+
 class VL53L1 {
 public:
   enum class RangingMode : uint8_t {
@@ -60,8 +68,4 @@ private:
   std::unique_ptr<Impl> pimpl_;
 };
 
-VL53L1::Config vl53l1_default_config(
-    i2c_port_t port = I2C_NUM_0,
-    gpio_num_t sda = GPIO_NUM_21,
-    gpio_num_t scl = GPIO_NUM_22
-);
+VL53L1::Config vl53l1_default_config();

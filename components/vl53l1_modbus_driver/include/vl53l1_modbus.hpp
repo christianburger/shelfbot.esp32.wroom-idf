@@ -2,6 +2,13 @@
 #include "idf_c_includes.hpp"
 #include "duart_modbus.hpp"
 
+// ===== VL53L1_Modbus UART Hardware Configuration =====
+#define VL53L1_MODBUS_UART_PORT      UART_NUM_1
+#define VL53L1_MODBUS_TX_PIN         GPIO_NUM_17
+#define VL53L1_MODBUS_RX_PIN         GPIO_NUM_16
+#define VL53L1_MODBUS_SLAVE_ADDR     0x01
+
+// ====================================================
 /**
  * @brief VL53L1 ToF sensor driver using Modbus/UART protocol (TOF400F module)
  * 
@@ -112,23 +119,11 @@ private:
 
     // Helper functions
     void logModbusResponse(const char* operation, const DuartModbus::ModbusResponse& response);
+    VL53L1_Modbus::Config vl53l1_modbus_default_config();
 
     // Prevent copying
     VL53L1_Modbus(const VL53L1_Modbus&) = delete;
     VL53L1_Modbus& operator=(const VL53L1_Modbus&) = delete;
-};
 
-/**
- * @brief Create default configuration
- * 
- * Note: i2c_port, i2c_sda, i2c_scl parameters are present for API compatibility
- * but are NOT USED by this driver. VL53L1_Modbus uses ONLY UART/Modbus.
- */
-VL53L1_Modbus::Config vl53l1_modbus_default_config(
-    i2c_port_t i2c_port = I2C_NUM_0,
-    gpio_num_t i2c_sda = GPIO_NUM_21,
-    gpio_num_t i2c_scl = GPIO_NUM_22,
-    uart_port_t uart_port = UART_NUM_1,
-    gpio_num_t uart_tx = GPIO_NUM_17,
-    gpio_num_t uart_rx = GPIO_NUM_16
-);
+
+};

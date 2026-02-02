@@ -1,7 +1,7 @@
-// [file name]: tof_sensor.hpp
 #pragma once
 #include <idf_c_includes.hpp>
 #include "sensor_common.hpp"
+#include "vl53l1.hpp"
 
 /**
  * @brief Time-of-Flight (ToF) distance sensor manager for multiple sensors
@@ -22,12 +22,6 @@ public:
             Mode mode = Mode::LONG_DISTANCE;
             uint16_t timeout_ms = 500;
             uint8_t device_address = 0x01;  // Modbus slave address
-
-            // Communication pins (UART for Modbus)
-            int uart_port = 1;
-            int uart_tx_pin = 17;
-            int uart_rx_pin = 16;
-
             bool enabled = true;
         };
 

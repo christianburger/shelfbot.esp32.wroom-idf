@@ -614,23 +614,14 @@ const char* VL53L1_Modbus::selfTest() {
     return nullptr;
 }
 
-// Helper function to create default configuration
-VL53L1_Modbus::Config vl53l1_modbus_default_config(
-    i2c_port_t i2c_port,
-    gpio_num_t i2c_sda,
-    gpio_num_t i2c_scl,
-    uart_port_t uart_port,
-    gpio_num_t uart_tx,
-    gpio_num_t uart_rx)
-{
-    VL53L1_Modbus::Config config;
-    // NOTE: I2C parameters are ignored for VL53L1_Modbus - this driver uses ONLY Modbus/UART
-    config.uart_port = uart_port;
-    config.uart_tx_pin = uart_tx;
-    config.uart_rx_pin = uart_rx;
-    config.modbus_slave_address = 0x01;  // TOF400F default address
-    config.ranging_mode = VL53L1_Modbus::RangingMode::LONG_DISTANCE;
-    config.timeout_ms = 500;
-    config.enable_continuous = true;
-    return config;
+VL53L1_Modbus::Config vl53l1_modbus_default_config() {
+  VL53L1_Modbus::Config config;
+  config.uart_port = VL53L1_MODBUS_UART_PORT;
+  config.uart_tx_pin = VL53L1_MODBUS_TX_PIN;
+  config.uart_rx_pin = VL53L1_MODBUS_RX_PIN;
+  config.modbus_slave_address = VL53L1_MODBUS_SLAVE_ADDR;
+  config.ranging_mode = VL53L1_Modbus::RangingMode::LONG_DISTANCE;
+  config.timeout_ms = 500;
+  config.enable_continuous = true;
+  return config;
 }

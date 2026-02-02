@@ -1,5 +1,13 @@
 #pragma once
 #include <idf_c_includes.hpp>
+
+// ===== VL53L1 I2C Hardware Configuration =====
+#define VL53L1_I2C_PORT         I2C_NUM_0
+#define VL53L1_SDA_PIN          GPIO_NUM_21
+#define VL53L1_SCL_PIN          GPIO_NUM_22
+#define VL53L1_I2C_FREQ_HZ      400000
+// =============================================
+
 /**
  * @brief I2C Scanner utility for detecting devices on the I2C bus
  *
@@ -10,6 +18,17 @@
  */
 class I2CScanner {
 public:
+
+    /**
+    * @brief Comprehensive I2C scan with default VL53L1 configuration
+    *
+    * Scans I2C bus using VL53L1 hardware pins and logs detailed results.
+    * This is a convenience function for VL53L1 sensor troubleshooting.
+    *
+    * @return true if scan completed (regardless of devices found), false on error
+    */
+    static bool scanVL53L1Bus();
+
     /**
      * @brief Scan the I2C bus for all devices
      *

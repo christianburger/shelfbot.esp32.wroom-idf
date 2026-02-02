@@ -591,18 +591,15 @@ const char* VL53L1::selfTest() {
     return nullptr;
 }
 
-VL53L1::Config vl53l1_default_config(
-    i2c_port_t port,
-    gpio_num_t sda,
-    gpio_num_t scl) {
-
-    VL53L1::Config config;
-    config.i2c_port = port;
-    config.sda_pin = sda;
-    config.scl_pin = scl;
-    config.i2c_address = 0x29;
-    config.i2c_freq_hz = 400000;
-    config.ranging_mode = VL53L1::RangingMode::LONG_DISTANCE;  // Fixed: Added namespace
-    config.timeout_ms = 500;
-    return config;
+VL53L1::Config vl53l1_default_config() {
+  VL53L1::Config config;
+  config.i2c_port = VL53L1_I2C_PORT;
+  config.sda_pin = VL53L1_SDA_PIN;
+  config.scl_pin = VL53L1_SCL_PIN;
+  config.i2c_address = VL53L1_I2C_ADDRESS;
+  config.i2c_freq_hz = VL53L1_I2C_FREQ_HZ;
+  config.ranging_mode = VL53L1::RangingMode::LONG_DISTANCE;
+  config.timeout_ms = 500;
+  return config;
 }
+

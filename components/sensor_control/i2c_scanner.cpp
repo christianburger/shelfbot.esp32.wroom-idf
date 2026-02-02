@@ -1,5 +1,6 @@
 #include "include/i2c_scanner.hpp"
 
+
 const char* I2CScanner::TAG = "I2C_SCANNER";
 
 const I2CScanner::DeviceInfo I2CScanner::KNOWN_DEVICES[] = {
@@ -18,6 +19,48 @@ const I2CScanner::DeviceInfo I2CScanner::KNOWN_DEVICES[] = {
 };
 
 const size_t I2CScanner::NUM_KNOWN_DEVICES = sizeof(KNOWN_DEVICES) / sizeof(KNOWN_DEVICES[0]);
+
+bool I2CScanner::scanVL53L1Bus() {
+  ESP_LOGI(TAG, "");
+  ESP_LOGI(TAG, "╔════════════════════════════════════════════╗");
+  ESP_LOGI(TAG, "║   VL53L1 I2C Bus Diagnostic Scan          ║");
+  ESP_LOGI(TAG, "╚════════════════════════════════════════════╝");
+  ESP_LOGI(TAG, "");
+
+  std::vector<uint8_t> found_addresses;
+  bool result = scan(VL53L1_I2C_PORT, found_addresses,
+                    VL53L1_SDA_PIN, VL53L1_SCL_PIN, VL53L1_I2C_FREQ_HZ);
+
+  if (!result) {
+    ESP_LOGE(TAG, "");
+    ESP_LOGE(TAG, "╔════════════════════════════════════════════╗");
+    ESP_LOGE(TAG, "║   CRITICAL: I2C Bus Initialization Failed  ║");
+    ESP_LOGE(TAG, "╚════════════════════════════════════════════╝");
+    ESP_LOGE(TAG, "");
+    return false;
+  }
+
+  // Check specifically for VL53L1 at 0x29
+  bool vl53l1_found = false;
+  for (auto addr : found_addresses) {
+    if (addr == 0x29) {
+      vl53l1_found = true;
+      break;
+    }
+  }
+
+  ESP_LOGI(TAG, "");
+  ESP_LOGI(TAG, "╔════════════════════════════════════════════╗");
+  if (vl53l1_found) {
+    ESP_LOGI(TAG, "║   ✓ VL53L1 DETECTED at 0x29                ║");
+  } else {
+    ESP_LOGW(TAG, "║   ✗ VL53L1 NOT FOUND at 0x29               ║");
+  }
+  ESP_LOGI(TAG, "╚════════════════════════════════════════════╝");
+  ESP_LOGI(TAG, "");
+
+  return true;
+}
 
 bool I2CScanner::scan(i2c_port_t port, std::vector<uint8_t>& found_addresses,
                       gpio_num_t sda_pin, gpio_num_t scl_pin, uint32_t freq_hz) {
