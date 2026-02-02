@@ -5,7 +5,7 @@
 #define VL53L1_I2C_PORT         I2C_NUM_0
 #define VL53L1_SDA_PIN          GPIO_NUM_21
 #define VL53L1_SCL_PIN          GPIO_NUM_22
-#define VL53L1_I2C_FREQ_HZ      400000
+#define VL53L1_I2C_FREQ_HZ      4000
 // =============================================
 
 /**
