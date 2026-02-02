@@ -1,4 +1,4 @@
-// Complete ultrasonic_sensor.cpp
+// [file name]: ultrasonic_sensor.cpp
 #include "ultrasonic_sensor.hpp"
 
 static const char* TAG = "Ultrasonic_Sensor";
@@ -95,7 +95,7 @@ bool UltrasonicSensorArray::init() {
         return false;
     }
 
-    // Configure timeout timer - with all fields initialized
+    // Configure timeout timer
     gptimer_config_t timer_config = {
         .clk_src = GPTIMER_CLK_SRC_DEFAULT,
         .direction = GPTIMER_COUNT_UP,

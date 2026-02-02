@@ -1,10 +1,15 @@
+// [file name]: shelfbot.cpp
 #include "shelfbot.hpp"
 #include <rcl/allocator.h>
 #include <rmw_microros/init_options.h>
-
-#include "sensor_common.hpp"
+#include "sensor_manager.hpp"
 
 static const char* TAG = "shelfbot";
+
+// --- Static Member Definitions ---
+bool Shelfbot::time_synchronized = false;
+bool Shelfbot::led_state = false;
+Shelfbot* Shelfbot::instance = nullptr;
 
 // --- Helper Functions ---
 void init_multi_array(std_msgs__msg__Float32MultiArray& msg, float* data_buffer, int capacity) {
@@ -17,11 +22,6 @@ void init_multi_array(std_msgs__msg__Float32MultiArray& msg, float* data_buffer,
     msg.layout.data_offset = 0;
 }
 
-// --- Static Member Definitions ---
-bool Shelfbot::time_synchronized = false;
-bool Shelfbot::led_state = false;
-Shelfbot* Shelfbot::instance = nullptr;
-
 // --- mDNS Implementation ---
 void Shelfbot::initialise_mdns(void) {
     mdns_init();
@@ -33,7 +33,7 @@ bool Shelfbot::query_mdns_host(const char * host_name) {
     ESP_LOGI(TAG, "Querying for mDNS host: %s.local", host_name);
     esp_ip4_addr_t addr;
     addr.addr = 0;
-    esp_err_t err = mdns_query_a(host_name, 2000,  &addr);
+    esp_err_t err = mdns_query_a(host_name, 2000, &addr);
     if(err){
         if(err == ESP_ERR_NOT_FOUND){
             ESP_LOGW(TAG, "mDNS host not found!");
@@ -84,15 +84,15 @@ void Shelfbot::distance_sensors_timer_callback(rcl_timer_t * timer, int64_t last
     (void) last_call_time;
     if (timer != NULL) {
         SensorCommon::SensorDataPacket sensor_data;
-        if (sensor_control_get_latest_data(&sensor_data)) {
+        if (SensorManager::get_instance().get_latest_data(sensor_data)) {
             // Publish ultrasonic distances
             size_t idx = 0;
-            for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS && idx < SensorCommon::NUM_SENSORS; i++, idx++) {
-                distance_sensors_data[idx] = sensor_data.ultrasonic_distances_cm[i];
+            for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS && idx < SensorCommon::NUM_ULTRASONIC_SENSORS; i++, idx++) {
+                distance_sensors_data[idx] = sensor_data.ultrasonic_readings[i].distance_cm;
             }
-            // Publish ToF distances
+            // Publish ToF distances (convert mm to cm)
             for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS && idx < SensorCommon::NUM_SENSORS; i++, idx++) {
-                distance_sensors_data[idx] = sensor_data.tof_distances_cm[i];
+                distance_sensors_data[idx] = sensor_data.tof_measurements[i].distance_mm / 10.0f;
             }
             distance_sensors_msg.data.size = idx;
             RCSOFTCHECK(rcl_publish(&distance_sensors_publisher, &distance_sensors_msg, NULL));
@@ -112,9 +112,10 @@ void Shelfbot::tof_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     (void) last_call_time;
     if (timer != NULL) {
         SensorCommon::SensorDataPacket sensor_data;
-        if (sensor_control_get_latest_data(&sensor_data)) {
-            if (sensor_data.tof_valid[0]) {
-                tof_distance_msg.data = sensor_data.tof_distances_cm[0];
+        if (SensorManager::get_instance().get_latest_data(sensor_data)) {
+            // Use the first ToF sensor for backward compatibility
+            if (sensor_data.tof_measurements[0].valid) {
+                tof_distance_msg.data = sensor_data.tof_measurements[0].distance_mm / 10.0f;
             } else {
                 tof_distance_msg.data = -1.0f;
             }
@@ -179,7 +180,7 @@ void Shelfbot::create_entities() {
     RCCHECK(rclc_subscription_init_default(&set_speed_subscription, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "shelfbot_firmware/set_speed"));
     RCCHECK(rclc_subscription_init_default(&led_subscription, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "shelfbot_firmware/led"));
 
-    // Timers - Fixed with 5th parameter (auto_reload = true)
+    // Timers
     RCCHECK(rclc_timer_init_default2(&heartbeat_timer, &support, RCL_MS_TO_NS(1000), heartbeat_timer_callback_wrapper, true));
     RCCHECK(rclc_timer_init_default2(&motor_position_timer, &support, RCL_MS_TO_NS(100), motor_position_timer_callback_wrapper, true));
     RCCHECK(rclc_timer_init_default2(&distance_sensors_timer, &support, RCL_MS_TO_NS(200), distance_sensors_timer_callback_wrapper, true));
@@ -254,80 +255,125 @@ void Shelfbot::micro_ros_task_impl() {
         switch(state) {
             case WAITING_AGENT:
                 if (query_mdns_host("gentoo-laptop")) {
-                     rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
+                    rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
 
-                     // Check and handle return value
-                     rcl_ret_t ret = rcl_init_options_init(&init_options, allocator);
-                     if (ret != RCL_RET_OK) {
-                         ESP_LOGE(TAG, "Failed to initialize rcl init options: %ld", ret);
-                         break;
-                     }
+                    rcl_ret_t ret = rcl_init_options_init(&init_options, allocator);
+                    if (ret != RCL_RET_OK) {
+                        ESP_LOGE(TAG, "Failed to initialize rcl init options: %ld", ret);
+                        break;
+                    }
 
-                     rmw_uros_options_set_udp_address(agent_ip_str, "8888", rcl_init_options_get_rmw_init_options(&init_options));
+                    rmw_uros_options_set_udp_address(agent_ip_str, "8888", rcl_init_options_get_rmw_init_options(&init_options));
 
-                     if (rclc_support_init_with_options(&support , 0, NULL, &init_options, &allocator) == RCL_RET_OK) {
-                         state = AGENT_CONNECTED;
-                     }
+                    if (rclc_support_init_with_options(&support , 0, NULL, &init_options, &allocator) == RCL_RET_OK) {
+                        state = AGENT_CONNECTED;
+                    }
 
-                     // Check and handle return value
-                     ret = rcl_init_options_fini(&init_options);
-                     if (ret != RCL_RET_OK) {
-                         ESP_LOGE(TAG, "Failed to finalize rcl init options: %ld", ret);
-                     }
+                    ret = rcl_init_options_fini(&init_options);
+                    if (ret != RCL_RET_OK) {
+                        ESP_LOGE(TAG, "Failed to finalize rcl init options: %ld", ret);
+                    }
                 }
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 break;
 
-        case AGENT_CONNECTED:
-             if (!entities_created) {
-                 create_entities();
-                 entities_created = true;
-             }
-             if (rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)) != RCL_RET_OK) {
-                 state = AGENT_DISCONNECTED;
-             }
-             break;
+            case AGENT_CONNECTED:
+                if (!entities_created) {
+                    create_entities();
+                    entities_created = true;
+                }
+                if (rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)) != RCL_RET_OK) {
+                    state = AGENT_DISCONNECTED;
+                }
+                break;
 
-        case AGENT_DISCONNECTED:
-             if (entities_created) {
-                 destroy_entities();
-                 entities_created = false;
-             }
-             rclc_support_fini(&support);
-             state = WAITING_AGENT;
-             break;
+            case AGENT_DISCONNECTED:
+                if (entities_created) {
+                    destroy_entities();
+                    entities_created = false;
+                }
+                rclc_support_fini(&support);
+                state = WAITING_AGENT;
+                break;
 
-         default: break;
+            default:
+                break;
+        }
+        vTaskDelay(pdMS_TO_TICKS(10));
     }
-    vTaskDelay(pdMS_TO_TICKS(10));
-}
 }
 
 // --- Main Entry Point ---
 void Shelfbot::begin() {
-// 1. Initialize Subsystems (Hardware Abstraction)
-led_control_init();
-motor_control_begin();
+    // Get the singleton instance
+    instance = this;
 
-// 2. Initialize Networking & System Services
-esp_err_t ret = nvs_flash_init();
-if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
-    ESP_ERROR_CHECK(nvs_flash_erase());
-    nvs_flash_init();
-}
-esp_netif_init();
-esp_event_loop_create_default();
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "Starting Shelfbot Firmware");
+    ESP_LOGI(TAG, "========================================");
 
-wifi_init_sta();
-initialize_sntp();
-initialise_mdns();
+    // 1. Initialize Subsystems (Hardware Abstraction)
+    ESP_LOGI(TAG, "1. Initializing hardware subsystems...");
+    led_control_init();
+    motor_control_begin();
 
-start_webserver();
+    // 2. Initialize Networking & System Services
+    ESP_LOGI(TAG, "2. Initializing network and system services...");
 
-// 3. Initialize High-Level Sensor Control (manages all sensors)
-sensor_control_init();
-sensor_control_start_task();
+    esp_err_t ret = nvs_flash_init();
+    if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
+        ESP_ERROR_CHECK(nvs_flash_erase());
+        nvs_flash_init();
+    }
 
-// 4. Start Application Task (Micro-ROS)
-xTaskCreate(micro_ros_task_wrapper, "uros_task", 16000, this, 5, nullptr);
+    esp_netif_init();
+    esp_event_loop_create_default();
+
+    wifi_init_sta();
+    initialize_sntp();
+    initialise_mdns();
+
+    // Start HTTP server
+    esp_err_t err = HttpServer::get_instance().start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(err));
+    }
+
+    // 3. Initialize Sensor Manager (shared by all components)
+    ESP_LOGI(TAG, "3. Initializing sensors...");
+
+    SensorControl::Config sensor_config;
+
+    // Configure 4 ultrasonic sensors
+    sensor_config.ultrasonic_configs = {
+        {.trig_pin = 25, .echo_pin = 26, .timeout_us = 30000, .max_distance_mm = 4000},
+        {.trig_pin = 27, .echo_pin = 14, .timeout_us = 30000, .max_distance_mm = 4000},
+        {.trig_pin = 12, .echo_pin = 13, .timeout_us = 30000, .max_distance_mm = 4000},
+        {.trig_pin = 32, .echo_pin = 33, .timeout_us = 30000, .max_distance_mm = 4000}
+    };
+
+    // Configure 3 ToF sensors
+    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
+        sensor_config.tof_configs[i].uart_port = 1;
+        sensor_config.tof_configs[i].tx_pin = 17;
+        sensor_config.tof_configs[i].rx_pin = 16;
+        sensor_config.tof_configs[i].device_address = 0x01 + i;
+        sensor_config.tof_configs[i].timeout_ms = 500;
+        sensor_config.tof_configs[i].long_distance_mode = true;
+    }
+
+    sensor_config.ultrasonic_read_interval_ms = 100;
+    sensor_config.tof_read_interval_ms = 200;
+
+    // Initialize the global sensor manager
+    SensorManager::get_instance().initialize(sensor_config);
+    SensorManager::get_instance().start();
+
+    // 4. Start Application Task (Micro-ROS)
+    ESP_LOGI(TAG, "4. Starting Micro-ROS task...");
+    xTaskCreate(micro_ros_task_wrapper, "uros_task", 16000, this, 5, nullptr);
+
+    ESP_LOGI(TAG, "========================================");
+    ESP_LOGI(TAG, "Shelfbot Firmware Initialization Complete");
+    ESP_LOGI(TAG, "========================================");
 }

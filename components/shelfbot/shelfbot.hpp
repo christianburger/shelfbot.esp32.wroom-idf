@@ -1,7 +1,9 @@
+// [file name]: shelfbot.hpp
 #pragma once
 
 #include <cstring>
 #include <cinttypes>
+#include <memory>
 
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
@@ -17,6 +19,7 @@
 #include "motor_control.hpp"
 #include "../http_server/include/http_server.hpp"
 #include "led_control.hpp"
+#include "sensor_control.hpp"
 #include "sensor_common.hpp"
 
 #include <rcl/rcl.h>
@@ -86,12 +89,15 @@ private:
     std_msgs__msg__Bool led_state_msg;
     std_msgs__msg__Float32 tof_distance_msg;
 
-    std_msgs__msg__Int32 motor_command_msg;
-    std_msgs__msg__Int32 set_speed_msg;
+    std_msgs__msg__Float32MultiArray motor_command_msg;
+    std_msgs__msg__Float32MultiArray set_speed_msg;
     std_msgs__msg__Bool led_msg;
 
     float motor_pos_data[2];
     float distance_sensors_data[SensorCommon::NUM_SENSORS];
+
+    // Sensor control instance
+    std::unique_ptr<SensorControl> sensor_control_;
 
     void initialise_mdns();
     bool query_mdns_host(const char * host_name);

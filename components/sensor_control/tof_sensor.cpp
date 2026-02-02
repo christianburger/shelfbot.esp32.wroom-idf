@@ -1,229 +1,394 @@
 #include "tof_sensor.hpp"
+#include <memory>
 #include "vl53l1_modbus.hpp"
 
-static const char* TAG = "TofSensor";
+const char* TofSensor::TAG = "TofSensor";
 
-/**
- * @brief Concrete implementation for VL53L1-based ToF sensors using Modbus/UART
- * 
- * This is a thin wrapper around the VL53L1_Modbus driver.
- * All configuration is done in the driver itself.
- */
-class VL53L1_ModbusSensor : public TofSensor {
-private:
-    std::unique_ptr<VL53L1_Modbus> driver_;
-    Config config_;
-    Mode current_mode_;
-    bool continuous_mode_;
-    bool initialized_;
+TofSensor::TofSensor(const Config& config)
+    : config_(config),
+      initialized_(false),
+      continuous_mode_(false),
+      last_read_time_us_(0) {
 
-public:
-    explicit VL53L1_ModbusSensor(const Config& config)
-        : config_(config),
-          current_mode_(config.mode),
-          continuous_mode_(false),
-          initialized_(false) {
-        
-        ESP_LOGI(TAG, "Creating VL53L1_ModbusSensor (Modbus/UART only)");
+    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
+        drivers_[i] = nullptr;
+        sensor_enabled_[i] = config.sensors[i].enabled;
+        current_modes_[i] = config.sensors[i].mode;
+    }
+}
+
+TofSensor::~TofSensor() {
+    stop_continuous();
+
+    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
+        if (drivers_[i] != nullptr) {
+            delete static_cast<VL53L1_Modbus*>(drivers_[i]);
+            drivers_[i] = nullptr;
+        }
+    }
+}
+
+esp_err_t TofSensor::initialize() {
+    if (initialized_) {
+        return ESP_OK;
     }
 
-    ~VL53L1_ModbusSensor() override {
-        stop_continuous();
+    ESP_LOGI(TAG, "Initializing %d ToF sensors...", SensorCommon::NUM_TOF_SENSORS);
+
+    esp_err_t overall_status = ESP_OK;
+
+    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
+        if (!sensor_enabled_[i]) {
+            ESP_LOGI(TAG, "Sensor %d disabled, skipping", i);
+            continue;
+        }
+
+        esp_err_t status = initialize_driver(i);
+        if (status != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to initialize sensor %d", i);
+            overall_status = ESP_FAIL;
+            sensor_enabled_[i] = false;
+        }
     }
 
-    esp_err_t initialize() override {
-        if (initialized_) {
-            ESP_LOGW(TAG, "Sensor already initialized");
-            return ESP_OK;
+    initialized_ = (overall_status == ESP_OK);
+    if (initialized_) {
+        ESP_LOGI(TAG, "ToF sensors initialized successfully");
+    } else {
+        ESP_LOGE(TAG, "ToF sensors initialization failed");
+    }
+
+    return overall_status;
+}
+
+esp_err_t TofSensor::initialize_driver(uint8_t sensor_index) {
+    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const auto& sensor_config = config_.sensors[sensor_index];
+
+    // Create driver configuration - driver handles all low-level details
+    VL53L1_Modbus::Config driver_config;
+
+    // Set configuration directly - no wrapper needed
+    driver_config.uart_port = static_cast<uart_port_t>(sensor_config.uart_port);
+    driver_config.uart_tx_pin = static_cast<gpio_num_t>(sensor_config.uart_tx_pin);
+    driver_config.uart_rx_pin = static_cast<gpio_num_t>(sensor_config.uart_rx_pin);
+    driver_config.modbus_slave_address = sensor_config.device_address;
+    driver_config.timeout_ms = sensor_config.timeout_ms;
+    driver_config.enable_continuous = true;  // Always enable for polling
+
+    // Set ranging mode
+    driver_config.ranging_mode = (sensor_config.mode == Mode::LONG_DISTANCE) ?
+                                VL53L1_Modbus::RangingMode::LONG_DISTANCE :
+                                VL53L1_Modbus::RangingMode::HIGH_PRECISION;
+
+    // Create driver instance directly
+    drivers_[sensor_index] = new VL53L1_Modbus(driver_config);
+    VL53L1_Modbus* driver = static_cast<VL53L1_Modbus*>(drivers_[sensor_index]);
+
+    // Initialize the driver
+    const char* err = driver->init();
+    if (err != nullptr) {
+        ESP_LOGE(TAG, "Driver initialization failed for sensor %d: %s", sensor_index, err);
+        delete driver;
+        drivers_[sensor_index] = nullptr;
+        return ESP_FAIL;
+    }
+
+    // Start continuous mode
+    if (!driver->startContinuous()) {
+        ESP_LOGW(TAG, "Failed to start continuous mode for sensor %d, but continuing", sensor_index);
+    }
+
+    ESP_LOGI(TAG, "Sensor %d initialized successfully", sensor_index);
+    return ESP_OK;
+}
+
+esp_err_t TofSensor::destroy_driver(uint8_t sensor_index) {
+    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS || drivers_[sensor_index] == nullptr) {
+        return ESP_OK;
+    }
+
+    VL53L1_Modbus* driver = static_cast<VL53L1_Modbus*>(drivers_[sensor_index]);
+    delete driver;
+    drivers_[sensor_index] = nullptr;
+
+    return ESP_OK;
+}
+
+esp_err_t TofSensor::read_all(SensorCommon::TofMeasurement results[SensorCommon::NUM_TOF_SENSORS]) {
+    if (!initialized_) {
+        return ESP_ERR_INVALID_STATE;
+    }
+
+    esp_err_t overall_status = ESP_OK;
+    int64_t timestamp = esp_timer_get_time();
+
+    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
+        if (!sensor_enabled_[i] || drivers_[i] == nullptr) {
+            // Mark as disabled
+            results[i].valid = false;
+            results[i].status = 0xFF;  // Special status for disabled
+            results[i].timestamp_us = timestamp;
+            results[i].distance_mm = 0;
+            results[i].timeout_occurred = false;
+            continue;
         }
 
-        ESP_LOGI(TAG, "Initializing VL53L1_Modbus sensor...");
-        
-        // Create driver configuration - driver handles all pin setup internally
-        VL53L1_Modbus::Config driver_config;
-        driver_config.uart_port = static_cast<uart_port_t>(config_.pins.uart_port);
-        driver_config.uart_tx_pin = static_cast<gpio_num_t>(config_.pins.uart_tx_pin);
-        driver_config.uart_rx_pin = static_cast<gpio_num_t>(config_.pins.uart_rx_pin);
-        driver_config.modbus_slave_address = config_.device_address;
-        driver_config.ranging_mode = (config_.mode == Mode::LONG_DISTANCE) ? 
-                                    VL53L1_Modbus::RangingMode::LONG_DISTANCE :
-                                    VL53L1_Modbus::RangingMode::HIGH_PRECISION;
-        driver_config.timeout_ms = config_.timeout_ms;
-        driver_config.enable_continuous = config_.enable_continuous;
-
-        // Create driver instance
-        driver_ = std::make_unique<VL53L1_Modbus>(driver_config);
-
-        // Initialize driver - this does all the Modbus configuration
-        const char* err = driver_->init();
-        if (err != nullptr) {
-            ESP_LOGE(TAG, "Driver initialization failed: %s", err);
-            driver_.reset();
-            return ESP_FAIL;
+        esp_err_t status = read_sensor(i, results[i]);
+        if (status != ESP_OK) {
+            overall_status = ESP_FAIL;
+            results[i].valid = false;
+            results[i].status = 0xFE;  // Special status for read error
         }
 
-        // Start continuous mode if configured
-        if (config_.enable_continuous) {
-            esp_err_t err = start_continuous();
-            if (err != ESP_OK) {
-                ESP_LOGE(TAG, "Failed to start continuous mode: %s", esp_err_to_name(err));
-                driver_.reset();
-                return err;
+        last_measurements_[i] = results[i];
+    }
+
+    last_read_time_us_ = timestamp;
+    return overall_status;
+}
+
+esp_err_t TofSensor::read_sensor(uint8_t sensor_index, SensorCommon::TofMeasurement& result) {
+    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS ||
+        !sensor_enabled_[sensor_index] ||
+        drivers_[sensor_index] == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    VL53L1_Modbus* driver = static_cast<VL53L1_Modbus*>(drivers_[sensor_index]);
+
+    // Read directly from driver
+    VL53L1_Modbus::Measurement driver_result;
+    if (!driver->readContinuous(driver_result)) {
+        ESP_LOGW(TAG, "Failed to read measurement from sensor %d", sensor_index);
+        return ESP_ERR_INVALID_RESPONSE;
+    }
+
+    // Convert driver result to common format
+    result.distance_mm = driver_result.distance_mm;
+    result.valid = driver_result.valid;
+    result.status = driver_result.range_status;
+    result.timestamp_us = driver_result.timestamp_us;
+    result.timeout_occurred = driver->timeoutOccurred();
+
+    return ESP_OK;
+}
+
+esp_err_t TofSensor::set_mode(uint8_t sensor_index, Mode mode) {
+    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS ||
+        !sensor_enabled_[sensor_index] ||
+        drivers_[sensor_index] == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    VL53L1_Modbus* driver = static_cast<VL53L1_Modbus*>(drivers_[sensor_index]);
+
+    // Convert mode and set directly on driver
+    VL53L1_Modbus::RangingMode driver_mode = (mode == Mode::LONG_DISTANCE) ?
+                                            VL53L1_Modbus::RangingMode::LONG_DISTANCE :
+                                            VL53L1_Modbus::RangingMode::HIGH_PRECISION;
+
+    const char* err = driver->setRangingMode(driver_mode);
+    if (err != nullptr) {
+        ESP_LOGE(TAG, "Failed to set mode for sensor %d: %s", sensor_index, err);
+        return ESP_FAIL;
+    }
+
+    current_modes_[sensor_index] = mode;
+    config_.sensors[sensor_index].mode = mode;
+
+    ESP_LOGI(TAG, "Sensor %d mode changed to %s", sensor_index,
+             mode == Mode::LONG_DISTANCE ? "LONG_DISTANCE" : "HIGH_PRECISION");
+
+    return ESP_OK;
+}
+
+TofSensor::Mode TofSensor::get_mode(uint8_t sensor_index) const {
+    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS) {
+        return Mode::LONG_DISTANCE;  // Default
+    }
+
+    return current_modes_[sensor_index];
+}
+
+esp_err_t TofSensor::set_timeout(uint8_t sensor_index, uint16_t timeout_ms) {
+    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS ||
+        !sensor_enabled_[sensor_index] ||
+        drivers_[sensor_index] == nullptr) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    VL53L1_Modbus* driver = static_cast<VL53L1_Modbus*>(drivers_[sensor_index]);
+    driver->setTimeout(timeout_ms);
+
+    config_.sensors[sensor_index].timeout_ms = timeout_ms;
+
+    ESP_LOGD(TAG, "Sensor %d timeout set to %d ms", sensor_index, timeout_ms);
+    return ESP_OK;
+}
+
+uint16_t TofSensor::get_timeout(uint8_t sensor_index) const {
+    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS) {
+        return 0;
+    }
+
+    return config_.sensors[sensor_index].timeout_ms;
+}
+
+esp_err_t TofSensor::start_continuous() {
+    if (continuous_mode_) {
+        return ESP_OK;
+    }
+
+    ESP_LOGI(TAG, "Starting continuous mode for ToF sensors");
+
+    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
+        if (sensor_enabled_[i] && drivers_[i] != nullptr) {
+            VL53L1_Modbus* driver = static_cast<VL53L1_Modbus*>(drivers_[i]);
+            if (!driver->startContinuous()) {
+                ESP_LOGW(TAG, "Failed to start continuous mode for sensor %d", i);
             }
         }
+    }
 
-        initialized_ = true;
-        ESP_LOGI(TAG, "VL53L1_Modbus sensor initialized successfully");
+    continuous_mode_ = true;
+    return ESP_OK;
+}
+
+esp_err_t TofSensor::stop_continuous() {
+    if (!continuous_mode_) {
         return ESP_OK;
     }
 
-    bool is_ready() const override {
-        return initialized_ && driver_ && driver_->isReady();
+    ESP_LOGI(TAG, "Stopping continuous mode for ToF sensors");
+
+    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
+        if (sensor_enabled_[i] && drivers_[i] != nullptr) {
+            VL53L1_Modbus* driver = static_cast<VL53L1_Modbus*>(drivers_[i]);
+            driver->stopContinuous();
+        }
     }
 
-    esp_err_t read_measurement(Measurement& result) override {
-        if (!is_ready()) {
-            ESP_LOGE(TAG, "Sensor not ready");
-            return ESP_ERR_INVALID_STATE;
-        }
+    continuous_mode_ = false;
+    return ESP_OK;
+}
 
-        VL53L1_Modbus::Measurement driver_result;
-        if (!driver_->readContinuous(driver_result)) {
-            ESP_LOGW(TAG, "Failed to read measurement");
-            return ESP_ERR_INVALID_RESPONSE;
-        }
+bool TofSensor::is_continuous() const {
+    return continuous_mode_;
+}
 
-        // Convert driver result to interface result
-        result.distance_mm = driver_result.distance_mm;
-        result.valid = driver_result.valid;
-        result.status = driver_result.range_status;
-        result.timestamp_us = driver_result.timestamp_us;
-        result.timeout_occurred = driver_->timeoutOccurred();
-
-        return ESP_OK;
+esp_err_t TofSensor::self_test(uint8_t sensor_index) {
+    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS ||
+        !sensor_enabled_[sensor_index] ||
+        drivers_[sensor_index] == nullptr) {
+        return ESP_ERR_INVALID_ARG;
     }
 
-    esp_err_t set_mode(Mode mode) override {
-        if (!is_ready()) {
-            ESP_LOGE(TAG, "Sensor not ready");
-            return ESP_ERR_INVALID_STATE;
-        }
+    VL53L1_Modbus* driver = static_cast<VL53L1_Modbus*>(drivers_[sensor_index]);
 
-        if (mode == current_mode_) {
-            return ESP_OK;
-        }
-
-        VL53L1_Modbus::RangingMode driver_mode = (mode == Mode::LONG_DISTANCE) ?
-                                                 VL53L1_Modbus::RangingMode::LONG_DISTANCE :
-                                                 VL53L1_Modbus::RangingMode::HIGH_PRECISION;
-        
-        const char* err = driver_->setRangingMode(driver_mode);
-        if (err != nullptr) {
-            ESP_LOGE(TAG, "Failed to set ranging mode: %s", err);
-            return ESP_FAIL;
-        }
-
-        current_mode_ = mode;
-        config_.mode = mode;
-        ESP_LOGI(TAG, "Sensor mode changed to: %s",
-                 (mode == Mode::LONG_DISTANCE) ? "LONG_DISTANCE" : "HIGH_PRECISION");
-
-        return ESP_OK;
+    // Check if sensor is responsive
+    if (!driver->probe()) {
+        ESP_LOGE(TAG, "Sensor %d self-test failed: probe failed", sensor_index);
+        return ESP_FAIL;
     }
 
-    Mode get_mode() const override {
-        return current_mode_;
+    // Run driver's self-test
+    const char* err = driver->selfTest();
+    if (err != nullptr) {
+        ESP_LOGE(TAG, "Sensor %d self-test failed: %s", sensor_index, err);
+        return ESP_FAIL;
     }
 
-    esp_err_t set_timeout(uint16_t timeout_ms) override {
-        if (!driver_) {
-            return ESP_ERR_INVALID_STATE;
-        }
+    ESP_LOGI(TAG, "Sensor %d self-test passed", sensor_index);
+    return ESP_OK;
+}
 
-        driver_->setTimeout(timeout_ms);
-        config_.timeout_ms = timeout_ms;
-        ESP_LOGD(TAG, "Timeout set to %d ms", timeout_ms);
-
-        return ESP_OK;
+bool TofSensor::probe(uint8_t sensor_index) {
+    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS ||
+        !sensor_enabled_[sensor_index] ||
+        drivers_[sensor_index] == nullptr) {
+        return false;
     }
 
-    uint16_t get_timeout() const override {
-        return config_.timeout_ms;
+    VL53L1_Modbus* driver = static_cast<VL53L1_Modbus*>(drivers_[sensor_index]);
+    return driver->probe();
+}
+
+bool TofSensor::timeout_occurred(uint8_t sensor_index) {
+    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS ||
+        !sensor_enabled_[sensor_index] ||
+        drivers_[sensor_index] == nullptr) {
+        return false;
     }
 
-    esp_err_t start_continuous() override {
-        if (!is_ready()) {
-            return ESP_ERR_INVALID_STATE;
-        }
+    VL53L1_Modbus* driver = static_cast<VL53L1_Modbus*>(drivers_[sensor_index]);
+    return driver->timeoutOccurred();
+}
 
-        if (continuous_mode_) {
-            return ESP_OK;
-        }
-
-        if (!driver_->startContinuous()) {
-            ESP_LOGE(TAG, "Failed to start continuous mode");
-            return ESP_FAIL;
-        }
-
-        continuous_mode_ = true;
-        ESP_LOGI(TAG, "Continuous measurement mode started");
-
-        return ESP_OK;
+bool TofSensor::enable_sensor(uint8_t sensor_index, bool enable) {
+    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS) {
+        return false;
     }
 
-    esp_err_t stop_continuous() override {
-        if (!continuous_mode_) {
-            return ESP_OK;
-        }
-
-        if (!driver_->stopContinuous()) {
-            ESP_LOGE(TAG, "Failed to stop continuous mode");
-            return ESP_FAIL;
-        }
-
-        continuous_mode_ = false;
-        ESP_LOGI(TAG, "Continuous measurement mode stopped");
-
-        return ESP_OK;
+    if (enable == sensor_enabled_[sensor_index]) {
+        return true;  // No change
     }
 
-    bool is_continuous() const override {
-        return continuous_mode_;
-    }
-
-    esp_err_t self_test() override {
-        if (!is_ready()) {
-            return ESP_ERR_INVALID_STATE;
-        }
-
-        const char* err = driver_->selfTest();
-        if (err != nullptr) {
-            ESP_LOGE(TAG, "Self-test failed: %s", err);
-            return ESP_FAIL;
-        }
-
-        ESP_LOGI(TAG, "Self-test passed");
-        return ESP_OK;
-    }
-
-    bool probe() override {
-        if (!driver_) {
+    if (enable) {
+        // Enable the sensor
+        esp_err_t err = initialize_driver(sensor_index);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to enable sensor %d", sensor_index);
             return false;
         }
-
-        return driver_->probe();
+        sensor_enabled_[sensor_index] = true;
+        ESP_LOGI(TAG, "Sensor %d enabled", sensor_index);
+    } else {
+        // Disable the sensor
+        destroy_driver(sensor_index);
+        sensor_enabled_[sensor_index] = false;
+        ESP_LOGI(TAG, "Sensor %d disabled", sensor_index);
     }
 
-    bool timeout_occurred() override {
-        if (!driver_) {
-            return false;
+    return true;
+}
+
+bool TofSensor::is_sensor_enabled(uint8_t sensor_index) const {
+    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS) {
+        return false;
+    }
+
+    return sensor_enabled_[sensor_index];
+}
+
+bool TofSensor::is_ready() const {
+    if (!initialized_) {
+        return false;
+    }
+
+    // Check if at least one sensor is ready
+    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
+        if (sensor_enabled_[i] && drivers_[i] != nullptr) {
+            VL53L1_Modbus* driver = static_cast<VL53L1_Modbus*>(drivers_[i]);
+            if (driver->isReady()) {
+                return true;
+            }
         }
-
-        return driver_->timeoutOccurred();
     }
-};
 
-// Factory function implementation
-std::unique_ptr<TofSensor> TofSensor::create(const Config& config) {
-    return std::make_unique<VL53L1_ModbusSensor>(config);
+    return false;
+}
+
+bool TofSensor::is_sensor_ready(uint8_t sensor_index) const {
+    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS ||
+        !sensor_enabled_[sensor_index] ||
+        drivers_[sensor_index] == nullptr) {
+        return false;
+    }
+
+    VL53L1_Modbus* driver = static_cast<VL53L1_Modbus*>(drivers_[sensor_index]);
+    return driver->isReady();
 }

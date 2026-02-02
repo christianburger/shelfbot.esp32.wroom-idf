@@ -1,10 +1,11 @@
+// [file name]: ultrasonic_sensor.hpp
 #pragma once
 
 #ifndef SHELFBOT_ULTRASONIC_SENSOR_H
 #define SHELFBOT_ULTRASONIC_SENSOR_H
 
 #include "idf_c_includes.hpp"
-#include "sensor_common.hpp"   // Reading, NUM_ULTRASONIC_SENSORS, constants
+#include "sensor_common.hpp"
 
 // Forward declaration
 class UltrasonicSensorArray;

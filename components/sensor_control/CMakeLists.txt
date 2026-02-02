@@ -3,6 +3,7 @@ idf_component_register(
   "ultrasonic_sensor.cpp"
   "tof_sensor.cpp"
   "sensor_control.cpp"
+  "sensor_manager.cpp"
   "i2c_scanner.cpp"
   INCLUDE_DIRS
   "include"

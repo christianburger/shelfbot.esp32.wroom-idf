@@ -1,11 +1,10 @@
+// [file name]: tof_sensor.hpp
 #pragma once
 #include <idf_c_includes.hpp>
+#include "sensor_common.hpp"
 
 /**
- * @brief Abstract interface for Time-of-Flight (ToF) distance sensors
- *
- * This interface provides a unified API for various ToF sensors.
- * Currently implemented for VL53L1-based sensors using Modbus/I2C communication.
+ * @brief Time-of-Flight (ToF) distance sensor manager for multiple sensors
  */
 class TofSensor {
 public:
@@ -17,144 +16,81 @@ public:
         LONG_DISTANCE     ///< Long range mode: ~4.0m range, 200ms measurement period
     };
 
-    /**
-     * @brief Configuration structure for ToF sensor
-     */
     struct Config {
-        Mode mode = Mode::LONG_DISTANCE;          ///< Sensor operation mode
-        uint16_t timeout_ms = 500;                ///< Communication timeout in milliseconds
-        uint8_t device_address = 0x01;            ///< Modbus slave address
-        bool enable_continuous = true;            ///< Enable continuous measurement mode
-        uint16_t measurement_interval_ms = 200;   ///< Measurement interval in continuous mode
+        // Per-sensor configuration
+        struct SensorConfig {
+            Mode mode = Mode::LONG_DISTANCE;
+            uint16_t timeout_ms = 500;
+            uint8_t device_address = 0x01;  // Modbus slave address
 
-        // Optional: Add I2C/UART configuration if needed
-        struct {
-            int i2c_port = 0;                     ///< I2C port number
-            int sda_pin = 21;                     ///< I2C SDA pin
-            int scl_pin = 22;                     ///< I2C SCL pin
-            int uart_port = 1;                    ///< UART port number
-            int uart_tx_pin = 17;                 ///< UART TX pin
-            int uart_rx_pin = 16;                 ///< UART RX pin
-        } pins;
+            // Communication pins (UART for Modbus)
+            int uart_port = 1;
+            int uart_tx_pin = 17;
+            int uart_rx_pin = 16;
+
+            bool enabled = true;
+        };
+
+        SensorConfig sensors[SensorCommon::NUM_TOF_SENSORS];
+        uint16_t poll_interval_ms = 100;  // How often to read sensors
     };
 
-    /**
-     * @brief Measurement result structure
-     */
-    struct Measurement {
-        uint16_t distance_mm;         ///< Distance measurement in millimeters
-        bool valid;                   ///< Whether the measurement is valid
-        uint8_t status;               ///< Measurement status code (0 = OK)
-        int64_t timestamp_us;         ///< Timestamp in microseconds
-        bool timeout_occurred;        ///< Whether a timeout occurred during measurement
-
-        /**
-         * @brief Construct a default measurement
-         */
-        Measurement() : distance_mm(0), valid(false), status(0),
-                       timestamp_us(0), timeout_occurred(false) {}
-    };
-
-    /**
-     * @brief Virtual destructor
-     */
-    virtual ~TofSensor() = default;
+    TofSensor(const Config& config);
+    ~TofSensor();
 
     // ===== Core Interface =====
+    esp_err_t initialize();
+    bool is_ready() const;
+    bool is_sensor_ready(uint8_t sensor_index) const;
 
-    /**
-     * @brief Initialize the sensor
-     * @return ESP_OK on success, error code on failure
-     */
-    virtual esp_err_t initialize() = 0;
+    // Read all ToF sensors
+    esp_err_t read_all(SensorCommon::TofMeasurement results[SensorCommon::NUM_TOF_SENSORS]);
 
-    /**
-     * @brief Check if sensor is ready
-     * @return true if sensor is initialized and ready, false otherwise
-     */
-    virtual bool is_ready() const = 0;
-
-    /**
-     * @brief Read a single measurement
-     * @param result Reference to store the measurement result
-     * @return ESP_OK on success, error code on failure
-     */
-    virtual esp_err_t read_measurement(Measurement& result) = 0;
+    // Read single sensor
+    esp_err_t read_sensor(uint8_t sensor_index, SensorCommon::TofMeasurement& result);
 
     // ===== Configuration Interface =====
+    esp_err_t set_mode(uint8_t sensor_index, Mode mode);
+    Mode get_mode(uint8_t sensor_index) const;
 
-    /**
-     * @brief Set the sensor operation mode
-     * @param mode Desired operation mode
-     * @return ESP_OK on success, error code on failure
-     */
-    virtual esp_err_t set_mode(Mode mode) = 0;
-
-    /**
-     * @brief Get the current sensor operation mode
-     * @return Current operation mode
-     */
-    virtual Mode get_mode() const = 0;
-
-    /**
-     * @brief Set the communication timeout
-     * @param timeout_ms Timeout in milliseconds
-     * @return ESP_OK on success, error code on failure
-     */
-    virtual esp_err_t set_timeout(uint16_t timeout_ms) = 0;
-
-    /**
-     * @brief Get the current timeout setting
-     * @return Timeout in milliseconds
-     */
-    virtual uint16_t get_timeout() const = 0;
+    esp_err_t set_timeout(uint8_t sensor_index, uint16_t timeout_ms);
+    uint16_t get_timeout(uint8_t sensor_index) const;
 
     // ===== Continuous Mode Interface =====
-
-    /**
-     * @brief Start continuous measurement mode
-     * @return ESP_OK on success, error code on failure
-     */
-    virtual esp_err_t start_continuous() = 0;
-
-    /**
-     * @brief Stop continuous measurement mode
-     * @return ESP_OK on success, error code on failure
-     */
-    virtual esp_err_t stop_continuous() = 0;
-
-    /**
-     * @brief Check if continuous mode is active
-     * @return true if continuous mode is active, false otherwise
-     */
-    virtual bool is_continuous() const = 0;
+    esp_err_t start_continuous();
+    esp_err_t stop_continuous();
+    bool is_continuous() const;
 
     // ===== Diagnostic Interface =====
+    esp_err_t self_test(uint8_t sensor_index);
+    bool probe(uint8_t sensor_index);
+    bool timeout_occurred(uint8_t sensor_index);
 
-    /**
-     * @brief Run a self-test on the sensor
-     * @return ESP_OK on success, error code on failure
-     */
-    virtual esp_err_t self_test() = 0;
+    // ===== Sensor Control =====
+    bool enable_sensor(uint8_t sensor_index, bool enable);
+    bool is_sensor_enabled(uint8_t sensor_index) const;
 
-    /**
-     * @brief Probe for sensor presence
-     * @return true if sensor responds, false otherwise
-     */
-    virtual bool probe() = 0;
+private:
+    Config config_;
+    bool initialized_;
+    bool continuous_mode_;
 
-    /**
-     * @brief Check if a timeout occurred in the last operation
-     * @return true if timeout occurred, false otherwise
-     */
-    virtual bool timeout_occurred() = 0;
+    // Driver handles - opaque pointers to avoid including driver headers
+    void* drivers_[SensorCommon::NUM_TOF_SENSORS];
+    bool sensor_enabled_[SensorCommon::NUM_TOF_SENSORS];
+    Mode current_modes_[SensorCommon::NUM_TOF_SENSORS];
 
-    // ===== Factory Method =====
+    // Internal state
+    SensorCommon::TofMeasurement last_measurements_[SensorCommon::NUM_TOF_SENSORS];
+    int64_t last_read_time_us_;
 
-    /**
-     * @brief Create a ToF sensor instance
-     * @param config Configuration for the sensor
-     * @return Unique pointer to the sensor instance
-     */
-    static std::unique_ptr<TofSensor> create(const Config& config);
+    // Internal helpers
+    esp_err_t initialize_driver(uint8_t sensor_index);
+    esp_err_t destroy_driver(uint8_t sensor_index);
+
+    static const char* TAG;
+
+    // Disable copying
+    TofSensor(const TofSensor&) = delete;
+    TofSensor& operator=(const TofSensor&) = delete;
 };
