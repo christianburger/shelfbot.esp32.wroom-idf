@@ -1,13 +1,4 @@
 #include "vl53l0x.hpp"
-#include <cstring>
-#include <algorithm>
-#include <vector>
-#include <fstream>
-#include <sstream>
-#include "esp_timer.h"
-#include "freertos/FreeRTOS.h"  // MUST be included before task.h
-#include "freertos/task.h"      // Now this can be safely included
-#include "esp_err.h"
 
 static const char* TAG = "VL53L0X";
 

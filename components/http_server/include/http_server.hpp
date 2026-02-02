@@ -41,9 +41,6 @@ private:
   static esp_err_t ultrasonic_handler(httpd_req_t* req);
   static esp_err_t sensors_handler(httpd_req_t* req);
   static esp_err_t health_handler(httpd_req_t* req);
-  static esp_err_t i2c_scan_handler(httpd_req_t* req);
-  static esp_err_t tof_switch_handler(httpd_req_t* req);
-  static esp_err_t tof_mode_handler(httpd_req_t* req);
 
   // Helper functions
   static std::string get_sensor_status_text(const SensorCommon::TofMeasurement& measurement);

@@ -1,7 +1,6 @@
 #include "tof_sensor.hpp"
-#include <memory>
-#include "vl53l1.hpp"
 #include "i2c_scanner.hpp"
+#include "vl53l0x.hpp"
 
 const char* TofSensor::TAG = "TofSensor";
 
@@ -23,7 +22,7 @@ TofSensor::~TofSensor() {
 
     for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
         if (drivers_[i] != nullptr) {
-            delete static_cast<VL53L1*>(drivers_[i]);
+            delete static_cast<VL53L0X*>(drivers_[i]);
             drivers_[i] = nullptr;
         }
     }
@@ -36,7 +35,7 @@ esp_err_t TofSensor::initialize() {
 
     ESP_LOGI(TAG, "");
     ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
-    ESP_LOGI(TAG, "  ToF Sensor Initialization - Starting Diagnostics");
+    ESP_LOGI(TAG, "  ToF Sensor Initialization (VL53L0X) - Starting");
     ESP_LOGI(TAG, "═══════════════════════════════════════════════════════");
     ESP_LOGI(TAG, "");
 
@@ -46,7 +45,7 @@ esp_err_t TofSensor::initialize() {
     ESP_LOGI(TAG, "STEP 1: Performing comprehensive I2C bus scan...");
     ESP_LOGI(TAG, "");
 
-    if (!I2CScanner::scanVL53L1Bus()) {
+    if (!I2CScanner::scanVL53L0xBus()) {
         ESP_LOGE(TAG, "");
         ESP_LOGE(TAG, "╔════════════════════════════════════════════════════╗");
         ESP_LOGE(TAG, "║  FATAL: I2C bus scan failed                        ║");
@@ -56,7 +55,7 @@ esp_err_t TofSensor::initialize() {
         ESP_LOGE(TAG, "║  2. Hardware I2C peripheral conflict               ║");
         ESP_LOGE(TAG, "║  3. GPIO pins already in use                       ║");
         ESP_LOGE(TAG, "║                                                    ║");
-        ESP_LOGE(TAG, "║  Check: vl53l1.cpp hardware configuration defines  ║");
+        ESP_LOGE(TAG, "║  Check: hardware configuration defines             ║");
         ESP_LOGE(TAG, "╚════════════════════════════════════════════════════╝");
         ESP_LOGE(TAG, "");
         return ESP_FAIL;
@@ -69,7 +68,7 @@ esp_err_t TofSensor::initialize() {
     // ========================================
     // STEP 2: DRIVER INITIALIZATION
     // ========================================
-    ESP_LOGI(TAG, "STEP 2: Initializing VL53L1 sensor drivers...");
+    ESP_LOGI(TAG, "STEP 2: Initializing VL53L0X sensor drivers...");
     ESP_LOGI(TAG, "Number of sensors to initialize: %d", SensorCommon::NUM_TOF_SENSORS);
     ESP_LOGI(TAG, "");
 
@@ -96,7 +95,7 @@ esp_err_t TofSensor::initialize() {
             ESP_LOGE(TAG, "  ✗ FAILED to initialize sensor %d", i);
             ESP_LOGE(TAG, "");
             ESP_LOGE(TAG, "  Troubleshooting hints for sensor %d:", i);
-            ESP_LOGE(TAG, "    - Verify VL53L1 was found at 0x29 in scan above");
+            ESP_LOGE(TAG, "    - Verify VL53L0X was found at 0x29 in scan above");
             ESP_LOGE(TAG, "    - Check power supply to sensor (3.3V)");
             ESP_LOGE(TAG, "    - Verify I2C pull-up resistors present (4.7kΩ)");
             ESP_LOGE(TAG, "    - Check for I2C bus conflicts with other devices");
@@ -159,18 +158,15 @@ esp_err_t TofSensor::initialize_driver(uint8_t sensor_index) {
 
     const auto& sensor_config = config_.sensors[sensor_index];
 
-    ESP_LOGI(TAG, "    • Creating VL53L1 driver instance...");
+    ESP_LOGI(TAG, "    • Creating VL53L0X driver instance...");
     ESP_LOGI(TAG, "    • Mode: %s",
              sensor_config.mode == Mode::LONG_DISTANCE ? "LONG_DISTANCE" : "HIGH_PRECISION");
     ESP_LOGI(TAG, "    • Timeout: %d ms", sensor_config.timeout_ms);
 
-    // Create VL53L1 configuration with defaults from driver
-    VL53L1::Config driver_config = vl53l1_default_config();
+    // Create VL53L0X configuration with defaults from driver
+    VL53L0X::Config driver_config = vl53l0x_default_config();
 
-    // Override mode and timeout from sensor config
-    driver_config.ranging_mode = (sensor_config.mode == Mode::LONG_DISTANCE) ?
-                                VL53L1::RangingMode::LONG_DISTANCE :
-                                VL53L1::RangingMode::HIGH_PRECISION;
+    // Set timeout
     driver_config.timeout_ms = sensor_config.timeout_ms;
 
     ESP_LOGI(TAG, "    • Driver configuration:");
@@ -181,9 +177,9 @@ esp_err_t TofSensor::initialize_driver(uint8_t sensor_index) {
     ESP_LOGI(TAG, "      - I2C Frequency: %lu Hz", (unsigned long)driver_config.i2c_freq_hz);
 
     // Create driver instance
-    ESP_LOGI(TAG, "    • Instantiating VL53L1 driver...");
-    drivers_[sensor_index] = new VL53L1(driver_config);
-    VL53L1* driver = static_cast<VL53L1*>(drivers_[sensor_index]);
+    ESP_LOGI(TAG, "    • Instantiating VL53L0X driver...");
+    drivers_[sensor_index] = new VL53L0X(driver_config);
+    VL53L0X* driver = static_cast<VL53L0X*>(drivers_[sensor_index]);
 
     // Initialize the driver
     ESP_LOGI(TAG, "    • Calling driver init()...");
@@ -204,6 +200,9 @@ esp_err_t TofSensor::initialize_driver(uint8_t sensor_index) {
     }
 
     ESP_LOGI(TAG, "    ✓ Driver init() successful");
+
+    // Apply the configured mode (Long/Precision) manually
+    set_mode(sensor_index, sensor_config.mode);
 
     // Start continuous mode if sensor is enabled
     if (sensor_config.enabled) {
@@ -226,7 +225,7 @@ esp_err_t TofSensor::destroy_driver(uint8_t sensor_index) {
     }
 
     ESP_LOGI(TAG, "Destroying driver for sensor %d", sensor_index);
-    VL53L1* driver = static_cast<VL53L1*>(drivers_[sensor_index]);
+    VL53L0X* driver = static_cast<VL53L0X*>(drivers_[sensor_index]);
     delete driver;
     drivers_[sensor_index] = nullptr;
 
@@ -275,10 +274,10 @@ esp_err_t TofSensor::read_sensor(uint8_t sensor_index, SensorCommon::TofMeasurem
         return ESP_ERR_INVALID_ARG;
     }
 
-    VL53L1* driver = static_cast<VL53L1*>(drivers_[sensor_index]);
+    VL53L0X* driver = static_cast<VL53L0X*>(drivers_[sensor_index]);
 
-    // Read from VL53L1 driver
-    VL53L1::MeasurementResult driver_result;
+    // Read from VL53L0X driver
+    VL53L0X::MeasurementResult driver_result;
     bool success = false;
 
     if (continuous_mode_) {
@@ -295,7 +294,8 @@ esp_err_t TofSensor::read_sensor(uint8_t sensor_index, SensorCommon::TofMeasurem
     // Convert driver result to common format
     result.distance_mm = driver_result.distance_mm;
     result.valid = driver_result.valid;
-    result.status = driver_result.range_status;
+    // Map valid boolean to a status byte (0=OK, 255=Error) as driver doesn't expose range_status
+    result.status = driver_result.valid ? 0 : 255;
     result.timestamp_us = driver_result.timestamp_us;
     result.timeout_occurred = driver_result.timeout_occurred;
 
@@ -309,17 +309,24 @@ esp_err_t TofSensor::set_mode(uint8_t sensor_index, Mode mode) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    VL53L1* driver = static_cast<VL53L1*>(drivers_[sensor_index]);
+    VL53L0X* driver = static_cast<VL53L0X*>(drivers_[sensor_index]);
 
-    // Convert mode and set on driver
-    VL53L1::RangingMode driver_mode = (mode == Mode::LONG_DISTANCE) ?
-                                      VL53L1::RangingMode::LONG_DISTANCE :
-                                      VL53L1::RangingMode::HIGH_PRECISION;
-
-    const char* err = driver->setRangingMode(driver_mode);
-    if (err != nullptr) {
-        ESP_LOGE(TAG, "Failed to set mode for sensor %d: %s", sensor_index, err);
-        return ESP_FAIL;
+    // Manually set parameters based on mode
+    if (mode == Mode::LONG_DISTANCE) {
+        // Long Range configuration
+        // Lower signal rate limit (high sensitivity)
+        driver->setSignalRateLimit(0.1f);
+        // Longer VCSEL pulses
+        driver->setVcselPulsePeriod(VL53L0X::VcselPeriodType::PRE_RANGE, 18);
+        driver->setVcselPulsePeriod(VL53L0X::VcselPeriodType::FINAL_RANGE, 14);
+        // Ensure timing budget is sufficient
+        driver->setMeasurementTimingBudget(33000); // 33ms
+    } else {
+        // High Precision / Default configuration
+        driver->setSignalRateLimit(0.25f);
+        driver->setVcselPulsePeriod(VL53L0X::VcselPeriodType::PRE_RANGE, 14);
+        driver->setVcselPulsePeriod(VL53L0X::VcselPeriodType::FINAL_RANGE, 10);
+        driver->setMeasurementTimingBudget(33000); // 33ms
     }
 
     current_modes_[sensor_index] = mode;
@@ -346,7 +353,7 @@ esp_err_t TofSensor::set_timeout(uint8_t sensor_index, uint16_t timeout_ms) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    VL53L1* driver = static_cast<VL53L1*>(drivers_[sensor_index]);
+    VL53L0X* driver = static_cast<VL53L0X*>(drivers_[sensor_index]);
     driver->setTimeout(timeout_ms);
 
     config_.sensors[sensor_index].timeout_ms = timeout_ms;
@@ -372,7 +379,7 @@ esp_err_t TofSensor::start_continuous() {
 
     for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
         if (sensor_enabled_[i] && drivers_[i] != nullptr) {
-            VL53L1* driver = static_cast<VL53L1*>(drivers_[i]);
+            VL53L0X* driver = static_cast<VL53L0X*>(drivers_[i]);
             ESP_LOGI(TAG, "  • Sensor %d: starting continuous...", i);
             if (!driver->startContinuous()) {
                 ESP_LOGW(TAG, "  ⚠ Failed to start continuous mode for sensor %d", i);
@@ -396,7 +403,7 @@ esp_err_t TofSensor::stop_continuous() {
 
     for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
         if (sensor_enabled_[i] && drivers_[i] != nullptr) {
-            VL53L1* driver = static_cast<VL53L1*>(drivers_[i]);
+            VL53L0X* driver = static_cast<VL53L0X*>(drivers_[i]);
             driver->stopContinuous();
             ESP_LOGI(TAG, "  ✓ Sensor %d: continuous mode stopped", i);
         }
@@ -419,7 +426,7 @@ esp_err_t TofSensor::self_test(uint8_t sensor_index) {
     }
 
     ESP_LOGI(TAG, "Running self-test for sensor %d...", sensor_index);
-    VL53L1* driver = static_cast<VL53L1*>(drivers_[sensor_index]);
+    VL53L0X* driver = static_cast<VL53L0X*>(drivers_[sensor_index]);
 
     // Check if sensor is responsive
     ESP_LOGI(TAG, "  • Probing sensor...");
@@ -448,7 +455,7 @@ bool TofSensor::probe(uint8_t sensor_index) {
         return false;
     }
 
-    VL53L1* driver = static_cast<VL53L1*>(drivers_[sensor_index]);
+    VL53L0X* driver = static_cast<VL53L0X*>(drivers_[sensor_index]);
     return driver->probe();
 }
 
@@ -459,7 +466,7 @@ bool TofSensor::timeout_occurred(uint8_t sensor_index) {
         return false;
     }
 
-    VL53L1* driver = static_cast<VL53L1*>(drivers_[sensor_index]);
+    VL53L0X* driver = static_cast<VL53L0X*>(drivers_[sensor_index]);
     return driver->timeoutOccurred();
 }
 
@@ -509,7 +516,7 @@ bool TofSensor::is_ready() const {
     // Check if at least one sensor is ready
     for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
         if (sensor_enabled_[i] && drivers_[i] != nullptr) {
-            VL53L1* driver = static_cast<VL53L1*>(drivers_[i]);
+            VL53L0X* driver = static_cast<VL53L0X*>(drivers_[i]);
             if (driver->isReady()) {
                 return true;
             }
@@ -526,6 +533,6 @@ bool TofSensor::is_sensor_ready(uint8_t sensor_index) const {
         return false;
     }
 
-    VL53L1* driver = static_cast<VL53L1*>(drivers_[sensor_index]);
+    VL53L0X* driver = static_cast<VL53L0X*>(drivers_[sensor_index]);
     return driver->isReady();
 }

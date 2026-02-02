@@ -31,4 +31,5 @@ extern "C" {
 #include <memory>
 #include <algorithm>
 #include <string>
+#include <fstream>
 #include <sstream>

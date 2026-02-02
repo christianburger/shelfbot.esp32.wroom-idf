@@ -1,11 +1,11 @@
 #pragma once
-#include "idf_c_includes.hpp"
+#include <idf_c_includes.hpp>
 
 // ===== VL53L1 I2C Hardware Configuration =====
 #define VL53L1_I2C_PORT         I2C_NUM_0
 #define VL53L1_SDA_PIN          GPIO_NUM_21
 #define VL53L1_SCL_PIN          GPIO_NUM_22
-#define VL53L1_I2C_FREQ_HZ      4000
+#define VL53L1_I2C_FREQ_HZ      40000
 #define VL53L1_I2C_ADDRESS      0x29
 // =============================================
 

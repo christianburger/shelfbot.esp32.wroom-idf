@@ -1,12 +1,13 @@
 #pragma once
+#include <idf_c_includes.hpp>
 
-#include <cstdint>
-#include <memory>
-#include <string>
-#include "driver/i2c_master.h"
-#include "driver/gpio.h"
-#include "esp_log.h"
-
+// ===== VL53L0x I2C Hardware Configuration =====
+#define VL53L0x_I2C_PORT         I2C_NUM_0
+#define VL53L0x_SDA_PIN          GPIO_NUM_21
+#define VL53L0x_SCL_PIN          GPIO_NUM_22
+#define VL53L0x_I2C_FREQ_HZ      40000
+#define VL53L0x_I2C_ADDRESS      0x29
+// =============================================
 /**
  * @brief High-level VL53L0X Time-of-Flight distance sensor driver
  *

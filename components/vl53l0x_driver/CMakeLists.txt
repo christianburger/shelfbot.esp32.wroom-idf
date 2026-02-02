@@ -5,6 +5,7 @@
       "."
       "include"
       REQUIRES
+      idf_includes
       driver
       freertos
       esp_timer
