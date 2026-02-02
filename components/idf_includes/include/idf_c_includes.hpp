@@ -29,3 +29,6 @@ extern "C" {
 #include <vector>
 #include <cmath>
 #include <memory>
+#include <algorithm>
+#include <string>
+#include <sstream>

@@ -1,14 +1,5 @@
 #pragma once
-
-#include <cstdint>
-#include <vector>
-#include <functional>
-#include "driver/uart.h"
-#include "driver/gpio.h"  // ADDED: for gpio_num_t
-#include "esp_err.h"
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
+#include <idf_c_includes.hpp>
 
 class DuartModbus {
 public:
@@ -17,9 +8,9 @@ public:
         gpio_num_t tx_pin;
         gpio_num_t rx_pin;
         uint32_t baud_rate;
-        uint8_t parity;           // UART_PARITY_DISABLE, UART_PARITY_EVEN, UART_PARITY_ODD
-        uint8_t stop_bits;        // UART_STOP_BITS_1, UART_STOP_BITS_2
-        uint8_t data_bits;        // UART_DATA_8_BITS
+        uint8_t parity;           // 0=None, 1=Odd, 2=Even
+        uint8_t stop_bits;        // 1, 2, or 3 (1.5)
+        uint8_t data_bits;        // 5, 6, 7, or 8
         uint32_t timeout_ms;
         uint8_t max_retries;
     };
@@ -41,12 +32,29 @@ public:
         esp_err_t esp_error;
     };
 
+    // Health check results
+    struct HealthCheckResult {
+        bool uart_initialized;
+        bool device_detected;
+        bool automatic_output_detected;
+        bool modbus_communication_working;
+        bool crc_validation_passing;
+
+        uint8_t detected_slave_address;  // 0 if none found
+        size_t burst_data_size;           // Bytes received during listening test
+        std::vector<uint8_t> raw_burst_data;
+
+        std::string diagnosis;
+        std::string recommended_action;
+    };
+
     DuartModbus(const Config& config);
     ~DuartModbus();
 
     const char* init();
     bool isReady() const { return initialized_; }
 
+    // Main Modbus operations
     ModbusResponse readHoldingRegisters(uint8_t slave_address,
                                        uint16_t start_register,
                                        uint16_t num_registers,
@@ -73,6 +81,9 @@ public:
     uart_port_t getUartPort() const { return config_.uart_port; }
     void flushBuffers();
 
+    // NEW: Comprehensive health check method
+    HealthCheckResult performHealthCheck();
+
 private:
     Config config_;
     bool initialized_;
@@ -93,4 +104,16 @@ private:
     esp_err_t sendData(const uint8_t* data, size_t length);
     esp_err_t receiveData(std::vector<uint8_t>& buffer, size_t expected_len, uint32_t timeout_ms);
     esp_err_t receiveDataWithTimeout(std::vector<uint8_t>& buffer, uint32_t timeout_ms);
+
+    // Helper for automatic output detection
+    void detectAndDisableAutomaticOutput();
+
+    // Health check helper methods
+    bool testHypothesis_NoDataReceived();
+    bool testHypothesis_DeviceInactive();
+    bool testHypothesis_NonModbusBursts();
+    bool testHypothesis_ContinuousOutput();
+    bool testHypothesis_WrongSlaveAddress();
+    bool testHypothesis_WrongBaudRate();
+    void analyzeRawBurst(const std::vector<uint8_t>& data, HealthCheckResult& result);
 };

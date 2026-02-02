@@ -8,4 +8,5 @@
       driver
       freertos
       esp_timer
+      idf_includes
     )
