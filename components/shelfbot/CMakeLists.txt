@@ -6,7 +6,7 @@ idf_component_register(SRCS "shelfbot.cpp"
   wifi_station
   http_server
   led_control
-  sensor_control  # High-level manager component
+  sensor_control
   mdns
   nvs_flash
   esp_netif

@@ -85,19 +85,6 @@ esp_err_t SensorControl::initialize_tof() {
     // Convert our config to TofSensor::Config
     TofSensor::Config tof_config;
 
-    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
-        const auto& sensor_config = config_.tof_configs[i];
-
-        tof_config.sensors[i].mode = sensor_config.long_distance_mode ?
-                                     TofSensor::Mode::LONG_DISTANCE :
-                                     TofSensor::Mode::HIGH_PRECISION;
-        tof_config.sensors[i].timeout_ms = sensor_config.timeout_ms;
-        tof_config.sensors[i].device_address = sensor_config.device_address;
-        tof_config.sensors[i].enabled = true;
-    }
-
-    tof_config.poll_interval_ms = config_.tof_read_interval_ms;
-
     // Create and initialize ToF sensor manager
     tof_sensor_ = std::make_unique<TofSensor>(tof_config);
     esp_err_t err = tof_sensor_->initialize();
@@ -342,15 +329,6 @@ esp_err_t SensorControl::stop_continuous() {
 
 bool SensorControl::is_continuous() const {
     return continuous_mode_;
-}
-
-esp_err_t SensorControl::set_tof_mode(uint8_t sensor_index, bool long_distance) {
-    if (!tof_sensor_) {
-        return ESP_ERR_INVALID_STATE;
-    }
-
-    return tof_sensor_->set_mode(sensor_index,
-        long_distance ? TofSensor::Mode::LONG_DISTANCE : TofSensor::Mode::HIGH_PRECISION);
 }
 
 size_t SensorControl::get_ultrasonic_count() const {

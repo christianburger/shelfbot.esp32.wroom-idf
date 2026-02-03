@@ -22,13 +22,11 @@ public:
 
         // ToF sensor configuration
         struct TofConfig {
-            int uart_port = 1;
-            int tx_pin = 17;
-            int rx_pin = 16;
-            uint8_t device_address = 0x01;
-            uint32_t timeout_ms = 500;
-            bool long_distance_mode = true;
+          uint8_t device_id = 0;
+          uint32_t timeout_ms = 500;
+          bool enabled = true;
         };
+
         TofConfig tof_configs[SensorCommon::NUM_TOF_SENSORS];
 
         // Reading intervals

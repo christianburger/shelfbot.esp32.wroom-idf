@@ -1,4 +1,3 @@
-// [file name]: shelfbot.cpp
 #include "shelfbot.hpp"
 #include <rcl/allocator.h>
 #include <rmw_microros/init_options.h>
@@ -354,12 +353,7 @@ void Shelfbot::begin() {
 
     // Configure 3 ToF sensors
     for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
-        sensor_config.tof_configs[i].uart_port = 1;
-        sensor_config.tof_configs[i].tx_pin = 17;
-        sensor_config.tof_configs[i].rx_pin = 16;
-        sensor_config.tof_configs[i].device_address = 0x01 + i;
         sensor_config.tof_configs[i].timeout_ms = 500;
-        sensor_config.tof_configs[i].long_distance_mode = true;
     }
 
     sensor_config.ultrasonic_read_interval_ms = 100;
