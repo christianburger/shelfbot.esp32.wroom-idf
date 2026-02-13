@@ -1,5 +1,4 @@
 #include "motor_control.hpp"
-#include "driver/gpio.h" // For gpio_pad_select_gpio
 
 static const char* TAG = "motor_control";
 
@@ -8,11 +7,11 @@ static FastAccelStepperEngine engine = FastAccelStepperEngine();
 static FastAccelStepper* steppers[NUM_MOTORS] = {nullptr};
 
 static const int motorPins[NUM_MOTORS][2] = {
-    {27, 26},
-    {14, 33},
-    {13, 25},
-    {4, 16},
-    {17, 23}
+  {27, 26},  // Motor 0: GPIO27, GPIO26
+  {14, 33},  // Motor 1: GPIO14, GPIO33
+  {13, 19},  // Motor 2: GPIO13, GPIO19 (changed)
+  {4, 18},   // Motor 3: GPIO4, GPIO18 (changed)
+  {12, 23}   // Motor 4: GPIO12, GPIO23 (changed)
 };
 
 // Conversion factor from radians to steps. This is the core of the unit standardization.

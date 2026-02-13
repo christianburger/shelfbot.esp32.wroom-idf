@@ -1,14 +1,8 @@
 #ifndef MOTOR_CONTROL_H
 #define MOTOR_CONTROL_H
 
-#include <stdint.h>
-#include <stdbool.h>
-#include <vector>
 #include "FastAccelStepper.h"
-#include "esp_log.h"
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include <math.h> // For M_PI
+#include "idf_c_includes.hpp"
 
 // --- Hardware Configuration ---
 #define NUM_MOTORS 5

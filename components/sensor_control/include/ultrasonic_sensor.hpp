@@ -1,22 +1,21 @@
-// Corrected ultrasonic_sensor.h
+// [file name]: ultrasonic_sensor.hpp
 #pragma once
 
-#include "freertos/FreeRTOS.h"
-#include "freertos/queue.h"
-#include "sensor_common.hpp"  // Shared types
-#include "driver/gpio.h"    // For gpio_num_t
-#include <functional>       // For std::function
+#ifndef SHELFBOT_ULTRASONIC_SENSOR_H
+#define SHELFBOT_ULTRASONIC_SENSOR_H
 
-#define NUM_ULTRASONIC_SENSORS 2
+#include "idf_c_includes.hpp"
+#include "sensor_common.hpp"
 
-// Queue for sending sensor data to the ROS publisher (use common Reading)
+// Forward declaration
+class UltrasonicSensorArray;
+class UltrasonicSensorManager;
+
+// Queue for sending sensor data to the ROS publisher
 extern QueueHandle_t distance_data_queue;
 
-// Queue for sending emergency stop signals to the main loop
-extern QueueHandle_t motor_stop_queue;
-
 // ============================================================================
-// Configuration Structures (Mirror ToF style)
+// Configuration Structures
 // ============================================================================
 
 typedef enum {
@@ -41,8 +40,8 @@ struct UltrasonicSensorConfig {
 
 class UltrasonicSensorArray {
 public:
-    UltrasonicSensorConfig configs_[NUM_ULTRASONIC_SENSORS];
-    explicit UltrasonicSensorArray(uint8_t num_sensors = NUM_ULTRASONIC_SENSORS);
+    UltrasonicSensorConfig configs_[SensorCommon::NUM_ULTRASONIC_SENSORS];
+    explicit UltrasonicSensorArray(uint8_t num_sensors = SensorCommon::NUM_ULTRASONIC_SENSORS);
     ~UltrasonicSensorArray();
 
     bool init();
@@ -95,3 +94,5 @@ private:
     bool paused_;
     std::function<void(const std::vector<SensorCommon::Reading>&)> callback_;
 };
+
+#endif // SHELFBOT_ULTRASONIC_SENSOR_H
