@@ -174,7 +174,7 @@ esp_err_t TofSensor::read_all(SensorCommon::TofMeasurement results[SensorCommon:
             continue;
         }
 
-        TofDriver::MeasurementResult driver_result;
+        TofDriver::MeasurementResult driver_result{};
         bool success = drivers_[i]->read_sensor(driver_result);
 
         if (success) {
@@ -203,7 +203,7 @@ esp_err_t TofSensor::read_sensor(uint8_t sensor_index, SensorCommon::TofMeasurem
         return ESP_ERR_INVALID_ARG;
     }
 
-    TofDriver::MeasurementResult driver_result;
+    TofDriver::MeasurementResult driver_result{};
     if (!drivers_[sensor_index]->read_sensor(driver_result)) {
         ESP_LOGD(TAG, "Failed to read measurement from sensor %d", sensor_index);
         return ESP_ERR_INVALID_RESPONSE;
