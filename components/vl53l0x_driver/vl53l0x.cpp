@@ -3,6 +3,13 @@
 static const char* TAG = "TofDriver_VL53L0X";
 
 // ═══════════════════════════════════════════════════════════════
+// Static member initialization
+// ═══════════════════════════════════════════════════════════════
+i2c_master_bus_handle_t VL53L0X_Driver::shared_bus_handle_ = nullptr;
+SemaphoreHandle_t VL53L0X_Driver::shared_i2c_mutex_ = nullptr;
+int VL53L0X_Driver::bus_reference_count_ = 0;
+
+// ═══════════════════════════════════════════════════════════════
 // Register addresses
 // ═══════════════════════════════════════════════════════════════
 namespace Reg {
@@ -62,49 +69,68 @@ VL53L0X_Driver::VL53L0X_Driver()
       timeout_ms_(VL53L0X_TIMEOUT_MS),
       timing_budget_us_(VL53L0X_TIMING_BUDGET_US),
       signal_rate_limit_mcps_(VL53L0X_SIGNAL_RATE_MCPS),
-      bus_handle_(nullptr),
       dev_handle_(nullptr),
-      i2c_mutex_(nullptr),
       initialized_(false),
       stop_variable_(0),
       measurement_timing_budget_us_(0),
       did_timeout_(false) {
 
-    i2c_mutex_ = xSemaphoreCreateMutex();
-    if (!i2c_mutex_) {
-        ESP_LOGE(TAG, "Failed to create I2C mutex");
+  // Create shared mutex on first instance
+  if (shared_i2c_mutex_ == nullptr) {
+    shared_i2c_mutex_ = xSemaphoreCreateMutex();
+    if (!shared_i2c_mutex_) {
+      ESP_LOGE(TAG, "Failed to create shared I2C mutex");
     }
+  }
 }
 
 VL53L0X_Driver::~VL53L0X_Driver() {
-    if (dev_handle_) {
-        i2c_master_bus_rm_device(dev_handle_);
-        dev_handle_ = nullptr;
-    }
+  // Remove this device from the bus
+  if (dev_handle_) {
+    i2c_master_bus_rm_device(dev_handle_);
+    dev_handle_ = nullptr;
+  }
 
-    if (bus_handle_) {
-        i2c_del_master_bus(bus_handle_);
-        bus_handle_ = nullptr;
-    }
+  // Lock before modifying shared resources
+  if (shared_i2c_mutex_) {
+    xSemaphoreTake(shared_i2c_mutex_, portMAX_DELAY);
+  }
 
-    if (i2c_mutex_) {
-        vSemaphoreDelete(i2c_mutex_);
-        i2c_mutex_ = nullptr;
+  // Decrement reference count
+  if (bus_reference_count_ > 0) {
+    bus_reference_count_--;
+  }
+
+  // Delete bus only when last instance is destroyed
+  if (bus_reference_count_ == 0 && shared_bus_handle_) {
+    ESP_LOGI(TAG, "Last instance destroyed - deleting shared I2C bus");
+    i2c_del_master_bus(shared_bus_handle_);
+    shared_bus_handle_ = nullptr;
+
+    // Delete mutex as well
+    if (shared_i2c_mutex_) {
+      SemaphoreHandle_t temp_mutex = shared_i2c_mutex_;
+      shared_i2c_mutex_ = nullptr;
+      xSemaphoreGive(temp_mutex);
+      vSemaphoreDelete(temp_mutex);
     }
+  } else if (shared_i2c_mutex_) {
+    xSemaphoreGive(shared_i2c_mutex_);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
 // I2C Locking
 // ═══════════════════════════════════════════════════════════════
 bool VL53L0X_Driver::lockI2C() {
-    if (!i2c_mutex_) return false;
-    return xSemaphoreTake(i2c_mutex_, pdMS_TO_TICKS(1000)) == pdTRUE;
+  if (!shared_i2c_mutex_) return false;
+  return xSemaphoreTake(shared_i2c_mutex_, pdMS_TO_TICKS(1000)) == pdTRUE;
 }
 
 void VL53L0X_Driver::unlockI2C() {
-    if (i2c_mutex_) {
-        xSemaphoreGive(i2c_mutex_);
-    }
+  if (shared_i2c_mutex_) {
+    xSemaphoreGive(shared_i2c_mutex_);
+  }
 }
 
 // ═══════════════════════════════════════════════════════════════
@@ -645,25 +671,37 @@ const char* VL53L0X_Driver::init() {
         }
     }
 
-    i2c_master_bus_config_t bus_config = {
-        .i2c_port          = i2c_port_,
-        .sda_io_num        = sda_pin_,
-        .scl_io_num        = scl_pin_,
-        .clk_source        = I2C_CLK_SRC_DEFAULT,
-        .glitch_ignore_cnt = 7,
-        .intr_priority     = 0,
-        .trans_queue_depth = 0,
-        .flags             = { .enable_internal_pullup = true },
-    };
+    // Create I2C bus only if it doesn't exist yet
+    if (shared_bus_handle_ == nullptr) {
+        ESP_LOGI(TAG, "Creating shared I2C bus (first instance)");
 
-    esp_err_t err = i2c_new_master_bus(&bus_config, &bus_handle_);
-    if (err != ESP_OK) {
-        unlockI2C();
-        ESP_LOGE(TAG, "FAILED to create I2C bus: %s", esp_err_to_name(err));
-        return "I2C bus creation failed";
+        i2c_master_bus_config_t bus_config = {
+            .i2c_port          = i2c_port_,
+            .sda_io_num        = sda_pin_,
+            .scl_io_num        = scl_pin_,
+            .clk_source        = I2C_CLK_SRC_DEFAULT,
+            .glitch_ignore_cnt = 7,
+            .intr_priority     = 0,
+            .trans_queue_depth = 0,
+            .flags             = { .enable_internal_pullup = true },
+        };
+
+        esp_err_t err = i2c_new_master_bus(&bus_config, &shared_bus_handle_);
+        if (err != ESP_OK) {
+            unlockI2C();
+            ESP_LOGE(TAG, "FAILED to create I2C bus: %s", esp_err_to_name(err));
+            return "I2C bus creation failed";
+        }
+        ESP_LOGI(TAG, "Shared I2C bus created");
+    } else {
+        ESP_LOGI(TAG, "Using existing shared I2C bus");
     }
-    ESP_LOGI(TAG, "I2C bus created");
 
+    // Increment reference count
+    bus_reference_count_++;
+    ESP_LOGI(TAG, "Bus reference count: %d", bus_reference_count_);
+
+    // Add THIS instance as a device on the shared bus
     i2c_device_config_t dev_config = {
         .dev_addr_length = I2C_ADDR_BIT_LEN_7,
         .device_address  = i2c_address_,
@@ -672,10 +710,14 @@ const char* VL53L0X_Driver::init() {
         .flags           = {0},
     };
 
-    err = i2c_master_bus_add_device(bus_handle_, &dev_config, &dev_handle_);
+    esp_err_t err = i2c_master_bus_add_device(shared_bus_handle_, &dev_config, &dev_handle_);
     if (err != ESP_OK) {
-        i2c_del_master_bus(bus_handle_);
-        bus_handle_ = nullptr;
+        // If this fails and we just created the bus, clean it up
+        if (bus_reference_count_ == 1) {
+            i2c_del_master_bus(shared_bus_handle_);
+            shared_bus_handle_ = nullptr;
+        }
+        bus_reference_count_--;
         unlockI2C();
         ESP_LOGE(TAG, "FAILED to add device: %s", esp_err_to_name(err));
         return "Device add failed";

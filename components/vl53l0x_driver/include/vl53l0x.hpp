@@ -50,9 +50,10 @@ public:
     bool timeoutOccurred();
 
     // ── I2C Handle Access (for external scanning) ──
-    i2c_master_bus_handle_t getBusHandle() { return bus_handle_; }
-    bool lockI2C();
-    void unlockI2C();
+    static i2c_master_bus_handle_t getBusHandle() { return shared_bus_handle_; }
+
+    static bool lockI2C();
+    static void unlockI2C();
 
     // Non-copyable
     VL53L0X_Driver(const VL53L0X_Driver&) = delete;
@@ -71,10 +72,12 @@ private:
     uint32_t    timing_budget_us_;
     float       signal_rate_limit_mcps_;
 
-    // ── Hardware handles ──
-    i2c_master_bus_handle_t bus_handle_;
-    i2c_master_dev_handle_t dev_handle_;
-    SemaphoreHandle_t       i2c_mutex_;
+    // ── Hardware handles (SHARED BUS, INDIVIDUAL DEVICES) ──
+    static i2c_master_bus_handle_t shared_bus_handle_;
+    static SemaphoreHandle_t       shared_i2c_mutex_;
+    static int                     bus_reference_count_;
+
+    i2c_master_dev_handle_t dev_handle_;  // Each instance has its own device
 
     // ── State ──
     bool     initialized_;
