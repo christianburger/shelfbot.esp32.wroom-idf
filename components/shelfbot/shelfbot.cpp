@@ -309,6 +309,7 @@ void Shelfbot::begin() {
 
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "Starting Shelfbot Firmware");
+    ESP_LOGI(TAG, "Firmware Version: %s", FirmwareVersion::get_version_string());
     ESP_LOGI(TAG, "========================================");
 
     // 1. Initialize Subsystems (Hardware Abstraction)
