@@ -40,4 +40,9 @@ private:
   SensorCommon::SensorDataPacket latest_data_;
   SemaphoreHandle_t data_mutex_;
   bool initialized_ = false;
+  bool monitor_task_running_ = false;
+  TaskHandle_t monitor_task_handle_ = nullptr;
+
+  static void monitor_task(void* arg);
+  void monitor_loop();
 };

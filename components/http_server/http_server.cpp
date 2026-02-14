@@ -180,6 +180,29 @@ esp_err_t HttpServer::root_handler(httpd_req_t* req) {
                 <code>GET /api/health</code>
                 <p>Check system health and sensor status</p>
             </div>
+
+            <h2>🔴 Live Sensor Data</h2>
+            <div class="endpoint">
+                <code>Auto-refresh: 1s from /api/sensors</code>
+                <pre id="sensor-data" style="white-space: pre-wrap; background:#111; color:#0f0; padding:10px; border-radius:4px; min-height:140px;">Loading...</pre>
+            </div>
+
+            <script>
+                async function refreshSensors() {
+                    const target = document.getElementById('sensor-data');
+                    try {
+                        const response = await fetch('/api/sensors');
+                        const data = await response.json();
+                        target.textContent = JSON.stringify(data, null, 2);
+                    } catch (err) {
+                        target.textContent = 'Failed to fetch /api/sensors: ' + err;
+                    }
+                }
+
+                refreshSensors();
+                setInterval(refreshSensors, 1000);
+            </script>
+
             <hr>
             <p style="color: #666; font-size: 0.9em;">
                 Shelfbot ESP32 Firmware | Built with ESP-IDF
