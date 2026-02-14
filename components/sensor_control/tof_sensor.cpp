@@ -1,14 +1,6 @@
 #include "tof_sensor.hpp"
 
-// ═══════════════════════════════════════════════════════════════
-// DRIVER SELECTION - Change this ONE line to switch drivers
-// ═══════════════════════════════════════════════════════════════
-#include "vl53l1.hpp"    // ← This include determines which driver component is used
-// Component dependency in CMakeLists.txt must match:
-//   vl53l0x_driver   → for VL53L0X (I2C)
-//   vl53l1_driver    → for VL53L1 (I2C)
-//   vl53l1_modbus_driver → for VL53L1_Modbus (UART)
-// ═══════════════════════════════════════════════════════════════
+// Driver already included via header - no additional includes needed
 
 const char* TofSensor::TAG = "TofSensor";
 
@@ -94,12 +86,12 @@ esp_err_t TofSensor::initialize_driver(uint8_t sensor_index) {
         return ESP_ERR_INVALID_ARG;
     }
 
-    // Create driver instance
+    // Create driver instance - NO configuration passed!
     ESP_LOGI(TAG, "    • Creating driver instance...");
     drivers_[sensor_index] = new TofDriver();
     TofDriver* driver = drivers_[sensor_index];
 
-    // Standardized initialization sequence
+    // Standardized initialization sequence - identical for all drivers
     const char* err;
 
     ESP_LOGI(TAG, "    • Running configure()...");
@@ -182,7 +174,7 @@ esp_err_t TofSensor::read_all(SensorCommon::TofMeasurement results[SensorCommon:
             continue;
         }
 
-        TofDriver::MeasurementResult driver_result;
+        TofDriver::MeasurementResult driver_result{};
         bool success = drivers_[i]->read_sensor(driver_result);
 
         if (success) {
@@ -211,7 +203,7 @@ esp_err_t TofSensor::read_sensor(uint8_t sensor_index, SensorCommon::TofMeasurem
         return ESP_ERR_INVALID_ARG;
     }
 
-    TofDriver::MeasurementResult driver_result;
+    TofDriver::MeasurementResult driver_result{};
     if (!drivers_[sensor_index]->read_sensor(driver_result)) {
         ESP_LOGD(TAG, "Failed to read measurement from sensor %d", sensor_index);
         return ESP_ERR_INVALID_RESPONSE;
