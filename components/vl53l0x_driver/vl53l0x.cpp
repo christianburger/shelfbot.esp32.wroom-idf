@@ -124,7 +124,11 @@ VL53L0X_Driver::~VL53L0X_Driver() {
 // ═══════════════════════════════════════════════════════════════
 bool VL53L0X_Driver::lockI2C() {
   if (!shared_i2c_mutex_) return false;
-  return xSemaphoreTake(shared_i2c_mutex_, pdMS_TO_TICKS(1000)) == pdTRUE;
+  bool locked = xSemaphoreTake(shared_i2c_mutex_, pdMS_TO_TICKS(1000)) == pdTRUE;
+  if (!locked) {
+    ESP_LOGE(TAG, "I2C lock acquire failed");
+  }
+  return locked;
 }
 
 void VL53L0X_Driver::unlockI2C() {
@@ -644,11 +648,12 @@ const char* VL53L0X_Driver::init() {
         return nullptr;
     }
 
+    ESP_LOGI(TAG, "[INIT] Acquiring I2C lock");
     if (!lockI2C()) {
         return "Failed to lock I2C";
     }
 
-    ESP_LOGI(TAG, "Initializing I2C bus and device...");
+    ESP_LOGI(TAG, "[INIT] Initializing I2C bus and device...");
 
     // Handle XSHUT pin if configured
     if (xshut_pin_ != GPIO_NUM_NC) {
@@ -688,6 +693,7 @@ const char* VL53L0X_Driver::init() {
 
         esp_err_t err = i2c_new_master_bus(&bus_config, &shared_bus_handle_);
         if (err != ESP_OK) {
+            ESP_LOGI(TAG, "[INIT] Releasing I2C lock after bus creation failure");
             unlockI2C();
             ESP_LOGE(TAG, "FAILED to create I2C bus: %s", esp_err_to_name(err));
             return "I2C bus creation failed";
@@ -718,6 +724,7 @@ const char* VL53L0X_Driver::init() {
             shared_bus_handle_ = nullptr;
         }
         bus_reference_count_--;
+        ESP_LOGI(TAG, "[INIT] Releasing I2C lock after device add failure");
         unlockI2C();
         ESP_LOGE(TAG, "FAILED to add device: %s", esp_err_to_name(err));
         return "Device add failed";
@@ -725,6 +732,7 @@ const char* VL53L0X_Driver::init() {
     ESP_LOGI(TAG, "Device added to bus at 0x%02X", i2c_address_);
 
     initialized_ = true;
+    ESP_LOGI(TAG, "[INIT] Releasing I2C lock");
     unlockI2C();
     return nullptr;
 }
@@ -842,6 +850,11 @@ bool VL53L0X_Driver::read_sensor(MeasurementResult& result) {
         return false;
     }
 
+    if (!lockI2C()) {
+        result.valid = false;
+        return false;
+    }
+
     // Prepare for measurement
     writeReg8(0x80, 0x01);
     writeReg8(0xFF, 0x01);
@@ -861,6 +874,8 @@ bool VL53L0X_Driver::read_sensor(MeasurementResult& result) {
     do {
         esp_err_t err = readReg8(Reg::SYSRANGE_START, &sysrange_start_val);
         if (err != ESP_OK) {
+            ESP_LOGI(TAG, "[READ] Releasing I2C lock (read start failed)");
+            unlockI2C();
             return false;
         }
 
@@ -868,6 +883,9 @@ bool VL53L0X_Driver::read_sensor(MeasurementResult& result) {
             result.valid = false;
             result.timeout_occurred = true;
             did_timeout_ = true;
+            ESP_LOGW(TAG, "[READ] Timeout waiting for start");
+            ESP_LOGI(TAG, "[READ] Releasing I2C lock");
+            unlockI2C();
             return false;
         }
         vTaskDelay(1);
@@ -885,6 +903,8 @@ bool VL53L0X_Driver::read_sensor(MeasurementResult& result) {
         esp_err_t err = readReg8(Reg::RESULT_INTERRUPT_STATUS, &interrupt_status);
         if (err != ESP_OK) {
             result.valid = false;
+            ESP_LOGI(TAG, "[READ] Releasing I2C lock (interrupt status read failed)");
+            unlockI2C();
             return false;
         }
 
@@ -893,6 +913,9 @@ bool VL53L0X_Driver::read_sensor(MeasurementResult& result) {
             result.timeout_occurred = true;
             result.distance_mm = 65535;
             did_timeout_ = true;
+            ESP_LOGW(TAG, "[READ] Timeout waiting for result");
+            ESP_LOGI(TAG, "[READ] Releasing I2C lock");
+            unlockI2C();
             return false;
         }
         vTaskDelay(1);
@@ -903,6 +926,8 @@ bool VL53L0X_Driver::read_sensor(MeasurementResult& result) {
     esp_err_t err = readReg16(Reg::RESULT_RANGE_STATUS + 10, &range_mm);
     if (err != ESP_OK) {
         result.valid = false;
+        ESP_LOGI(TAG, "[READ] Releasing I2C lock (range read failed)");
+        unlockI2C();
         return false;
     }
 
@@ -912,6 +937,10 @@ bool VL53L0X_Driver::read_sensor(MeasurementResult& result) {
     result.distance_mm = range_mm;
     result.valid = (range_mm < 8190);
     result.timeout_occurred = false;
+
+    ESP_LOGI(TAG, "[READ] Measurement complete: %u mm valid=%d status=%u", result.distance_mm, result.valid, result.range_status);
+    ESP_LOGI(TAG, "[READ] Releasing I2C lock");
+    unlockI2C();
 
     return true;
 }
