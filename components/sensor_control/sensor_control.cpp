@@ -3,6 +3,7 @@
 #include "ultrasonic_sensor.hpp"
 #include "tof_sensor.hpp"
 #include "sensor_common.hpp"
+#include "firmware_version.hpp"
 
 const char* SensorControl::TAG = "SensorControl";
 
@@ -104,6 +105,7 @@ esp_err_t SensorControl::initialize() {
         return ESP_OK;
     }
 
+    ESP_LOGI(TAG, "Firmware Version: %s", FirmwareVersion::get_version_string());
     ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "Initializing Unified Sensor Control");
     ESP_LOGI(TAG, "=========================================");
