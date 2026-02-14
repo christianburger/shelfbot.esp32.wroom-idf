@@ -21,6 +21,7 @@
 #include "led_control.hpp"
 #include "sensor_control.hpp"
 #include "sensor_common.hpp"
+#include "firmware_version.hpp"
 
 #include <rcl/rcl.h>
 #include <rclc/rclc.h>
