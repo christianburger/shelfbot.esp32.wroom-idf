@@ -1,5 +1,6 @@
 #include "include/sensor_manager.hpp"
 #include "include/sensor_control.hpp"
+#include <sstream>
 
 static const char* TAG = "SensorManager";
 
@@ -18,19 +19,27 @@ void SensorManager::monitor_loop() {
     while (monitor_task_running_) {
         SensorCommon::SensorDataPacket snapshot;
         if (get_latest_data(snapshot)) {
+            std::ostringstream tof_distance_stream;
+            std::ostringstream tof_valid_stream;
+
+            for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
+                if (i > 0) {
+                    tof_distance_stream << ", ";
+                    tof_valid_stream << ", ";
+                }
+                tof_distance_stream << snapshot.tof_measurements[i].distance_mm;
+                tof_valid_stream << static_cast<int>(snapshot.tof_measurements[i].valid);
+            }
+
             ESP_LOGI(TAG,
-                     "Snapshot us=%lld | US[%.1f, %.1f, %.1f, %.1f] cm | TOF[%u, %u, %u] mm valid[%d, %d, %d]",
+                     "Snapshot us=%lld | US[%.1f, %.1f, %.1f, %.1f] cm | TOF[%s] mm valid[%s]",
                      static_cast<long long>(snapshot.timestamp_us),
                      snapshot.ultrasonic_readings[0].distance_cm,
                      snapshot.ultrasonic_readings[1].distance_cm,
                      snapshot.ultrasonic_readings[2].distance_cm,
                      snapshot.ultrasonic_readings[3].distance_cm,
-                     snapshot.tof_measurements[0].distance_mm,
-                     snapshot.tof_measurements[1].distance_mm,
-                     snapshot.tof_measurements[2].distance_mm,
-                     snapshot.tof_measurements[0].valid,
-                     snapshot.tof_measurements[1].valid,
-                     snapshot.tof_measurements[2].valid);
+                     tof_distance_stream.str().c_str(),
+                     tof_valid_stream.str().c_str());
         } else {
             ESP_LOGW(TAG, "Sensor snapshot unavailable");
         }

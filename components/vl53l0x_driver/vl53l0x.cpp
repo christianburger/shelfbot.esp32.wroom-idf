@@ -744,26 +744,82 @@ const char* VL53L0X_Driver::setup() {
 
     ESP_LOGI(TAG, "Loading initialization sequences...");
 
-    uint8_t model_id;
-    esp_err_t err = readReg8(Reg::IDENTIFICATION_MODEL_ID, &model_id);
+    if (!lockI2C()) {
+        return "Failed to lock I2C";
+    }
+
+    // Ensure register page 0 and allow FW boot completion (datasheet tBOOT <= 1.2ms)
+    writeReg8(0xFF, 0x00);
+    vTaskDelay(pdMS_TO_TICKS(5));
+
+    // Validate sensor identity using reference registers from datasheet/API examples
+    uint8_t model_id = 0;
+    uint8_t module_type = 0;
+    uint8_t revision_id = 0;
+    uint8_t reg_0x51 = 0;
+    uint8_t reg_0x61 = 0;
+    esp_err_t err = ESP_FAIL;
+
+    for (int attempt = 0; attempt < 5; ++attempt) {
+        writeReg8(0xFF, 0x00);
+        err = readReg8(Reg::IDENTIFICATION_MODEL_ID, &model_id);
+        if (err != ESP_OK) {
+            vTaskDelay(pdMS_TO_TICKS(5));
+            continue;
+        }
+
+        readReg8(0xC1, &module_type);
+        readReg8(Reg::IDENTIFICATION_REVISION_ID, &revision_id);
+        readReg8(0x51, &reg_0x51);
+        readReg8(0x61, &reg_0x61);
+
+        if (model_id == 0xEE) {
+            break;
+        }
+
+        ESP_LOGW(TAG,
+                 "Identity check attempt %d failed: C0=0x%02X C1=0x%02X C2=0x%02X 51=0x%02X 61=0x%02X",
+                 attempt + 1, model_id, module_type, revision_id, reg_0x51, reg_0x61);
+        vTaskDelay(pdMS_TO_TICKS(5));
+    }
+
     if (err != ESP_OK) {
+        unlockI2C();
         ESP_LOGE(TAG, "FAILED to read model ID: %s", esp_err_to_name(err));
         return "Model ID read failed";
     }
 
     if (model_id != 0xEE) {
+        unlockI2C();
         ESP_LOGE(TAG, "Model ID mismatch: expected 0xEE, got 0x%02X", model_id);
         return "Wrong sensor model";
     }
-    ESP_LOGI(TAG, "Model ID verified: 0x%02X", model_id);
+    ESP_LOGI(TAG, "Model ID verified: 0x%02X (C1=0x%02X, C2=0x%02X)", model_id, module_type, revision_id);
 
+    // Datasheet/API: enable 2V8 mode when IO lines run at AVDD levels
+    if (io_2v8_) {
+        uint8_t ext_sup_hv = 0;
+        if (readReg8(Reg::VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV, &ext_sup_hv) == ESP_OK) {
+            writeReg8(Reg::VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV, ext_sup_hv | 0x01);
+        }
+    }
+
+    // Access stop variable using hidden register page sequence
+    writeReg8(0x80, 0x01);
+    writeReg8(0xFF, 0x01);
+    writeReg8(0x00, 0x00);
     err = readReg8(0x91, &stop_variable_);
+    writeReg8(0x00, 0x01);
+    writeReg8(0xFF, 0x00);
+    writeReg8(0x80, 0x00);
     if (err != ESP_OK) {
+        unlockI2C();
         return "Failed to read stop variable";
     }
 
     err = loadInitSequence();
     if (err != ESP_OK) {
+        unlockI2C();
         return "Init sequence failed";
     }
     ESP_LOGI(TAG, "Initialization sequence loaded");
@@ -794,6 +850,7 @@ const char* VL53L0X_Driver::setup() {
     setMeasurementTimingBudget(timing_budget_us_);
     ESP_LOGI(TAG, "Timing budget set: %lu us", timing_budget_us_);
 
+    unlockI2C();
     ESP_LOGI(TAG, "Setup complete");
     return nullptr;
 }
