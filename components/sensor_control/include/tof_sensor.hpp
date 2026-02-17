@@ -6,10 +6,12 @@
 // DRIVER SELECTION - Change this ONE line to switch drivers
 // ═══════════════════════════════════════════════════════════════
 
-#include "vl53l0x.hpp"    // ← This include determines which driver is used
+//#include "vl53l0x.hpp"    // ← This include determines which driver is used
 //#include "vl53l1.hpp"    // ← This include determines which driver is used
-//#include "vl53l1_modbus.hpp"    // ← This include determines which driver is used
+#include "vl53l1_modbus.hpp"    // ← This include determines which driver is used
 
+// Note: TOF400F modules are typically shipped in UART/Modbus mode by default;
+// select "vl53l1_modbus.hpp" unless you have explicitly switched the module to I2C mode.
 // Options:
 //   "vl53l0x.hpp"         → for VL53L0X (I2C)
 //   "vl53l1.hpp"          → for VL53L1 (I2C)
