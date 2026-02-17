@@ -12,6 +12,7 @@
 #define VL53L1_TIMEOUT_MS       500
 #define VL53L1_TIMING_BUDGET_US 200000
 #define VL53L1_SIGNAL_RATE_MCPS 0.25f
+#define VL53L1_DIAG_VERBOSE     1
 // ═══════════════════════════════════════════════════════════════
 
 class VL53L1_Driver {
@@ -61,6 +62,7 @@ private:
 
     bool initialized_;
     bool did_timeout_;
+    uint32_t op_counter_;
 
     esp_err_t writeReg8(uint16_t reg, uint8_t value);
     esp_err_t writeReg16(uint16_t reg, uint16_t value);
@@ -71,9 +73,16 @@ private:
 
     esp_err_t writeMulti(uint16_t reg, const uint8_t* src, size_t count);
     esp_err_t readMulti(uint16_t reg, uint8_t* dst, size_t count);
+    esp_err_t readMultiCombined(uint16_t reg, uint8_t* dst, size_t count);
+    esp_err_t readMultiSplit(uint16_t reg, uint8_t* dst, size_t count);
 
     esp_err_t waitForBoot();
     esp_err_t startContinuous();
+
+    void logBuffer(const char* prefix, const uint8_t* data, size_t count) const;
+    uint16_t crc16Modbus(const uint8_t* data, size_t count) const;
+    esp_err_t writeReg8AndVerify(uint16_t reg, uint8_t value);
+    esp_err_t readReg8WithTrace(const char* label, uint16_t reg, uint8_t* value);
 };
 
 using TofDriver = VL53L1_Driver;
