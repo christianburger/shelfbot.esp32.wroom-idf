@@ -6,8 +6,8 @@
 // DRIVER SELECTION - Change this ONE line to switch drivers
 // ═══════════════════════════════════════════════════════════════
 
-#include "vl53l0x.hpp"    // ← This include determines which driver is used
-//#include "vl53l1.hpp"    // ← This include determines which driver is used
+//#include "vl53l0x.hpp"    // ← This include determines which driver is used
+#include "vl53l1.hpp"    // ← This include determines which driver is used
 //#include "vl53l1_modbus.hpp"    // ← This include determines which driver is used
 
 // Options:
