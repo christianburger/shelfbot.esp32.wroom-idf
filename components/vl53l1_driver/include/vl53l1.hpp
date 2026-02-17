@@ -39,6 +39,9 @@ public:
     void setTimeout(uint16_t timeout_ms);
     bool timeoutOccurred();
 
+    // Troubleshooting-only: exhaustive I2C frequency/register diagnostics
+    const char* troubleshootI2C();
+
     i2c_master_bus_handle_t getBusHandle() { return bus_handle_; }
     bool lockI2C();
     void unlockI2C();
@@ -83,6 +86,10 @@ private:
     uint16_t crc16Modbus(const uint8_t* data, size_t count) const;
     esp_err_t writeReg8AndVerify(uint16_t reg, uint8_t value);
     esp_err_t readReg8WithTrace(const char* label, uint16_t reg, uint8_t* value);
+
+    const char* runFrequencyDiagnostic(uint32_t freq_hz);
+    esp_err_t diagnosticReadCombined(i2c_master_dev_handle_t dev, uint16_t reg, uint8_t* dst, size_t count);
+    esp_err_t diagnosticReadSplit(i2c_master_dev_handle_t dev, uint16_t reg, uint8_t* dst, size_t count);
 };
 
 using TofDriver = VL53L1_Driver;

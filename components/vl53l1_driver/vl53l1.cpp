@@ -17,6 +17,8 @@ constexpr uint16_t IDENTIFICATION__MODEL_ID = 0x010F;
 namespace {
 constexpr uint8_t VL53L1_MODEL_ID = 0xEA;
 constexpr int kIdReadRetries = 10;
+constexpr uint32_t kDiagFrequencies[] = {10000, 25000, 50000, 100000, 200000, 400000, 800000};
+constexpr uint16_t kDiagRegisters[] = {0x0000, 0x0001, 0x0031, 0x0086, 0x00E5, 0x010F};
 } // namespace
 
 VL53L1_Driver::VL53L1_Driver()
@@ -213,6 +215,90 @@ esp_err_t VL53L1_Driver::writeReg8AndVerify(uint16_t reg, uint8_t value) {
     return ESP_OK;
 }
 
+
+esp_err_t VL53L1_Driver::diagnosticReadCombined(i2c_master_dev_handle_t dev, uint16_t reg, uint8_t* dst, size_t count) {
+    uint8_t addr[2] = {static_cast<uint8_t>(reg >> 8), static_cast<uint8_t>(reg & 0xFF)};
+    return i2c_master_transmit_receive(dev, addr, sizeof(addr), dst, count, timeout_ms_);
+}
+
+esp_err_t VL53L1_Driver::diagnosticReadSplit(i2c_master_dev_handle_t dev, uint16_t reg, uint8_t* dst, size_t count) {
+    uint8_t addr[2] = {static_cast<uint8_t>(reg >> 8), static_cast<uint8_t>(reg & 0xFF)};
+    esp_err_t err = i2c_master_transmit(dev, addr, sizeof(addr), timeout_ms_);
+    if (err != ESP_OK) return err;
+    return i2c_master_receive(dev, dst, count, timeout_ms_);
+}
+
+const char* VL53L1_Driver::runFrequencyDiagnostic(uint32_t freq_hz) {
+    ESP_LOGI(TAG, "[TROUBLESHOOT] -------- freq=%lu Hz --------", (unsigned long)freq_hz);
+
+    i2c_master_bus_config_t bus_cfg = {
+        .i2c_port = i2c_port_,
+        .sda_io_num = sda_pin_,
+        .scl_io_num = scl_pin_,
+        .clk_source = I2C_CLK_SRC_DEFAULT,
+        .glitch_ignore_cnt = 7,
+        .intr_priority = 0,
+        .trans_queue_depth = 0,
+        .flags = {.enable_internal_pullup = true},
+    };
+
+    i2c_master_bus_handle_t bus = nullptr;
+    esp_err_t err = i2c_new_master_bus(&bus_cfg, &bus);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "[TROUBLESHOOT] bus create failed @%lu: %s", (unsigned long)freq_hz, esp_err_to_name(err));
+        return "diag bus create failed";
+    }
+
+    err = i2c_master_probe(bus, i2c_address_, timeout_ms_);
+    ESP_LOGI(TAG, "[TROUBLESHOOT] probe 0x%02X @%lu => %s", i2c_address_, (unsigned long)freq_hz, esp_err_to_name(err));
+
+    i2c_device_config_t dev_cfg = {
+        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
+        .device_address = i2c_address_,
+        .scl_speed_hz = freq_hz,
+        .scl_wait_us = 0,
+        .flags = {0},
+    };
+
+    i2c_master_dev_handle_t dev = nullptr;
+    err = i2c_master_bus_add_device(bus, &dev_cfg, &dev);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "[TROUBLESHOOT] add device failed @%lu: %s", (unsigned long)freq_hz, esp_err_to_name(err));
+        i2c_del_master_bus(bus);
+        return "diag add device failed";
+    }
+
+    uint8_t rx = 0;
+    for (uint16_t reg : kDiagRegisters) {
+        rx = 0;
+        esp_err_t ec = diagnosticReadCombined(dev, reg, &rx, 1);
+        if (ec == ESP_OK) {
+            ESP_LOGI(TAG, "[TROUBLESHOOT] reg 0x%04X combined -> 0x%02X", reg, rx);
+        } else {
+            ESP_LOGW(TAG, "[TROUBLESHOOT] reg 0x%04X combined failed: %s", reg, esp_err_to_name(ec));
+            esp_err_t es = diagnosticReadSplit(dev, reg, &rx, 1);
+            if (es == ESP_OK) {
+                ESP_LOGI(TAG, "[TROUBLESHOOT] reg 0x%04X split -> 0x%02X", reg, rx);
+            } else {
+                ESP_LOGE(TAG, "[TROUBLESHOOT] reg 0x%04X split failed: %s", reg, esp_err_to_name(es));
+            }
+        }
+    }
+
+    i2c_master_bus_rm_device(dev);
+    i2c_del_master_bus(bus);
+    return nullptr;
+}
+
+const char* VL53L1_Driver::troubleshootI2C() {
+    ESP_LOGW(TAG, "[TROUBLESHOOT] Starting exhaustive I2C diagnostics for VL53L1");
+    for (uint32_t f : kDiagFrequencies) {
+        runFrequencyDiagnostic(f);
+    }
+    ESP_LOGW(TAG, "[TROUBLESHOOT] Diagnostics complete");
+    return nullptr;
+}
+
 const char* VL53L1_Driver::configure() {
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "VL53L1 ToF Driver Configuration");
@@ -252,6 +338,11 @@ const char* VL53L1_Driver::init() {
     err = i2c_master_probe(bus_handle_, i2c_address_, timeout_ms_);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Probe failed at 0x%02X: %s", i2c_address_, esp_err_to_name(err));
+        i2c_del_master_bus(bus_handle_);
+        bus_handle_ = nullptr;
+        unlockI2C();
+        troubleshootI2C();
+        return "Probe failed";
     } else {
         ESP_LOGI(TAG, "Probe OK at 0x%02X", i2c_address_);
     }
@@ -319,6 +410,7 @@ const char* VL53L1_Driver::setup() {
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "FAILED to read model ID after %d attempts: %s", kIdReadRetries,
                  esp_err_to_name(err));
+        troubleshootI2C();
         return "Model ID read failed";
     }
 
