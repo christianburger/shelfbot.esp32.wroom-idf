@@ -1,6 +1,7 @@
 #include "sensor_control.hpp"
 #include "ultrasonic_sensor.hpp"
 #include "tof_sensor.hpp"
+#include "lidar_sensor.hpp"
 #include "esp_log.h"
 #include "freertos/task.h"
 #include "esp_timer.h"
@@ -24,6 +25,7 @@ QueueHandle_t distance_data_queue = nullptr;  // Legacy queue
 static void sensor_reader_task(void* arg) {
   std::vector<SensorCommon::Reading> ultrasonic_readings;
   std::vector<SensorCommon::Reading> tof_readings;
+  std::vector<SensorCommon::Reading> lidar_readings;
   SensorDataPacket packet;
 
   for (;;) {
@@ -39,6 +41,10 @@ static void sensor_reader_task(void* arg) {
     for (int i = 0; i < NUM_TOF_SENSORS; i++) {
       packet.tof_distances_cm[i] = SensorCommon::MAX_DISTANCE_CM;
       packet.tof_valid[i] = false;
+    }
+    for (int i = 0; i < NUM_LYDSTO_SENSORS; i++) {
+      packet.lydsto_distances_cm[i] = SensorCommon::MAX_DISTANCE_CM;
+      packet.lydsto_valid[i] = false;
     }
 
     // Read Ultrasonic Sensors
@@ -71,6 +77,22 @@ static void sensor_reader_task(void* arg) {
           obstacle_detected = true;
           ESP_LOGW(TAG, "Obstacle: ToF[%zu] = %.1f cm (VALID, CLOSE)",
                    i, tof_readings[i].distance_cm);
+        }
+      }
+    }
+
+    // Read Lydsto LiDAR-derived proximity sensors
+    if (LidarSensorManager::instance().get_latest_readings(lidar_readings)) {
+      for (size_t i = 0; i < lidar_readings.size() && i < NUM_LYDSTO_SENSORS; i++) {
+        packet.lydsto_distances_cm[i] = lidar_readings[i].distance_cm;
+        packet.lydsto_valid[i] = lidar_readings[i].valid;
+
+        if (lidar_readings[i].valid &&
+            lidar_readings[i].distance_cm >= SensorCommon::MIN_DISTANCE_CM &&
+            lidar_readings[i].distance_cm < COLLISION_THRESHOLD_CM) {
+          obstacle_detected = true;
+          ESP_LOGW(TAG, "Obstacle: Lydsto[%zu] = %.1f cm (VALID, CLOSE)",
+                   i, lidar_readings[i].distance_cm);
         }
       }
     }
@@ -158,6 +180,21 @@ void sensor_control_init() {
     ESP_LOGE(TAG, "Failed to configure ToF sensors");
   }
 
+  // Configure Lydsto LiDAR sensor (TX-only UART stream + optional PWM control)
+  LidarSensorConfig lidar_configs[NUM_LYDSTO_SENSORS] = {
+    {
+      .driver_config = lydsto_default_config(
+        UART_NUM_1,
+        GPIO_NUM_18, // LiDAR TX -> ESP32 RX (free, input-capable)
+        GPIO_NUM_19  // LiDAR PWM -> ESP32 PWM output (free output pin)
+      )
+    }
+  };
+
+  if (!LidarSensorManager::instance().configure(lidar_configs, NUM_LYDSTO_SENSORS)) {
+    ESP_LOGE(TAG, "Failed to configure Lydsto sensors");
+  }
+
   ESP_LOGI(TAG, "Sensor control initialized");
 }
 
@@ -170,6 +207,11 @@ void sensor_control_start_task() {
   // Start ToF reading task
   if (!ToFSensorManager::instance().start_reading_task(100, 5)) {
     ESP_LOGE(TAG, "Failed to start ToF reading task");
+  }
+
+  // Start Lydsto reading task
+  if (!LidarSensorManager::instance().start_reading_task(100, 5)) {
+    ESP_LOGE(TAG, "Failed to start Lydsto reading task");
   }
 
   // Start unified sensor reader task

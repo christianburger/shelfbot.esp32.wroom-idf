@@ -10,15 +10,18 @@
 
 #define NUM_ULTRASONIC_SENSORS 2
 #define NUM_TOF_SENSORS 1
-#define NUM_SENSORS (NUM_ULTRASONIC_SENSORS + NUM_TOF_SENSORS)
+#define NUM_LYDSTO_SENSORS 1
+#define NUM_SENSORS (NUM_ULTRASONIC_SENSORS + NUM_TOF_SENSORS + NUM_LYDSTO_SENSORS)
 
 // Unified sensor data structure for the queue
 struct SensorDataPacket {
   float ultrasonic_distances_cm[NUM_ULTRASONIC_SENSORS];
   float tof_distances_cm[NUM_TOF_SENSORS];
+  float lydsto_distances_cm[NUM_LYDSTO_SENSORS];
   int64_t timestamp_us;
   bool ultrasonic_valid[NUM_ULTRASONIC_SENSORS];
   bool tof_valid[NUM_TOF_SENSORS];
+  bool lydsto_valid[NUM_LYDSTO_SENSORS];
 };
 
 // Queue for sending unified sensor data to the ROS publisher

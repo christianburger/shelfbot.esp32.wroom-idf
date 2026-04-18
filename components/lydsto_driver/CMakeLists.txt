@@ -1,0 +1,11 @@
+idf_component_register(
+  SRCS
+  "lydsto_lidar.cpp"
+  INCLUDE_DIRS
+  "."
+  "include"
+  REQUIRES
+  driver
+  freertos
+  esp_timer
+)
