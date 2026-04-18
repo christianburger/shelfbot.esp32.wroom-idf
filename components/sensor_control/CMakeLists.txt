@@ -2,13 +2,14 @@ idf_component_register(
   SRCS
   "ultrasonic_sensor.cpp"
   "tof_sensor.cpp"
-  "lydsto_lidar.cpp"
+  "lydsto_sensor.cpp"
   "sensor_control.cpp"
   INCLUDE_DIRS
   "include"
   "."
   REQUIRES
   vl53l0x_driver
+  lydsto_driver
   firmware_version
   driver
   esp_timer
