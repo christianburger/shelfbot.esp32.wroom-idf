@@ -1,0 +1,391 @@
+#include "lydsto_lidar.hpp"
+
+#include "esp_log.h"
+#include "esp_timer.h"
+#include "driver/ledc.h"
+#include <algorithm>
+#include <cmath>
+
+static const char* TAG = "Lydsto_LiDAR";
+
+namespace {
+constexpr uint8_t CRC_TABLE[256] = {
+    0x00, 0x4d, 0x9a, 0xd7, 0x79, 0x34, 0xe3, 0xae, 0xf2, 0xbf, 0x68, 0x25, 0x8b, 0xc6, 0x11, 0x5c,
+    0xa9, 0xe4, 0x33, 0x7e, 0xd0, 0x9d, 0x4a, 0x07, 0x5b, 0x16, 0xc1, 0x8c, 0x22, 0x6f, 0xb8, 0xf5,
+    0x1f, 0x52, 0x85, 0xc8, 0x66, 0x2b, 0xfc, 0xb1, 0xed, 0xa0, 0x77, 0x3a, 0x94, 0xd9, 0x0e, 0x43,
+    0xb6, 0xfb, 0x2c, 0x61, 0xcf, 0x82, 0x55, 0x18, 0x44, 0x09, 0xde, 0x93, 0x3d, 0x70, 0xa7, 0xea,
+    0x3e, 0x73, 0xa4, 0xe9, 0x47, 0x0a, 0xdd, 0x90, 0xcc, 0x81, 0x56, 0x1b, 0xb5, 0xf8, 0x2f, 0x62,
+    0x97, 0xda, 0x0d, 0x40, 0xee, 0xa3, 0x74, 0x39, 0x65, 0x28, 0xff, 0xb2, 0x1c, 0x51, 0x86, 0xcb,
+    0x21, 0x6c, 0xbb, 0xf6, 0x58, 0x15, 0xc2, 0x8f, 0xd3, 0x9e, 0x49, 0x04, 0xaa, 0xe7, 0x30, 0x7d,
+    0x88, 0xc5, 0x12, 0x5f, 0xf1, 0xbc, 0x6b, 0x26, 0x7a, 0x37, 0xe0, 0xad, 0x03, 0x4e, 0x99, 0xd4,
+    0x7c, 0x31, 0xe6, 0xab, 0x05, 0x48, 0x9f, 0xd2, 0x8e, 0xc3, 0x14, 0x59, 0xf7, 0xba, 0x6d, 0x20,
+    0xd5, 0x98, 0x4f, 0x02, 0xac, 0xe1, 0x36, 0x7b, 0x27, 0x6a, 0xbd, 0xf0, 0x5e, 0x13, 0xc4, 0x89,
+    0x63, 0x2e, 0xf9, 0xb4, 0x1a, 0x57, 0x80, 0xcd, 0x91, 0xdc, 0x0b, 0x46, 0xe8, 0xa5, 0x72, 0x3f,
+    0xca, 0x87, 0x50, 0x1d, 0xb3, 0xfe, 0x29, 0x64, 0x38, 0x75, 0xa2, 0xef, 0x41, 0x0c, 0xdb, 0x96,
+    0x42, 0x0f, 0xd8, 0x95, 0x3b, 0x76, 0xa1, 0xec, 0xb0, 0xfd, 0x2a, 0x67, 0xc9, 0x84, 0x53, 0x1e,
+    0xeb, 0xa6, 0x71, 0x3c, 0x92, 0xdf, 0x08, 0x45, 0x19, 0x54, 0x83, 0xce, 0x60, 0x2d, 0xfa, 0xb7,
+    0x5d, 0x10, 0xc7, 0x8a, 0x24, 0x69, 0xbe, 0xf3, 0xaf, 0xe2, 0x35, 0x78, 0xd6, 0x9b, 0x4c, 0x01,
+    0xf4, 0xb9, 0x6e, 0x23, 0x8d, 0xc0, 0x17, 0x5a, 0x06, 0x4b, 0x9c, 0xd1, 0x7f, 0x32, 0xe5, 0xa8,
+};
+
+float to_angle_deg(uint16_t centi_deg) {
+    return static_cast<float>(centi_deg) / 100.0f;
+}
+} // namespace
+
+LydstoLidarArray::~LydstoLidarArray() {
+    if (uart_ready_) {
+        uart_driver_delete(cfg_.uart_port);
+    }
+}
+
+bool LydstoLidarArray::init(const LydstoLidarConfig& cfg) {
+    cfg_ = cfg;
+    rx_buffer_.clear();
+    rx_buffer_.reserve(2048);
+    scratch_.resize(256);
+
+    if (!setup_uart_()) {
+        return false;
+    }
+
+    if (cfg_.enable_external_speed_control && !setup_pwm_()) {
+        ESP_LOGE(TAG, "PWM setup failed");
+        return false;
+    }
+
+    initialized_ = true;
+    ESP_LOGI(TAG,
+             "Lydsto/LD19-style LiDAR initialized (uart=%d baud=%d rx=%d pwm=%d ext_pwm=%s)",
+             static_cast<int>(cfg_.uart_port),
+             cfg_.baud_rate,
+             static_cast<int>(cfg_.rx_pin),
+             static_cast<int>(cfg_.pwm_pin),
+             cfg_.enable_external_speed_control ? "true" : "false");
+    return true;
+}
+
+bool LydstoLidarArray::setup_uart_() {
+    const uart_config_t uart_cfg = {
+        .baud_rate = cfg_.baud_rate,
+        .data_bits = UART_DATA_8_BITS,
+        .parity = UART_PARITY_DISABLE,
+        .stop_bits = UART_STOP_BITS_1,
+        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
+        .rx_flow_ctrl_thresh = 0,
+        .source_clk = UART_SCLK_DEFAULT,
+#if SOC_UART_SUPPORT_FSM_TX_WAIT_SEND
+        .flags = 0,
+#endif
+    };
+
+    ESP_ERROR_CHECK_WITHOUT_ABORT(uart_param_config(cfg_.uart_port, &uart_cfg));
+
+    esp_err_t ret = uart_set_pin(cfg_.uart_port,
+                                 cfg_.tx_pin,
+                                 cfg_.rx_pin,
+                                 UART_PIN_NO_CHANGE,
+                                 UART_PIN_NO_CHANGE);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "uart_set_pin failed: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    ret = uart_driver_install(cfg_.uart_port,
+                              cfg_.uart_rx_buffer_size,
+                              0,
+                              0,
+                              nullptr,
+                              0);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "uart_driver_install failed: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    uart_ready_ = true;
+    return true;
+}
+
+bool LydstoLidarArray::setup_pwm_() {
+    ledc_timer_config_t timer_cfg = {
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .duty_resolution = LEDC_TIMER_10_BIT,
+        .timer_num = static_cast<ledc_timer_t>(ledc_timer_),
+        .freq_hz = static_cast<int>(cfg_.pwm_frequency_hz),
+        .clk_cfg = LEDC_AUTO_CLK,
+        .deconfigure = false,
+    };
+
+    esp_err_t ret = ledc_timer_config(&timer_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ledc_timer_config failed: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    uint32_t max_duty = (1u << LEDC_TIMER_10_BIT) - 1u;
+    uint32_t duty = static_cast<uint32_t>(std::clamp(cfg_.pwm_duty_cycle, 0.0f, 1.0f) * max_duty);
+
+    ledc_channel_config_t ch_cfg = {
+        .gpio_num = cfg_.pwm_pin,
+        .speed_mode = LEDC_LOW_SPEED_MODE,
+        .channel = static_cast<ledc_channel_t>(ledc_channel_),
+        .intr_type = LEDC_INTR_DISABLE,
+        .timer_sel = static_cast<ledc_timer_t>(ledc_timer_),
+        .duty = duty,
+        .hpoint = 0,
+        .sleep_mode = LEDC_SLEEP_MODE_NO_ALIVE_NO_PD,
+        .flags = {.output_invert = 0},
+    };
+
+    ret = ledc_channel_config(&ch_cfg);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "ledc_channel_config failed: %s", esp_err_to_name(ret));
+        return false;
+    }
+
+    ESP_LOGI(TAG, "PWM speed control enabled at %u Hz duty=%.1f%%",
+             cfg_.pwm_frequency_hz, cfg_.pwm_duty_cycle * 100.0f);
+    return true;
+}
+
+bool LydstoLidarArray::ingest_uart_bytes_() {
+    if (!uart_ready_) {
+        return false;
+    }
+
+    size_t available = 0;
+    ESP_ERROR_CHECK_WITHOUT_ABORT(uart_get_buffered_data_len(cfg_.uart_port, &available));
+    if (available == 0) {
+        return false;
+    }
+
+    const int to_read = static_cast<int>(std::min<size_t>(available, scratch_.size()));
+    const int got = uart_read_bytes(cfg_.uart_port,
+                                    scratch_.data(),
+                                    to_read,
+                                    pdMS_TO_TICKS(cfg_.uart_read_timeout_ms));
+    if (got <= 0) {
+        return false;
+    }
+
+    rx_buffer_.insert(rx_buffer_.end(), scratch_.begin(), scratch_.begin() + got);
+    if (rx_buffer_.size() > 8 * kFrameSize) {
+        rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + (rx_buffer_.size() - 8 * kFrameSize));
+    }
+
+    return true;
+}
+
+uint16_t LydstoLidarArray::read_u16_le_(const uint8_t* p) {
+    return static_cast<uint16_t>((static_cast<uint16_t>(p[1]) << 8) | p[0]);
+}
+
+uint8_t LydstoLidarArray::crc8_(const uint8_t* data, size_t len) {
+    uint8_t crc = 0;
+    for (size_t i = 0; i < len; ++i) {
+        crc = CRC_TABLE[(crc ^ data[i]) & 0xFF];
+    }
+    return crc;
+}
+
+bool LydstoLidarArray::parse_next_frame_(std::vector<LydstoLidarPoint>& points, LydstoLidarFrameMeta* meta) {
+    if (rx_buffer_.size() < kFrameSize) {
+        return false;
+    }
+
+    size_t idx = 0;
+    bool found = false;
+    for (; idx + 1 < rx_buffer_.size(); ++idx) {
+        if (rx_buffer_[idx] == kHeader && rx_buffer_[idx + 1] == kVerLen) {
+            found = true;
+            break;
+        }
+    }
+
+    if (!found) {
+        rx_buffer_.clear();
+        return false;
+    }
+    if (idx > 0) {
+        rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + idx);
+    }
+    if (rx_buffer_.size() < kFrameSize) {
+        return false;
+    }
+
+    uint8_t* frame = rx_buffer_.data();
+    const uint8_t computed_crc = crc8_(frame, kFrameSize - 1);
+    const uint8_t frame_crc = frame[kFrameSize - 1];
+    const bool crc_ok = (computed_crc == frame_crc);
+
+    if (!crc_ok) {
+        rx_buffer_.erase(rx_buffer_.begin());
+        return false;
+    }
+
+    const uint16_t speed = read_u16_le_(frame + 2);
+    const uint16_t start_angle = read_u16_le_(frame + 4);
+    const uint16_t end_angle = read_u16_le_(frame + 42);
+    const uint16_t timestamp_ms = read_u16_le_(frame + 44);
+
+    uint16_t sweep = (end_angle >= start_angle)
+                     ? static_cast<uint16_t>(end_angle - start_angle)
+                     : static_cast<uint16_t>((36000 + end_angle) - start_angle);
+    const float step = static_cast<float>(sweep) / static_cast<float>(kPointsPerFrame - 1);
+
+    points.clear();
+    points.reserve(kPointsPerFrame);
+    const int64_t now_us = esp_timer_get_time();
+
+    for (size_t i = 0; i < kPointsPerFrame; ++i) {
+        const size_t point_off = 6 + (i * 3);
+        const uint16_t distance_mm = read_u16_le_(frame + point_off);
+        const uint8_t intensity = frame[point_off + 2];
+
+        float angle_cdeg = std::fmod(static_cast<float>(start_angle) + (step * static_cast<float>(i)), 36000.0f);
+        if (angle_cdeg < 0) {
+            angle_cdeg += 36000.0f;
+        }
+
+        const bool valid_distance = (distance_mm >= cfg_.min_distance_mm && distance_mm <= cfg_.max_distance_mm);
+        const bool valid_intensity = (intensity >= cfg_.min_intensity);
+
+        LydstoLidarPoint point;
+        point.angle_deg = angle_cdeg / 100.0f;
+        point.distance_cm = static_cast<float>(distance_mm) / 10.0f;
+        point.intensity = intensity;
+        point.valid = valid_distance && valid_intensity;
+        point.timestamp_us = now_us;
+        points.push_back(point);
+    }
+
+    if (meta) {
+        meta->speed_dps = static_cast<float>(speed);
+        meta->start_angle_deg = to_angle_deg(start_angle);
+        meta->end_angle_deg = to_angle_deg(end_angle);
+        meta->timestamp_ms = timestamp_ms;
+        meta->crc_ok = true;
+    }
+
+    rx_buffer_.erase(rx_buffer_.begin(), rx_buffer_.begin() + kFrameSize);
+    return true;
+}
+
+bool LydstoLidarArray::update_scan(std::vector<LydstoLidarPoint>& points, LydstoLidarFrameMeta* meta) {
+    if (!initialized_) {
+        return false;
+    }
+
+    ingest_uart_bytes_();
+    return parse_next_frame_(points, meta);
+}
+
+LydstoLidarManager& LydstoLidarManager::instance() {
+    static LydstoLidarManager instance;
+    return instance;
+}
+
+LydstoLidarManager::LydstoLidarManager() {
+    data_mutex_ = xSemaphoreCreateMutex();
+}
+
+LydstoLidarManager::~LydstoLidarManager() {
+    stop();
+    if (data_mutex_) {
+        vSemaphoreDelete(data_mutex_);
+    }
+}
+
+bool LydstoLidarManager::configure(const LydstoLidarConfig& config) {
+    if (lidar_) {
+        ESP_LOGW(TAG, "Manager already configured");
+        return false;
+    }
+
+    lidar_ = std::make_unique<LydstoLidarArray>();
+    if (!lidar_->init(config)) {
+        lidar_.reset();
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Lydsto LiDAR manager configured");
+    return true;
+}
+
+bool LydstoLidarManager::start_reading_task(uint32_t read_interval_ms, UBaseType_t priority) {
+    if (!lidar_ || task_handle_) {
+        return false;
+    }
+
+    running_ = true;
+    paused_ = false;
+
+    TaskParams* params = new TaskParams{this, read_interval_ms};
+    if (xTaskCreate(reading_task, "lydsto_lidar", 4096, params, priority, &task_handle_) != pdPASS) {
+        delete params;
+        running_ = false;
+        return false;
+    }
+
+    ESP_LOGI(TAG, "Lydsto LiDAR reading task started (interval=%u ms)", read_interval_ms);
+    return true;
+}
+
+void LydstoLidarManager::reading_task(void* param) {
+    auto* params = static_cast<TaskParams*>(param);
+    LydstoLidarManager* self = params->manager;
+    const uint32_t interval_ms = params->interval_ms;
+    delete params;
+
+    std::vector<LydstoLidarPoint> points;
+    LydstoLidarFrameMeta meta;
+
+    while (self->running_) {
+        if (!self->paused_) {
+            if (self->lidar_->update_scan(points, &meta)) {
+                if (xSemaphoreTake(self->data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+                    self->latest_points_ = points;
+                    self->latest_meta_ = meta;
+                    xSemaphoreGive(self->data_mutex_);
+                }
+            }
+        }
+
+        vTaskDelay(pdMS_TO_TICKS(interval_ms));
+    }
+
+    vTaskDelete(nullptr);
+}
+
+bool LydstoLidarManager::get_latest_scan(std::vector<LydstoLidarPoint>& points, LydstoLidarFrameMeta* meta) {
+    if (!lidar_) {
+        return false;
+    }
+
+    if (xSemaphoreTake(data_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+        points = latest_points_;
+        if (meta) {
+            *meta = latest_meta_;
+        }
+        xSemaphoreGive(data_mutex_);
+        return true;
+    }
+
+    return false;
+}
+
+void LydstoLidarManager::pause() {
+    paused_ = true;
+}
+
+void LydstoLidarManager::resume() {
+    paused_ = false;
+}
+
+void LydstoLidarManager::stop() {
+    running_ = false;
+    if (task_handle_) {
+        vTaskDelay(pdMS_TO_TICKS(100));
+        task_handle_ = nullptr;
+    }
+}

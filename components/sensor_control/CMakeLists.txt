@@ -2,6 +2,7 @@ idf_component_register(
   SRCS
   "ultrasonic_sensor.cpp"
   "tof_sensor.cpp"
+  "lydsto_lidar.cpp"
   "sensor_control.cpp"
   INCLUDE_DIRS
   "include"
