@@ -8,16 +8,17 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
-struct LydstoSensorConfig {
-    LydstoLidar::Config lidar_config;
+// High-level generic LiDAR config (currently backed by Lydsto low-level driver).
+struct LidarSensorConfig {
+    LydstoLidar::Config driver_config;
 };
 
-class LydstoSensorArray {
+class LidarSensorArray {
 public:
-    explicit LydstoSensorArray(uint8_t num_sensors);
-    ~LydstoSensorArray() = default;
+    explicit LidarSensorArray(uint8_t num_sensors);
+    ~LidarSensorArray() = default;
 
-    bool add_sensor(uint8_t index, const LydstoSensorConfig& cfg);
+    bool add_sensor(uint8_t index, const LidarSensorConfig& cfg);
     bool update_readings(std::vector<SensorCommon::Reading>& readings);
 
 private:
@@ -25,11 +26,11 @@ private:
     uint8_t num_sensors_;
 };
 
-class LydstoSensorManager {
+class LidarSensorManager {
 public:
-    static LydstoSensorManager& instance();
+    static LidarSensorManager& instance();
 
-    bool configure(const LydstoSensorConfig* sensor_configs, uint8_t num_sensors);
+    bool configure(const LidarSensorConfig* sensor_configs, uint8_t num_sensors);
     bool start_reading_task(uint32_t read_interval_ms, UBaseType_t priority);
     bool get_latest_readings(std::vector<SensorCommon::Reading>& readings);
 
@@ -38,20 +39,20 @@ public:
     void stop();
 
 private:
-    LydstoSensorManager();
-    ~LydstoSensorManager();
+    LidarSensorManager();
+    ~LidarSensorManager();
 
-    LydstoSensorManager(const LydstoSensorManager&) = delete;
-    LydstoSensorManager& operator=(const LydstoSensorManager&) = delete;
+    LidarSensorManager(const LidarSensorManager&) = delete;
+    LidarSensorManager& operator=(const LidarSensorManager&) = delete;
 
     struct TaskParams {
-        LydstoSensorManager* manager;
+        LidarSensorManager* manager;
         uint32_t interval_ms;
     };
 
     static void reading_task(void* param);
 
-    std::unique_ptr<LydstoSensorArray> array_;
+    std::unique_ptr<LidarSensorArray> array_;
     std::vector<SensorCommon::Reading> latest_readings_;
     SemaphoreHandle_t data_mutex_;
     TaskHandle_t task_handle_;

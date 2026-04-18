@@ -33,8 +33,8 @@ public:
         int baud_rate;
 
         // ESP32-WROOM-32 DevKitC (38-pin) explicit pinout:
-        // LiDAR TX -> ESP32 RX (UART2 RXD GPIO16)
-        // LiDAR PWM -> ESP32 PWM-capable output (GPIO17)
+        // LiDAR TX -> ESP32 RX (remapped UART RX, GPIO18)
+        // LiDAR PWM -> ESP32 PWM-capable output (GPIO19)
         gpio_num_t rx_pin;
         gpio_num_t tx_pin; // unused (device is TX-only from host perspective)
         gpio_num_t pwm_pin;
@@ -71,6 +71,6 @@ private:
 
 LydstoLidar::Config lydsto_default_config(
     uart_port_t uart_port = UART_NUM_1,
-    gpio_num_t rx_pin = GPIO_NUM_16,
-    gpio_num_t pwm_pin = GPIO_NUM_17
+    gpio_num_t rx_pin = GPIO_NUM_18,
+    gpio_num_t pwm_pin = GPIO_NUM_19
 );
