@@ -5,7 +5,6 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <algorithm>
-#include <cmath>
 #include <inttypes.h>
 
 static const char* TAG = "LydstoLidar";
@@ -203,45 +202,39 @@ struct LydstoLidar::Impl {
         const uint16_t start_angle = read_u16_le(frame + 4);
         const uint16_t end_angle = read_u16_le(frame + 42);
 
-        const uint16_t sweep = (end_angle >= start_angle)
-            ? static_cast<uint16_t>(end_angle - start_angle)
-            : static_cast<uint16_t>((36000 + end_angle) - start_angle);
-        const float step = static_cast<float>(sweep) / static_cast<float>(POINTS_PER_FRAME - 1);
-
-        result.points.clear();
-        result.points.reserve(POINTS_PER_FRAME);
         result.timestamp_us = static_cast<uint32_t>(esp_timer_get_time());
         result.speed_dps = static_cast<float>(speed);
         result.start_angle_deg = static_cast<float>(start_angle) / 100.0f;
         result.end_angle_deg = static_cast<float>(end_angle) / 100.0f;
         result.timeout_occurred = false;
+        result.status = 0;
+        result.distance_mm = 0;
+        result.distance_cm = 0.0f;
 
         bool has_valid = false;
+        uint16_t min_distance_mm = UINT16_MAX;
         for (size_t i = 0; i < POINTS_PER_FRAME; ++i) {
             const size_t point_off = 6 + (i * 3);
             const uint16_t distance_mm = read_u16_le(frame + point_off);
             const uint8_t intensity = frame[point_off + 2];
 
-            float angle_cdeg = std::fmod(static_cast<float>(start_angle) + (step * static_cast<float>(i)), 36000.0f);
-            if (angle_cdeg < 0.0f) {
-                angle_cdeg += 36000.0f;
-            }
-
             const bool valid = (distance_mm >= config.min_distance_mm &&
                                 distance_mm <= config.max_distance_mm &&
                                 intensity >= config.min_intensity);
 
-            LydstoLidar::Point p = {
-                .angle_deg = angle_cdeg / 100.0f,
-                .distance_mm = distance_mm,
-                .intensity = intensity,
-                .valid = valid,
-            };
-            result.points.push_back(p);
-            has_valid = has_valid || valid;
+            if (valid && distance_mm < min_distance_mm) {
+                min_distance_mm = distance_mm;
+                has_valid = true;
+            }
         }
 
         result.valid = has_valid;
+        if (has_valid) {
+            result.distance_mm = min_distance_mm;
+            result.distance_cm = static_cast<float>(min_distance_mm) / 10.0f;
+        } else {
+            result.status = 2;
+        }
         rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + FRAME_SIZE);
         return true;
     }
@@ -287,6 +280,9 @@ bool LydstoLidar::readSingle(MeasurementResult& result) {
     if (!isReady()) {
         result.valid = false;
         result.timeout_occurred = true;
+        result.status = 1;
+        result.distance_mm = 0;
+        result.distance_cm = 0.0f;
         return false;
     }
 
@@ -295,6 +291,9 @@ bool LydstoLidar::readSingle(MeasurementResult& result) {
     if (!ok) {
         result.timeout_occurred = true;
         result.valid = false;
+        result.status = 1;
+        result.distance_mm = 0;
+        result.distance_cm = 0.0f;
     }
     return ok;
 }

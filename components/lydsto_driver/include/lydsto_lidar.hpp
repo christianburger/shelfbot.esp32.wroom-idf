@@ -17,13 +17,15 @@ public:
     };
 
     struct MeasurementResult {
-        std::vector<Point> points;
-        bool valid;
-        bool timeout_occurred;
-        uint32_t timestamp_us;
-        float speed_dps;
-        float start_angle_deg;
-        float end_angle_deg;
+        uint16_t distance_mm;       ///< Nearest valid distance in mm
+        float distance_cm;          ///< Nearest valid distance in cm
+        bool valid;                 ///< True if at least one valid point was found
+        bool timeout_occurred;      ///< True if no complete frame available
+        uint8_t status;             ///< 0=ok,1=no frame,2=no valid points
+        uint32_t timestamp_us;      ///< Timestamp in microseconds
+        float speed_dps;            ///< Motor speed from frame
+        float start_angle_deg;      ///< Frame start angle
+        float end_angle_deg;        ///< Frame end angle
     };
 
     struct Config {

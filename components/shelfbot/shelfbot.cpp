@@ -93,6 +93,10 @@ void Shelfbot::distance_sensors_timer_callback(rcl_timer_t * timer, int64_t last
             for (int i = 0; i < NUM_TOF_SENSORS && idx < NUM_SENSORS; i++, idx++) {
                 distance_sensors_data[idx] = sensor_data.tof_distances_cm[i];
             }
+            // Publish Lydsto LiDAR-derived distances
+            for (int i = 0; i < NUM_LYDSTO_SENSORS && idx < NUM_SENSORS; i++, idx++) {
+                distance_sensors_data[idx] = sensor_data.lydsto_distances_cm[i];
+            }
             distance_sensors_msg.data.size = idx;
             RCSOFTCHECK(rcl_publish(&distance_sensors_publisher, &distance_sensors_msg, NULL));
         }

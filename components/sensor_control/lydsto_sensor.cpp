@@ -3,7 +3,6 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include <cinttypes>
-#include <limits>
 
 static const char* TAG = "Lydsto_Sensor";
 
@@ -55,27 +54,15 @@ bool LydstoSensorArray::update_readings(std::vector<SensorCommon::Reading>& read
             continue;
         }
 
-        float min_distance_cm = std::numeric_limits<float>::max();
-        for (const auto& p : result.points) {
-            if (!p.valid) {
-                continue;
-            }
-
-            const float point_cm = static_cast<float>(p.distance_mm) / 10.0f;
-            if (point_cm < min_distance_cm) {
-                min_distance_cm = point_cm;
-            }
-        }
-
-        if (min_distance_cm < std::numeric_limits<float>::max()) {
-            reading.distance_cm = min_distance_cm;
-            reading.valid = (min_distance_cm >= SensorCommon::MIN_DISTANCE_CM &&
-                             min_distance_cm <= SensorCommon::MAX_DISTANCE_CM);
+        if (result.valid) {
+            reading.distance_cm = result.distance_cm;
+            reading.valid = (result.distance_cm >= SensorCommon::MIN_DISTANCE_CM &&
+                             result.distance_cm <= SensorCommon::MAX_DISTANCE_CM);
             reading.status = reading.valid ? 0 : 2;
             reading.timestamp_us = result.timestamp_us;
             any_new_data = any_new_data || reading.valid;
         } else {
-            reading.status = 3; // no valid points in frame
+            reading.status = result.status;
         }
     }
 
