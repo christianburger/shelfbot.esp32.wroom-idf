@@ -3,6 +3,7 @@
 #include "esp_log.h"
 #include "esp_timer.h"
 #include "driver/ledc.h"
+#include <inttypes.h>
 #include <algorithm>
 #include <cmath>
 
@@ -66,18 +67,17 @@ bool LydstoLidarArray::init(const LydstoLidarConfig& cfg) {
 }
 
 bool LydstoLidarArray::setup_uart_() {
-    const uart_config_t uart_cfg = {
-        .baud_rate = cfg_.baud_rate,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .rx_flow_ctrl_thresh = 0,
-        .source_clk = UART_SCLK_DEFAULT,
+    uart_config_t uart_cfg = {};
+    uart_cfg.baud_rate = cfg_.baud_rate;
+    uart_cfg.data_bits = UART_DATA_8_BITS;
+    uart_cfg.parity = UART_PARITY_DISABLE;
+    uart_cfg.stop_bits = UART_STOP_BITS_1;
+    uart_cfg.flow_ctrl = UART_HW_FLOWCTRL_DISABLE;
+    uart_cfg.rx_flow_ctrl_thresh = 0;
+    uart_cfg.source_clk = UART_SCLK_DEFAULT;
 #if SOC_UART_SUPPORT_FSM_TX_WAIT_SEND
-        .flags = 0,
+    uart_cfg.flags = 0;
 #endif
-    };
 
     ESP_ERROR_CHECK_WITHOUT_ABORT(uart_param_config(cfg_.uart_port, &uart_cfg));
 
@@ -107,14 +107,12 @@ bool LydstoLidarArray::setup_uart_() {
 }
 
 bool LydstoLidarArray::setup_pwm_() {
-    ledc_timer_config_t timer_cfg = {
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .duty_resolution = LEDC_TIMER_10_BIT,
-        .timer_num = static_cast<ledc_timer_t>(ledc_timer_),
-        .freq_hz = static_cast<int>(cfg_.pwm_frequency_hz),
-        .clk_cfg = LEDC_AUTO_CLK,
-        .deconfigure = false,
-    };
+    ledc_timer_config_t timer_cfg = {};
+    timer_cfg.speed_mode = LEDC_LOW_SPEED_MODE;
+    timer_cfg.duty_resolution = LEDC_TIMER_10_BIT;
+    timer_cfg.timer_num = static_cast<ledc_timer_t>(ledc_timer_);
+    timer_cfg.freq_hz = cfg_.pwm_frequency_hz;
+    timer_cfg.clk_cfg = LEDC_AUTO_CLK;
 
     esp_err_t ret = ledc_timer_config(&timer_cfg);
     if (ret != ESP_OK) {
@@ -125,17 +123,14 @@ bool LydstoLidarArray::setup_pwm_() {
     uint32_t max_duty = (1u << LEDC_TIMER_10_BIT) - 1u;
     uint32_t duty = static_cast<uint32_t>(std::clamp(cfg_.pwm_duty_cycle, 0.0f, 1.0f) * max_duty);
 
-    ledc_channel_config_t ch_cfg = {
-        .gpio_num = cfg_.pwm_pin,
-        .speed_mode = LEDC_LOW_SPEED_MODE,
-        .channel = static_cast<ledc_channel_t>(ledc_channel_),
-        .intr_type = LEDC_INTR_DISABLE,
-        .timer_sel = static_cast<ledc_timer_t>(ledc_timer_),
-        .duty = duty,
-        .hpoint = 0,
-        .sleep_mode = LEDC_SLEEP_MODE_NO_ALIVE_NO_PD,
-        .flags = {.output_invert = 0},
-    };
+    ledc_channel_config_t ch_cfg = {};
+    ch_cfg.gpio_num = cfg_.pwm_pin;
+    ch_cfg.speed_mode = LEDC_LOW_SPEED_MODE;
+    ch_cfg.channel = static_cast<ledc_channel_t>(ledc_channel_);
+    ch_cfg.intr_type = LEDC_INTR_DISABLE;
+    ch_cfg.timer_sel = static_cast<ledc_timer_t>(ledc_timer_);
+    ch_cfg.duty = duty;
+    ch_cfg.hpoint = 0;
 
     ret = ledc_channel_config(&ch_cfg);
     if (ret != ESP_OK) {
@@ -143,7 +138,7 @@ bool LydstoLidarArray::setup_pwm_() {
         return false;
     }
 
-    ESP_LOGI(TAG, "PWM speed control enabled at %u Hz duty=%.1f%%",
+    ESP_LOGI(TAG, "PWM speed control enabled at %" PRIu32 " Hz duty=%.1f%%",
              cfg_.pwm_frequency_hz, cfg_.pwm_duty_cycle * 100.0f);
     return true;
 }
@@ -327,7 +322,7 @@ bool LydstoLidarManager::start_reading_task(uint32_t read_interval_ms, UBaseType
         return false;
     }
 
-    ESP_LOGI(TAG, "Lydsto LiDAR reading task started (interval=%u ms)", read_interval_ms);
+    ESP_LOGI(TAG, "Lydsto LiDAR reading task started (interval=%" PRIu32 " ms)", read_interval_ms);
     return true;
 }
 
