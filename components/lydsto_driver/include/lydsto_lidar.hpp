@@ -43,12 +43,15 @@ public:
         uint32_t uart_read_timeout_ms;
 
         bool enable_external_speed_control;
-        uint32_t pwm_frequency_hz;
-        float pwm_duty_cycle;
+        uint32_t pwm_frequency_hz;   // LD19 recommends 20-50kHz, 30kHz typical
+        float pwm_duty_cycle;        // External control trigger window: (45%, 55%)
 
         uint16_t min_distance_mm;
         uint16_t max_distance_mm;
         uint8_t min_intensity;
+
+        // If true and external PWM control is disabled, drive PWM pin low per LD19 guidance.
+        bool ground_pwm_when_internal;
     };
 
     explicit LydstoLidar(const Config& config);

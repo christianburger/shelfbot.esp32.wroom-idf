@@ -141,6 +141,30 @@ struct LydstoLidar::Impl {
         return true;
     }
 
+    bool ground_pwm_pin() {
+        gpio_config_t io_cfg = {};
+        io_cfg.pin_bit_mask = (1ULL << static_cast<uint64_t>(config.pwm_pin));
+        io_cfg.mode = GPIO_MODE_OUTPUT;
+        io_cfg.pull_up_en = GPIO_PULLUP_DISABLE;
+        io_cfg.pull_down_en = GPIO_PULLDOWN_DISABLE;
+        io_cfg.intr_type = GPIO_INTR_DISABLE;
+
+        esp_err_t ret = gpio_config(&io_cfg);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "gpio_config(pwm low) failed: %s", esp_err_to_name(ret));
+            return false;
+        }
+
+        ret = gpio_set_level(config.pwm_pin, 0);
+        if (ret != ESP_OK) {
+            ESP_LOGE(TAG, "gpio_set_level(pwm low) failed: %s", esp_err_to_name(ret));
+            return false;
+        }
+
+        ESP_LOGI(TAG, "PWM pin forced low for internal speed control");
+        return true;
+    }
+
     bool ingest_uart() {
         size_t available = 0;
         esp_err_t ret = uart_get_buffered_data_len(config.uart_port, &available);
@@ -261,6 +285,12 @@ const char* LydstoLidar::init() {
     if (pimpl_->config.enable_external_speed_control && !pimpl_->setup_pwm()) {
         return "PWM setup failed";
     }
+    if (!pimpl_->config.enable_external_speed_control &&
+        pimpl_->config.ground_pwm_when_internal &&
+        pimpl_->config.pwm_pin != GPIO_NUM_NC &&
+        !pimpl_->ground_pwm_pin()) {
+        return "PWM low-level setup failed";
+    }
 
     pimpl_->initialized = true;
     ESP_LOGI(TAG, "Initialized (uart=%d baud=%d rx=%d tx=%d pwm=%d)",
@@ -328,8 +358,9 @@ LydstoLidar::Config lydsto_default_config(uart_port_t uart_port,
         .enable_external_speed_control = false,
         .pwm_frequency_hz = 30000,
         .pwm_duty_cycle = 0.50f,
-        .min_distance_mm = 150,
-        .max_distance_mm = 8000,
+        .min_distance_mm = 20,
+        .max_distance_mm = 12000,
         .min_intensity = 1,
+        .ground_pwm_when_internal = true,
     };
 }
