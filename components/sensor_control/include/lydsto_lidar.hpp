@@ -10,12 +10,18 @@
 #include "freertos/semphr.h"
 #include "freertos/task.h"
 
+// ESP32-WROOM-32 DevKitC (38-pin) default wiring for Lydsto LD-series modules:
+// - LiDAR TX  -> ESP32 RX (UART2 RXD, GPIO16)
+// - LiDAR PWM -> ESP32 PWM-capable output (GPIO17)
+static constexpr gpio_num_t LYDSTO_LIDAR_ESP32_RX_PIN = GPIO_NUM_16;
+static constexpr gpio_num_t LYDSTO_LIDAR_ESP32_PWM_PIN = GPIO_NUM_17;
+
 struct LydstoLidarConfig {
     uart_port_t uart_port = UART_NUM_1;
     int baud_rate = 230400;
-    gpio_num_t rx_pin = GPIO_NUM_16;
+    gpio_num_t rx_pin = LYDSTO_LIDAR_ESP32_RX_PIN;
     gpio_num_t tx_pin = GPIO_NUM_NC;
-    gpio_num_t pwm_pin = GPIO_NUM_17;
+    gpio_num_t pwm_pin = LYDSTO_LIDAR_ESP32_PWM_PIN;
     uint32_t uart_rx_buffer_size = 4096;
     uint32_t uart_read_timeout_ms = 20;
 
