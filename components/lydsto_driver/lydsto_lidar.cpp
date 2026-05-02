@@ -361,6 +361,6 @@ LydstoLidar::Config lydsto_default_config(uart_port_t uart_port,
         .min_distance_mm = 20,
         .max_distance_mm = 12000,
         .min_intensity = 1,
-        .ground_pwm_when_internal = true,
+        .ground_pwm_when_internal = (pwm_pin != GPIO_NUM_NC),
     };
 }
