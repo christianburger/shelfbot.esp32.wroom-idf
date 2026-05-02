@@ -15,6 +15,7 @@ static const char* TAG = "sensor_control";
 const float COLLISION_THRESHOLD_CM = 2.0;
 static int64_t last_emergency_stop_time_us = 0;
 static const int64_t EMERGENCY_STOP_COOLDOWN_US = 500000; // 500ms cooldown
+static constexpr bool ENABLE_TOF_SENSORS = false; // Disabled when Lydsto LiDAR mode is active
 
 
 // --- Global Queues ---
@@ -65,7 +66,7 @@ static void sensor_reader_task(void* arg) {
     }
 
     // Read ToF Sensors
-    if (ToFSensorManager::instance().get_latest_readings(tof_readings)) {
+    if (ENABLE_TOF_SENSORS && ToFSensorManager::instance().get_latest_readings(tof_readings)) {
       for (size_t i = 0; i < tof_readings.size() && i < NUM_TOF_SENSORS; i++) {
         packet.tof_distances_cm[i] = tof_readings[i].distance_cm;
         packet.tof_valid[i] = tof_readings[i].valid;
@@ -165,19 +166,23 @@ void sensor_control_init() {
   }
 
   // Configure ToF Sensors
-  ToFSensorConfig tof_configs[NUM_TOF_SENSORS] = {
-    {
-      .i2c_port = I2C_NUM_0,
-      .i2c_address = 0x29,
-      .sda_pin = GPIO_NUM_21,
-      .scl_pin = GPIO_NUM_22,
-      .xshut_pin = GPIO_NUM_25,
-      .io_2v8 = true
-    }
-  };
+  if (ENABLE_TOF_SENSORS) {
+    ToFSensorConfig tof_configs[NUM_TOF_SENSORS] = {
+      {
+        .i2c_port = I2C_NUM_0,
+        .i2c_address = 0x29,
+        .sda_pin = GPIO_NUM_21,
+        .scl_pin = GPIO_NUM_22,
+        .xshut_pin = GPIO_NUM_25,
+        .io_2v8 = true
+      }
+    };
 
-  if (!ToFSensorManager::instance().configure(tof_configs, NUM_TOF_SENSORS)) {
-    ESP_LOGE(TAG, "Failed to configure ToF sensors");
+    if (!ToFSensorManager::instance().configure(tof_configs, NUM_TOF_SENSORS)) {
+      ESP_LOGE(TAG, "Failed to configure ToF sensors");
+    }
+  } else {
+    ESP_LOGI(TAG, "ToF sensors disabled (Lydsto LiDAR mode)");
   }
 
   // Configure Lydsto LiDAR sensor (TX-only UART stream + optional PWM control)
@@ -205,7 +210,7 @@ void sensor_control_start_task() {
   }
 
   // Start ToF reading task
-  if (!ToFSensorManager::instance().start_reading_task(100, 5)) {
+  if (ENABLE_TOF_SENSORS && !ToFSensorManager::instance().start_reading_task(100, 5)) {
     ESP_LOGE(TAG, "Failed to start ToF reading task");
   }
 
