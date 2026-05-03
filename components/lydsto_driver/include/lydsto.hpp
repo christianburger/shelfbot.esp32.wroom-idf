@@ -1,27 +1,13 @@
 #pragma once
 #include <idf_c_includes.hpp>
-#include "duart_modbus.hpp"
 
-// ═══════════════════════════════════════════════════════════════
-// LYDSTO_MODBUS DRIVER CONFIGURATION - EDIT ALL SETTINGS HERE
-// ═══════════════════════════════════════════════════════════════
+// LYDSTO LDS02RR UART DRIVER CONFIGURATION
 #define LYDSTO_UART_PORT      UART_NUM_1
 #define LYDSTO_TX_PIN         GPIO_NUM_17
 #define LYDSTO_RX_PIN         GPIO_NUM_16
 #define LYDSTO_BAUD_RATE      115200
-#define LYDSTO_SLAVE_ADDR     0x01
 #define LYDSTO_TIMEOUT_MS     500
-#define LYDSTO_RANGING_MODE   1  // 0=High Precision (30ms, 1.3m), 1=Long Distance (200ms, 4.0m)
-#define LYDSTO_CONTINUOUS     true
-// ═══════════════════════════════════════════════════════════════
 
-/**
- * @brief LYDSTO ToF Driver - Simple and Explicit Implementation
- *
- * Communicates via Modbus/UART protocol (TOF400F module)
- * All configuration is defined above in #defines.
- * No external configuration accepted.
- */
 class LYDSTO_Driver {
 public:
     struct MeasurementResult {
@@ -32,11 +18,9 @@ public:
         int64_t  timestamp_us;
     };
 
-    // Constructor - uses #define configuration
     LYDSTO_Driver();
     ~LYDSTO_Driver();
 
-    // ── Standardized Interface Methods ──
     const char* configure();
     const char* init();
     const char* setup();
@@ -45,60 +29,29 @@ public:
     bool read_sensor(MeasurementResult& result);
     bool isReady() const;
 
-    // ── Support operations ──
     void setTimeout(uint16_t timeout_ms);
     bool timeoutOccurred();
 
-    // Non-copyable
     LYDSTO_Driver(const LYDSTO_Driver&) = delete;
     LYDSTO_Driver& operator=(const LYDSTO_Driver&) = delete;
 
 private:
-    // ── Configuration (from #defines) ──
+    static constexpr uint8_t PACKET_LEN = 22;
+    static constexpr uint8_t COMMAND = 0xFA;
+    static constexpr uint8_t INDEX_LO = 0xA0;
+
     uart_port_t uart_port_;
-    gpio_num_t  uart_tx_pin_;
-    gpio_num_t  uart_rx_pin_;
-    uint32_t    baud_rate_;
-    uint8_t     modbus_slave_address_;
-    uint16_t    timeout_ms_;
-    uint8_t     ranging_mode_;  // 0=High Precision, 1=Long Distance
-    bool        enable_continuous_;
+    gpio_num_t uart_tx_pin_;
+    gpio_num_t uart_rx_pin_;
+    uint32_t baud_rate_;
+    uint16_t timeout_ms_;
 
-    // ── Hardware handle ──
-    DuartModbus* modbus_;
-
-    // ── State ──
     bool initialized_;
     bool timeout_occurred_;
 
-    // ── TOF400F Register addresses ──
-    static constexpr uint16_t REG_SPECIAL                = 0x0001;
-    static constexpr uint16_t REG_DEVICE_ADDR            = 0x0002;
-    static constexpr uint16_t REG_BAUD_RATE              = 0x0003;
-    static constexpr uint16_t REG_RANGE_MODE             = 0x0004;
-    static constexpr uint16_t REG_CONTINUOUS_OUTPUT      = 0x0005;
-    static constexpr uint16_t REG_LOAD_CALIBRATION       = 0x0006;
-    static constexpr uint16_t REG_OFFSET_CORRECTION      = 0x0007;
-    static constexpr uint16_t REG_XTALK_CORRECTION       = 0x0008;
-    static constexpr uint16_t REG_DISABLE_IIC            = 0x0009;
-    static constexpr uint16_t REG_MEASUREMENT            = 0x0010;
-    static constexpr uint16_t REG_OFFSET_CALIBRATION     = 0x0020;
-    static constexpr uint16_t REG_XTALK_CALIBRATION      = 0x0021;
-
-    // ── Initialization helpers ──
-    const char* initModbus();
-    const char* testCommunication();
-    const char* readCurrentConfiguration();
-    const char* configureRangingMode();
-    const char* configureContinuousMode();
-    const char* verifyConfiguration();
-
-    // ── Helper functions ──
-    void logModbusResponse(const char* operation, const DuartModbus::ModbusResponse& response);
+    bool readPacket(uint8_t* packet);
+    bool validPacket(const uint8_t* packet) const;
+    bool extractMinDistance(const uint8_t* packet, uint16_t& min_mm) const;
 };
 
-// ═══════════════════════════════════════════════════════════════
-// TYPEDEF FOR TOF_SENSOR INTERFACE
-// ═══════════════════════════════════════════════════════════════
 using TofDriver = LYDSTO_Driver;
-// ═══════════════════════════════════════════════════════════════
