@@ -1,12 +1,12 @@
 #pragma once
 #include <idf_c_includes.hpp>
 
-// LYDSTO LDS02RR UART DRIVER CONFIGURATION (from sdkconfig)
-#define LYDSTO_UART_PORT      static_cast<uart_port_t>(CONFIG_LYDSTO_UART_PORT)
-#define LYDSTO_TX_PIN         static_cast<gpio_num_t>(CONFIG_LYDSTO_TX_PIN)
-#define LYDSTO_RX_PIN         static_cast<gpio_num_t>(CONFIG_LYDSTO_RX_PIN)
-#define LYDSTO_BAUD_RATE      CONFIG_LYDSTO_BAUD_RATE
-#define LYDSTO_TIMEOUT_MS     CONFIG_LYDSTO_TIMEOUT_MS
+// LYDSTO LDS02RR UART DRIVER CONFIGURATION (ESP32-WROOM DevKitC 38-pin)
+#define LYDSTO_UART_PORT      UART_NUM_2
+#define LYDSTO_TX_PIN         GPIO_NUM_17
+#define LYDSTO_RX_PIN         GPIO_NUM_16
+#define LYDSTO_BAUD_RATE      115200
+#define LYDSTO_TIMEOUT_MS     500
 
 class LYDSTO_Driver {
 public:
