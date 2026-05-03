@@ -10,6 +10,7 @@
 #include "sensor_manager.hpp"
 #include "sensor_common.hpp"
 #include "i2c_scanner.hpp"
+#include "motor_control.hpp"
 #include <string>
 #include <vector>
 
@@ -42,6 +43,9 @@ private:
   static esp_err_t ultrasonic_handler(httpd_req_t* req);
   static esp_err_t sensors_handler(httpd_req_t* req);
   static esp_err_t health_handler(httpd_req_t* req);
+  static esp_err_t motor_page_handler(httpd_req_t* req);
+  static esp_err_t motor_status_handler(httpd_req_t* req);
+  static esp_err_t motor_set_handler(httpd_req_t* req);
 
   // Helper functions
   static std::string get_sensor_status_text(const SensorCommon::TofMeasurement& measurement);
