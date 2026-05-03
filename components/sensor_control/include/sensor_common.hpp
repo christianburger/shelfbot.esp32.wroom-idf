@@ -47,7 +47,7 @@ namespace SensorCommon {
     uint8_t health;       // 0=unknown, 1=ok, >1 degraded/error
 
     LidarMeasurement() : distance_mm(0), active(false), valid(false), status(0),
-                         timestamp_us(0), timeout_occurred(false) {}
+                         timestamp_us(0), timeout_occurred(false), health(0) {}
 
     float distance_cm() const { return distance_mm / 10.0f; }
   };
