@@ -45,6 +45,7 @@ private:
 
   // Helper functions
   static std::string get_sensor_status_text(const SensorCommon::TofMeasurement& measurement);
+  static std::string get_sensor_status_text(const SensorCommon::LidarMeasurement& measurement);
   static cJSON* create_sensor_json(const SensorCommon::SensorDataPacket& sensor_data);
   static cJSON* create_ultrasonic_json(const SensorCommon::SensorDataPacket& sensor_data);
   static cJSON* create_tof_json(const SensorCommon::SensorDataPacket& sensor_data);
