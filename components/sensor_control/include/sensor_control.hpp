@@ -37,6 +37,16 @@ public:
         };
 
         TofConfig tof_configs[SensorCommon::NUM_TOF_SENSORS];
+        SensorDriverType tof_driver = SensorDriverType::VL53L1;
+
+        struct LidarConfig {
+            bool enabled = false;
+            SensorDriverType driver = SensorDriverType::LYDSTO;
+            int uart_port = 1;
+            int uart_tx_pin = -1;
+            int uart_rx_pin = -1;
+            uint32_t baud_rate = 115200;
+        } lidar_config;
 
         struct LidarConfig {
             bool enabled = false;
@@ -63,6 +73,7 @@ public:
     // Reading methods
     esp_err_t read_ultrasonic(std::vector<uint16_t>& distances);
     esp_err_t read_tof(SensorCommon::TofMeasurement results[SensorCommon::NUM_TOF_SENSORS]);
+    esp_err_t read_lidar(SensorCommon::LidarMeasurement& result);
     esp_err_t read_tof_single(uint8_t sensor_index, SensorCommon::TofMeasurement& result);
 
     esp_err_t read_all(std::vector<uint16_t>& ultrasonic_distances,
@@ -79,11 +90,13 @@ public:
     // Status
     size_t get_ultrasonic_count() const;
     bool is_tof_ready(uint8_t sensor_index = 0) const;
+    bool is_lidar_ready() const;
     bool is_ultrasonic_ready() const;
 
     // Diagnostics
     esp_err_t self_test();
     bool tof_probe(uint8_t sensor_index = 0);
+    uint8_t lidar_health() const;
 
     // Get latest data for ROS publishing
     bool get_latest_data(SensorCommon::SensorDataPacket* data);

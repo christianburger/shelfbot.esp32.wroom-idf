@@ -118,6 +118,7 @@ void SensorManager::initialize(const SensorControl::Config& config) {
     // Initialize the latest_data_ structure
     for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS; i++) {
         latest_data_.ultrasonic_readings[i] = SensorCommon::Reading();
+        latest_data_.ultrasonic_readings[i].active = (i < static_cast<int>(config.ultrasonic_configs.size()));
     }
     for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
         latest_data_.tof_measurements[i] = SensorCommon::TofMeasurement();

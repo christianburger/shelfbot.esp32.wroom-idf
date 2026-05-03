@@ -9,5 +9,6 @@ esp_err_t LidarSensor::read(SensorCommon::LidarMeasurement& out) {
   out.status = m.status;
   out.timestamp_us = m.timestamp_us;
   out.timeout_occurred = m.timeout_occurred;
+  out.health = out.valid ? 1 : 2;
   return e;
 }

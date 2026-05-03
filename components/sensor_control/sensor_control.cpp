@@ -170,6 +170,21 @@ esp_err_t SensorControl::update_lidar_measurement_from_tof() {
     return ESP_OK;
 }
 
+esp_err_t SensorControl::update_lidar_measurement() {
+    latest_data_.lidar_measurement.active = config_.lidar_config.enabled;
+    if (!config_.lidar_config.enabled) {
+        latest_data_.lidar_measurement.valid = false;
+        latest_data_.lidar_measurement.status = 0;
+        return ESP_OK;
+    }
+
+    if (!lidar_sensor_) {
+        latest_data_.lidar_measurement.health = 2;
+        return ESP_ERR_INVALID_STATE;
+    }
+    return lidar_sensor_->read(latest_data_.lidar_measurement);
+}
+
 bool SensorControl::is_ready() const {
     bool ultrasonic_ready = config_.ultrasonic_configs.empty() ||
                            (ultrasonic_array_ != nullptr);
@@ -207,6 +222,13 @@ esp_err_t SensorControl::read_tof(SensorCommon::TofMeasurement results[SensorCom
     }
 
     return tof_sensor_->read_all(results);
+}
+
+esp_err_t SensorControl::read_lidar(SensorCommon::LidarMeasurement& result) {
+    if (!config_.lidar_config.enabled || !lidar_sensor_) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return lidar_sensor_->read(result);
 }
 
 esp_err_t SensorControl::read_tof_single(uint8_t sensor_index, SensorCommon::TofMeasurement& result) {
@@ -385,6 +407,10 @@ bool SensorControl::is_ultrasonic_ready() const {
     return ultrasonic_array_ != nullptr;
 }
 
+bool SensorControl::is_lidar_ready() const {
+    return config_.lidar_config.enabled && lidar_sensor_ && lidar_sensor_->is_ready();
+}
+
 esp_err_t SensorControl::self_test() {
     esp_err_t overall_result = ESP_OK;
 
@@ -404,6 +430,10 @@ esp_err_t SensorControl::self_test() {
 
 bool SensorControl::tof_probe(uint8_t sensor_index) {
     return tof_sensor_ && tof_sensor_->probe(sensor_index);
+}
+
+uint8_t SensorControl::lidar_health() const {
+    return latest_data_.lidar_measurement.health;
 }
 
 bool SensorControl::get_latest_data(SensorCommon::SensorDataPacket* data) {
