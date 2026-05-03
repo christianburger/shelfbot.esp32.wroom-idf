@@ -38,6 +38,7 @@ private:
   // HTTP request handlers
   static esp_err_t root_handler(httpd_req_t* req);
   static esp_err_t tof_handler(httpd_req_t* req);
+  static esp_err_t lidar_handler(httpd_req_t* req);
   static esp_err_t ultrasonic_handler(httpd_req_t* req);
   static esp_err_t sensors_handler(httpd_req_t* req);
   static esp_err_t health_handler(httpd_req_t* req);

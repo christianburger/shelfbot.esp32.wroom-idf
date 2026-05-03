@@ -84,6 +84,15 @@ esp_err_t HttpServer::register_uri_handlers() {
     };
     httpd_register_uri_handler(server_, &tof_uri);
 
+    // LiDAR endpoint
+    httpd_uri_t lidar_uri = {
+        .uri = "/api/lidar",
+        .method = HTTP_GET,
+        .handler = lidar_handler,
+        .user_ctx = nullptr
+    };
+    httpd_register_uri_handler(server_, &lidar_uri);
+
     // Ultrasonic sensors endpoint
     httpd_uri_t ultrasonic_uri = {
         .uri = "/api/ultrasonic",
@@ -114,6 +123,7 @@ esp_err_t HttpServer::register_uri_handlers() {
     // CORS OPTIONS handlers
     const char* cors_endpoints[] = {
         "/api/tof",
+        "/api/lidar",
         "/api/ultrasonic",
         "/api/sensors",
         "/api/health",
@@ -166,6 +176,12 @@ esp_err_t HttpServer::root_handler(httpd_req_t* req) {
                 <h3><a href="/api/tof">ToF Sensor</a></h3>
                 <code>GET /api/tof</code>
                 <p>Get data from Time-of-Flight sensor</p>
+            </div>
+
+            <div class="endpoint">
+                <h3><a href="/api/lidar">LiDAR Debug</a></h3>
+                <code>GET /api/lidar</code>
+                <p>Get primary LiDAR distance from ToF stream</p>
             </div>
 
             <div class="endpoint">
@@ -293,6 +309,18 @@ cJSON* HttpServer::create_sensor_json(const SensorCommon::SensorDataPacket& sens
     cJSON* tof_json = create_tof_json(sensor_data);
     cJSON_AddItemToObject(root, "tof", tof_json);
 
+    const auto& lidar = sensor_data.tof_measurements[0];
+    cJSON* lidar_json = cJSON_CreateObject();
+    cJSON_AddStringToObject(lidar_json, "source", "tof_measurements[0]");
+    cJSON_AddBoolToObject(lidar_json, "valid", lidar.valid);
+    cJSON_AddNumberToObject(lidar_json, "distance_mm", lidar.distance_mm);
+    cJSON_AddNumberToObject(lidar_json, "distance_cm", lidar.distance_cm());
+    cJSON_AddNumberToObject(lidar_json, "status", lidar.status);
+    cJSON_AddStringToObject(lidar_json, "status_text", get_sensor_status_text(lidar).c_str());
+    cJSON_AddNumberToObject(lidar_json, "timestamp_us", lidar.timestamp_us);
+    cJSON_AddBoolToObject(lidar_json, "timeout_occurred", lidar.timeout_occurred);
+    cJSON_AddItemToObject(root, "lidar", lidar_json);
+
     return root;
 }
 
@@ -334,6 +362,45 @@ esp_err_t HttpServer::tof_handler(httpd_req_t* req) {
         cJSON_Delete(root);
         return httpd_resp_send_500(req);
     }
+}
+
+esp_err_t HttpServer::lidar_handler(httpd_req_t* req) {
+    SensorCommon::SensorDataPacket sensor_data;
+    if (!SensorManager::get_instance().get_latest_data(sensor_data)) {
+        cJSON* root = cJSON_CreateObject();
+        cJSON_AddStringToObject(root, "error", "No sensor data available");
+        cJSON_AddBoolToObject(root, "available", false);
+        char* json_str = cJSON_PrintUnformatted(root);
+        if (json_str) {
+            httpd_resp_set_type(req, "application/json");
+            httpd_resp_sendstr(req, json_str);
+            free(json_str);
+        }
+        cJSON_Delete(root);
+        return ESP_OK;
+    }
+
+    const auto& m = sensor_data.tof_measurements[0];
+    cJSON* root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "source", "tof_measurements[0]");
+    cJSON_AddBoolToObject(root, "valid", m.valid);
+    cJSON_AddNumberToObject(root, "distance_mm", m.distance_mm);
+    cJSON_AddNumberToObject(root, "distance_cm", m.distance_cm());
+    cJSON_AddNumberToObject(root, "status", m.status);
+    cJSON_AddStringToObject(root, "status_text", get_sensor_status_text(m).c_str());
+    cJSON_AddNumberToObject(root, "timestamp_us", m.timestamp_us);
+    cJSON_AddBoolToObject(root, "timeout_occurred", m.timeout_occurred);
+
+    char* json_str = cJSON_PrintUnformatted(root);
+    if (json_str) {
+        httpd_resp_set_type(req, "application/json");
+        esp_err_t ret = httpd_resp_sendstr(req, json_str);
+        free(json_str);
+        cJSON_Delete(root);
+        return ret;
+    }
+    cJSON_Delete(root);
+    return ESP_FAIL;
 }
 
 esp_err_t HttpServer::ultrasonic_handler(httpd_req_t* req) {
