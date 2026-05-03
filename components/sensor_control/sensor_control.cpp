@@ -12,7 +12,6 @@ SensorControl::SensorControl(const Config& config)
     : config_(config),
       ultrasonic_array_(nullptr),
       tof_sensor_(nullptr),
-      lidar_sensor_(nullptr),
       initialized_(false),
       continuous_mode_(false),
       continuous_task_handle_(nullptr),

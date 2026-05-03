@@ -6,7 +6,6 @@
 // Forward declarations
 class UltrasonicSensorArray;
 class TofSensor;
-class LidarSensor;
 
 class SensorControl {
 public:
@@ -80,7 +79,6 @@ private:
     // State
     std::unique_ptr<UltrasonicSensorArray> ultrasonic_array_;
     std::unique_ptr<TofSensor> tof_sensor_;
-    std::unique_ptr<LidarSensor> lidar_sensor_;
     bool initialized_;
     bool continuous_mode_;
     TaskHandle_t continuous_task_handle_;
