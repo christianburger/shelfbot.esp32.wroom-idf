@@ -193,11 +193,11 @@ void sensor_control_init() {
       .driver_config = lydsto_default_config(
         UART_NUM_1,
         GPIO_NUM_18, // LiDAR TX -> ESP32 RX (free, input-capable)
-        GPIO_NUM_NC  // LiDAR PWM not driven by ESP32; tie LiDAR PWM to GND for internal speed control
+        GPIO_NUM_19  // LiDAR PWM control/output (free output pin)
       ),
     }
   };
-  lidar_configs[0].driver_config.pwm_mode = LydstoLidar::PwmMode::NOT_CONNECTED;
+  lidar_configs[0].driver_config.pwm_mode = LydstoLidar::PwmMode::EXTERNAL_PWM_CONTROL;
 
   if (SENSOR_FEATURES.enable_lidar &&
       !LidarSensorManager::instance().configure(lidar_configs, NUM_LYDSTO_SENSORS)) {
