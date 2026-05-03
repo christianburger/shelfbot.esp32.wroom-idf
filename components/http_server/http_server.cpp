@@ -211,7 +211,7 @@ esp_err_t HttpServer::root_handler(httpd_req_t* req) {
         </html>
     )";
 
-    httpd_resp_set_type(req, "text/html");
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, html_response, strlen(html_response));
 }
 

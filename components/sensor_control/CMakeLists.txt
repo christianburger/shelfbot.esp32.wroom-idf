@@ -12,6 +12,7 @@ idf_component_register(
   vl53l0x_driver
   vl53l1_driver
   vl53l1_modbus_driver
+  lydsto_driver
   idf_includes
   firmware_version
   duart_modbus
