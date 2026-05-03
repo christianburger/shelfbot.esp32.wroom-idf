@@ -18,7 +18,7 @@ public:
     };
 
     struct Config {
-        enum class SensorDriverType : uint8_t {
+        enum class LidarDriverType : uint8_t {
             NONE = 0,
             LYDSTO,
             VL53L0X,
@@ -46,6 +46,12 @@ public:
             int uart_tx_pin = -1;
             int uart_rx_pin = -1;
             uint32_t baud_rate = 115200;
+        } lidar_config;
+
+        struct LidarConfig {
+            bool enabled = false;
+            LidarDriverType driver = LidarDriverType::NONE;
+            uint8_t tof_sensor_index = 0;
         } lidar_config;
 
         // Reading intervals
@@ -117,7 +123,7 @@ private:
     // Internal helpers
     esp_err_t initialize_ultrasonic();
     esp_err_t initialize_tof();
-    esp_err_t update_lidar_measurement();
+    esp_err_t update_lidar_measurement_from_tof();
 
     static const char* TAG;
 

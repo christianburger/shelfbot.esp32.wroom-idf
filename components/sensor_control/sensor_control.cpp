@@ -148,6 +148,28 @@ esp_err_t SensorControl::initialize() {
     return ESP_OK;
 }
 
+esp_err_t SensorControl::update_lidar_measurement_from_tof() {
+    latest_data_.lidar_measurement.active = config_.lidar_config.enabled;
+    if (!config_.lidar_config.enabled) {
+        latest_data_.lidar_measurement.valid = false;
+        latest_data_.lidar_measurement.status = 0;
+        return ESP_OK;
+    }
+
+    uint8_t idx = config_.lidar_config.tof_sensor_index;
+    if (idx >= SensorCommon::NUM_TOF_SENSORS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const auto& tof = latest_data_.tof_measurements[idx];
+    latest_data_.lidar_measurement.distance_mm = tof.distance_mm;
+    latest_data_.lidar_measurement.valid = tof.valid;
+    latest_data_.lidar_measurement.status = tof.status;
+    latest_data_.lidar_measurement.timestamp_us = tof.timestamp_us;
+    latest_data_.lidar_measurement.timeout_occurred = tof.timeout_occurred;
+    return ESP_OK;
+}
+
 esp_err_t SensorControl::update_lidar_measurement() {
     latest_data_.lidar_measurement.active = config_.lidar_config.enabled;
     if (!config_.lidar_config.enabled) {
@@ -269,7 +291,7 @@ void SensorControl::continuous_read_loop() {
             }
 
             latest_data_.timestamp_us = timestamp;
-            update_lidar_measurement();
+            update_lidar_measurement_from_tof();
 
             xSemaphoreGive(data_mutex_);
 
