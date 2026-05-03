@@ -3,8 +3,8 @@
 
 // LYDSTO LDS02RR UART DRIVER CONFIGURATION (ESP32-WROOM DevKitC 38-pin)
 #define LYDSTO_UART_PORT      UART_NUM_2
-#define LYDSTO_TX_PIN         GPIO_NUM_17
-#define LYDSTO_RX_PIN         GPIO_NUM_16
+#define LYDSTO_TX_PIN         UART_PIN_NO_CHANGE
+#define LYDSTO_RX_PIN         GPIO_NUM_3
 #define LYDSTO_BAUD_RATE      115200
 #define LYDSTO_TIMEOUT_MS     500
 
@@ -41,8 +41,8 @@ private:
     static constexpr uint8_t INDEX_LO = 0xA0;
 
     uart_port_t uart_port_;
-    gpio_num_t uart_tx_pin_;
-    gpio_num_t uart_rx_pin_;
+    int uart_tx_pin_;
+    int uart_rx_pin_;
     uint32_t baud_rate_;
     uint16_t timeout_ms_;
 
