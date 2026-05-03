@@ -3,6 +3,7 @@
 #include <esp_task_wdt.h>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
 
 const char* HttpServer::TAG = "HttpServer";
 
@@ -120,6 +121,30 @@ esp_err_t HttpServer::register_uri_handlers() {
     };
     httpd_register_uri_handler(server_, &health_uri);
 
+    httpd_uri_t motor_page_uri = {
+        .uri = "/motor.html",
+        .method = HTTP_GET,
+        .handler = motor_page_handler,
+        .user_ctx = nullptr
+    };
+    httpd_register_uri_handler(server_, &motor_page_uri);
+
+    httpd_uri_t motor_status_uri = {
+        .uri = "/api/motor/status",
+        .method = HTTP_GET,
+        .handler = motor_status_handler,
+        .user_ctx = nullptr
+    };
+    httpd_register_uri_handler(server_, &motor_status_uri);
+
+    httpd_uri_t motor_set_uri = {
+        .uri = "/api/motor/set",
+        .method = HTTP_POST,
+        .handler = motor_set_handler,
+        .user_ctx = nullptr
+    };
+    httpd_register_uri_handler(server_, &motor_set_uri);
+
     // CORS OPTIONS handlers
     const char* cors_endpoints[] = {
         "/api/tof",
@@ -127,6 +152,8 @@ esp_err_t HttpServer::register_uri_handlers() {
         "/api/ultrasonic",
         "/api/sensors",
         "/api/health",
+        "/api/motor/status",
+        "/api/motor/set",
     };
 
     for (const auto& endpoint : cors_endpoints) {
@@ -140,6 +167,63 @@ esp_err_t HttpServer::register_uri_handlers() {
     }
 
     return ESP_OK;
+}
+
+esp_err_t HttpServer::motor_page_handler(httpd_req_t* req) {
+    const char* page = R"HTML(
+<!doctype html><html><body><h2>Motor Control</h2>
+<p>Units align with micro-ROS: position_rad, velocity_rad_s.</p>
+<input id='idx' type='number' value='0'/><input id='pos' type='number' value='0'/><input id='vel' type='number' value='0'/>
+<button onclick='setMotor()'>Set</button><pre id='out'></pre>
+<script>
+async function load(){document.getElementById('out').textContent=JSON.stringify(await (await fetch('/api/motor/status')).json(),null,2);}
+async function setMotor(){const b={motor:+idx.value,position_rad:+pos.value,velocity_rad_s:+vel.value};await fetch('/api/motor/set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});load();}
+load();setInterval(load,1000);
+</script></body></html>)HTML";
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+}
+
+esp_err_t HttpServer::motor_status_handler(httpd_req_t* req) {
+    add_cors_headers(req);
+    cJSON* root = cJSON_CreateObject();
+    cJSON* motors = cJSON_CreateArray();
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        cJSON* m = cJSON_CreateObject();
+        cJSON_AddNumberToObject(m, "motor", i);
+        cJSON_AddNumberToObject(m, "position_rad", motor_control_get_position(i));
+        cJSON_AddNumberToObject(m, "velocity_rad_s", motor_control_get_velocity(i));
+        cJSON_AddBoolToObject(m, "running", motor_control_is_motor_running(i));
+        cJSON_AddItemToArray(motors, m);
+    }
+    cJSON_AddItemToObject(root, "motors", motors);
+    char* json = cJSON_PrintUnformatted(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+    cJSON_free(json);
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+esp_err_t HttpServer::motor_set_handler(httpd_req_t* req) {
+    add_cors_headers(req);
+    char buf[256];
+    int len = httpd_req_recv(req, buf, std::min((int)sizeof(buf) - 1, (int)req->content_len));
+    if (len <= 0) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid body");
+    buf[len] = '\0';
+    cJSON* body = cJSON_Parse(buf);
+    if (!body) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+    cJSON* motor = cJSON_GetObjectItem(body, "motor");
+    cJSON* pos = cJSON_GetObjectItem(body, "position_rad");
+    cJSON* vel = cJSON_GetObjectItem(body, "velocity_rad_s");
+    if (cJSON_IsNumber(motor)) {
+        uint8_t idx = (uint8_t)motor->valueint;
+        if (cJSON_IsNumber(pos)) motor_control_set_position(idx, pos->valuedouble);
+        if (cJSON_IsNumber(vel)) motor_control_set_velocity(idx, vel->valuedouble);
+    }
+    cJSON_Delete(body);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
 }
 
 // Handler implementations
