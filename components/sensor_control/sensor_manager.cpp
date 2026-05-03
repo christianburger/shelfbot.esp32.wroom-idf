@@ -1,5 +1,6 @@
 #include "include/sensor_manager.hpp"
 #include "include/sensor_control.hpp"
+#include "firmware_version.hpp"
 #include <sstream>
 
 static const char* TAG = "SensorManager";
@@ -15,6 +16,7 @@ void SensorManager::monitor_task(void* arg) {
 
 void SensorManager::monitor_loop() {
     ESP_LOGI(TAG, "Sensor monitor loop started (independent of network connectivity)");
+    uint32_t monitor_line_counter = 0;
 
     while (monitor_task_running_) {
         SensorCommon::SensorDataPacket snapshot;
@@ -40,6 +42,10 @@ void SensorManager::monitor_loop() {
                      snapshot.ultrasonic_readings[3].distance_cm,
                      tof_distance_stream.str().c_str(),
                      tof_valid_stream.str().c_str());
+            monitor_line_counter++;
+            if (monitor_line_counter % 40 == 0) {
+                ESP_LOGI(TAG, "Firmware Version (every 40 lines): %s", FirmwareVersion::get_version_string());
+            }
         } else {
             ESP_LOGW(TAG, "Sensor snapshot unavailable");
         }

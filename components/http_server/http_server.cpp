@@ -4,6 +4,7 @@
 #include <sstream>
 #include <iomanip>
 #include <algorithm>
+#include "firmware_version.hpp"
 
 const char* HttpServer::TAG = "HttpServer";
 
@@ -170,7 +171,7 @@ esp_err_t HttpServer::register_uri_handlers() {
 }
 
 esp_err_t HttpServer::motor_page_handler(httpd_req_t* req) {
-    const char* page = R"HTML(
+    std::string page = std::string(R"HTML(
 <!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
 <style>
 body{font-family:Inter,Arial;background:#0b1020;color:#e2e8f0;margin:0;padding:20px}
@@ -182,6 +183,7 @@ button{padding:8px 12px;border:0;border-radius:10px;background:#22c55e;color:#04
 .pill{padding:2px 8px;border-radius:999px;background:#1e293b;font-size:12px}
 </style></head><body>
 <div class='top'><h2>Motor Control Dashboard</h2><a href='/' style='color:#93c5fd'>← Main Dashboard</a></div>
+<div class='pill'>Firmware: )HTML") + FirmwareVersion::get_version_string() + R"HTML(</div>
 <p>Per-motor independent set/get using micro-ROS units: <b>position_rad</b> and <b>velocity_rad_s</b>.</p>
 <div class='grid' id='motors'></div>
 <script>
@@ -198,7 +200,7 @@ async function send(i){const b={motor:i,position_rad:+document.getElementById('p
 load(); setInterval(load,500);
 </script></body></html>)HTML";
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
+    return httpd_resp_send(req, page.c_str(), HTTPD_RESP_USE_STRLEN);
 }
 
 esp_err_t HttpServer::motor_status_handler(httpd_req_t* req) {
@@ -246,7 +248,7 @@ esp_err_t HttpServer::motor_set_handler(httpd_req_t* req) {
 // Handler implementations
 
 esp_err_t HttpServer::root_handler(httpd_req_t* req) {
-    const char* html_response = R"(
+    std::string html_response = std::string(R"(
         <!DOCTYPE html>
         <html>
         <head>
@@ -271,6 +273,7 @@ esp_err_t HttpServer::root_handler(httpd_req_t* req) {
             <div class="container">
                 <h1>🤖 Shelfbot Dashboard</h1>
                 <p class="subtitle">Jump to sensors, motor controls, and diagnostics.</p>
+                <p class="subtitle">Firmware: )") + FirmwareVersion::get_version_string() + R"(</p>
 
                 <div class="grid">
                     <div class="card"><h3>📦 Sensor Dashboard</h3><p><a href="/api/sensors">Open all sensors JSON</a></p><code>GET /api/sensors</code></div>
@@ -306,7 +309,7 @@ esp_err_t HttpServer::root_handler(httpd_req_t* req) {
     )";
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, html_response, strlen(html_response));
+    return httpd_resp_send(req, html_response.c_str(), HTTPD_RESP_USE_STRLEN);
 }
 
 std::string HttpServer::get_sensor_status_text(const SensorCommon::TofMeasurement& measurement) {
