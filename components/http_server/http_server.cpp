@@ -232,11 +232,20 @@ esp_err_t HttpServer::root_handler(httpd_req_t* req) {
 }
 
 std::string HttpServer::get_sensor_status_text(const SensorCommon::TofMeasurement& measurement) {
-    if (!measurement.valid) {
+    return get_sensor_status_text_impl(measurement.valid, measurement.status);
+}
+std::string HttpServer::get_sensor_status_text(const SensorCommon::LidarMeasurement& measurement) {
+    return get_sensor_status_text_impl(measurement.valid, measurement.status);
+}
+
+
+
+std::string HttpServer::get_sensor_status_text_impl(bool valid, uint8_t status) {
+    if (!valid) {
         return "invalid";
     }
 
-    switch (measurement.status) {
+    switch (status) {
         case 0: return "ok";
         case 1: return "sigma_fail";
         case 2: return "signal_fail";
