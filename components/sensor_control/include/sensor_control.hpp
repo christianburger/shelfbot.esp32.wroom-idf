@@ -2,11 +2,11 @@
 #pragma once
 #include <idf_c_includes.hpp>
 #include "sensor_common.hpp"
+#include "lidar_sensor.hpp"
 
 // Forward declarations
 class UltrasonicSensorArray;
 class TofSensor;
-class LidarSensor;
 
 class SensorControl {
 public:
