@@ -156,6 +156,14 @@
             </div>
             <button class="refresh-btn" onclick="updateHealth()">Refresh</button>
         </div>
+
+        <div class="status-card">
+            <h3>LiDAR Debug</h3>
+            <div class="status-value" id="lidarDistance">-- cm</div>
+            <div class="status-label" id="lidarStatus">Loading...</div>
+            <div style="margin-top:10px; font-size: 12px; word-break: break-all;" id="lidarDetails"></div>
+            <button class="refresh-btn" onclick="updateLidarDebug()">Refresh</button>
+        </div>
     </div>
 
     <div class='endpoint'>
@@ -268,11 +276,45 @@
             });
     }
 
+    function updateLidarDebug() {
+        fetch('/lidar_debug')
+            .then(r => r.json())
+            .then(data => {
+                if (!data.ok) {
+                    document.getElementById('lidarDistance').textContent = 'ERROR';
+                    document.getElementById('lidarStatus').textContent = data.error || 'Unavailable';
+                    return;
+                }
+
+                const decoded = data.decoded || {};
+                if (decoded.valid) {
+                    document.getElementById('lidarDistance').textContent = `${decoded.distance_cm.toFixed(1)} cm`;
+                } else {
+                    document.getElementById('lidarDistance').textContent = '-- cm';
+                }
+
+                document.getElementById('lidarStatus').textContent =
+                    `frames:${data.frames_parsed} crc_fail:${data.crc_failures} misses:${data.parse_misses}`;
+
+                const raw = data.last_raw_hex || '';
+                document.getElementById('lidarDetails').innerHTML =
+                    `<strong>Decoded:</strong> valid=${decoded.valid} status=${decoded.status} ` +
+                    `speed=${decoded.speed_dps} start=${decoded.start_angle_deg} end=${decoded.end_angle_deg}<br>` +
+                    `<strong>Raw (${data.last_raw_len}B):</strong> ${raw.substring(0, 220)}${raw.length > 220 ? '…' : ''}`;
+            })
+            .catch(err => {
+                document.getElementById('lidarDistance').textContent = 'OFFLINE';
+                document.getElementById('lidarStatus').textContent = 'Connection failed';
+                console.error('LiDAR debug fetch error:', err);
+            });
+    }
+
     function startAutoRefresh() {
         if (document.getElementById('autoRefresh').checked) {
             autoRefreshInterval = setInterval(() => {
                 updateToF();
                 updateHealth();
+                updateLidarDebug();
             }, 1000);
         } else {
             clearInterval(autoRefreshInterval);
@@ -282,9 +324,10 @@
     document.getElementById('autoRefresh').addEventListener('change', startAutoRefresh);
 
     document.addEventListener('DOMContentLoaded', () => {
-        createMotorControls();
-        updateToF();
-        updateHealth();
+    createMotorControls();
+    updateToF();
+    updateHealth();
+    updateLidarDebug();
         startAutoRefresh();
     });
 </script>

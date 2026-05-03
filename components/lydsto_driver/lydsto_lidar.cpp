@@ -5,6 +5,7 @@
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include <algorithm>
+#include <cstdio>
 #include <inttypes.h>
 
 static const char* TAG = "LydstoLidar";
@@ -53,6 +54,12 @@ struct LydstoLidar::Impl {
     Config config;
     bool initialized = false;
     bool uart_ready = false;
+    uint32_t frames_parsed = 0;
+    uint32_t crc_failures = 0;
+    uint32_t parse_misses = 0;
+    uint32_t last_raw_len = 0;
+    std::string last_raw_hex;
+    MeasurementResult last_decoded{};
 
     ledc_timer_t ledc_timer = LEDC_TIMER_1;
     ledc_channel_t ledc_channel = LEDC_CHANNEL_1;
@@ -191,6 +198,7 @@ struct LydstoLidar::Impl {
 
     bool parse_one_frame(MeasurementResult& result) {
         if (rx_buffer.size() < FRAME_SIZE) {
+            parse_misses++;
             return false;
         }
 
@@ -205,6 +213,7 @@ struct LydstoLidar::Impl {
 
         if (!found) {
             rx_buffer.clear();
+            parse_misses++;
             return false;
         }
 
@@ -212,12 +221,25 @@ struct LydstoLidar::Impl {
             rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + idx);
         }
         if (rx_buffer.size() < FRAME_SIZE) {
+            parse_misses++;
             return false;
         }
 
         const uint8_t* frame = rx_buffer.data();
+        last_raw_len = FRAME_SIZE;
+        char hexbuf[4];
+        last_raw_hex.clear();
+        last_raw_hex.reserve(FRAME_SIZE * 3);
+        for (size_t i = 0; i < FRAME_SIZE; ++i) {
+            std::snprintf(hexbuf, sizeof(hexbuf), "%02X", frame[i]);
+            last_raw_hex += hexbuf;
+            if (i + 1 < FRAME_SIZE) {
+                last_raw_hex += ' ';
+            }
+        }
         const bool crc_ok = (crc8(frame, FRAME_SIZE - 1) == frame[FRAME_SIZE - 1]);
         if (!crc_ok) {
+            crc_failures++;
             rx_buffer.erase(rx_buffer.begin());
             return false;
         }
@@ -260,6 +282,8 @@ struct LydstoLidar::Impl {
             result.status = 2;
         }
         rx_buffer.erase(rx_buffer.begin(), rx_buffer.begin() + FRAME_SIZE);
+        frames_parsed++;
+        last_decoded = result;
         return true;
     }
 };
@@ -332,6 +356,21 @@ bool LydstoLidar::readSingle(MeasurementResult& result) {
         result.distance_cm = 0.0f;
     }
     return ok;
+}
+
+LydstoLidar::Diagnostics LydstoLidar::getDiagnostics() const {
+    Diagnostics d{};
+    d.initialized = pimpl_ && pimpl_->initialized;
+    d.uart_ready = pimpl_ && pimpl_->uart_ready;
+    if (pimpl_) {
+        d.frames_parsed = pimpl_->frames_parsed;
+        d.crc_failures = pimpl_->crc_failures;
+        d.parse_misses = pimpl_->parse_misses;
+        d.last_raw_len = pimpl_->last_raw_len;
+        d.last_raw_hex = pimpl_->last_raw_hex;
+        d.last_decoded = pimpl_->last_decoded;
+    }
+    return d;
 }
 
 const char* LydstoLidar::selfTest() {

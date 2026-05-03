@@ -20,6 +20,7 @@ public:
 
     bool add_sensor(uint8_t index, const LidarSensorConfig& cfg);
     bool update_readings(std::vector<SensorCommon::Reading>& readings);
+    bool get_diagnostics(uint8_t index, LydstoLidar::Diagnostics& diag);
 
 private:
     std::vector<std::unique_ptr<LydstoLidar>> sensors_;
@@ -33,6 +34,7 @@ public:
     bool configure(const LidarSensorConfig* sensor_configs, uint8_t num_sensors);
     bool start_reading_task(uint32_t read_interval_ms, UBaseType_t priority);
     bool get_latest_readings(std::vector<SensorCommon::Reading>& readings);
+    bool get_diagnostics(LydstoLidar::Diagnostics& diag);
 
     void pause();
     void resume();

@@ -69,6 +69,14 @@ bool LidarSensorArray::update_readings(std::vector<SensorCommon::Reading>& readi
     return any_new_data;
 }
 
+bool LidarSensorArray::get_diagnostics(uint8_t index, LydstoLidar::Diagnostics& diag) {
+    if (index >= num_sensors_ || !sensors_[index]) {
+        return false;
+    }
+    diag = sensors_[index]->getDiagnostics();
+    return true;
+}
+
 LidarSensorManager& LidarSensorManager::instance() {
     static LidarSensorManager instance;
     return instance;
@@ -176,6 +184,13 @@ bool LidarSensorManager::get_latest_readings(std::vector<SensorCommon::Reading>&
     }
 
     return false;
+}
+
+bool LidarSensorManager::get_diagnostics(LydstoLidar::Diagnostics& diag) {
+    if (!array_) {
+        return false;
+    }
+    return array_->get_diagnostics(0, diag);
 }
 
 void LidarSensorManager::pause() {

@@ -1,4 +1,5 @@
 #include "include/http_server.hpp"
+#include "lidar_sensor.hpp"
 
 static const char *TAG = "http_server";
 
@@ -246,6 +247,43 @@ static esp_err_t health_handler(httpd_req_t *req) {
     return ESP_OK;
 }
 
+static esp_err_t lidar_debug_handler(httpd_req_t *req) {
+    cJSON *root = cJSON_CreateObject();
+    LydstoLidar::Diagnostics diag{};
+
+    if (LidarSensorManager::instance().get_diagnostics(diag)) {
+        cJSON_AddBoolToObject(root, "ok", true);
+        cJSON_AddBoolToObject(root, "initialized", diag.initialized);
+        cJSON_AddBoolToObject(root, "uart_ready", diag.uart_ready);
+        cJSON_AddNumberToObject(root, "frames_parsed", diag.frames_parsed);
+        cJSON_AddNumberToObject(root, "crc_failures", diag.crc_failures);
+        cJSON_AddNumberToObject(root, "parse_misses", diag.parse_misses);
+        cJSON_AddNumberToObject(root, "last_raw_len", diag.last_raw_len);
+        cJSON_AddStringToObject(root, "last_raw_hex", diag.last_raw_hex.c_str());
+
+        cJSON *decoded = cJSON_CreateObject();
+        cJSON_AddNumberToObject(decoded, "distance_mm", diag.last_decoded.distance_mm);
+        cJSON_AddNumberToObject(decoded, "distance_cm", diag.last_decoded.distance_cm);
+        cJSON_AddBoolToObject(decoded, "valid", diag.last_decoded.valid);
+        cJSON_AddNumberToObject(decoded, "status", diag.last_decoded.status);
+        cJSON_AddNumberToObject(decoded, "timestamp_us", diag.last_decoded.timestamp_us);
+        cJSON_AddNumberToObject(decoded, "speed_dps", diag.last_decoded.speed_dps);
+        cJSON_AddNumberToObject(decoded, "start_angle_deg", diag.last_decoded.start_angle_deg);
+        cJSON_AddNumberToObject(decoded, "end_angle_deg", diag.last_decoded.end_angle_deg);
+        cJSON_AddItemToObject(root, "decoded", decoded);
+    } else {
+        cJSON_AddBoolToObject(root, "ok", false);
+        cJSON_AddStringToObject(root, "error", "LiDAR diagnostics unavailable");
+    }
+
+    const char *json_string = cJSON_Print(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_string, HTTPD_RESP_USE_STRLEN);
+    cJSON_Delete(root);
+    free((void*)json_string);
+    return ESP_OK;
+}
+
 void start_webserver(void) {
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.lru_purge_enable = true;
@@ -276,6 +314,9 @@ void start_webserver(void) {
 
         httpd_uri_t health_uri = { .uri = "/health", .method = HTTP_GET, .handler = health_handler, .user_ctx = NULL };
         httpd_register_uri_handler(server, &health_uri);
+
+        httpd_uri_t lidar_debug_uri = { .uri = "/lidar_debug", .method = HTTP_GET, .handler = lidar_debug_handler, .user_ctx = NULL };
+        httpd_register_uri_handler(server, &lidar_debug_uri);
 
         return;
     }

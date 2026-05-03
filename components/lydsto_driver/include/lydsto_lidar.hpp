@@ -2,6 +2,7 @@
 
 #include <cstdint>
 #include <memory>
+#include <string>
 #include <vector>
 #include "driver/gpio.h"
 #include "driver/ledc.h"
@@ -32,6 +33,17 @@ public:
         float speed_dps;            ///< Motor speed from frame
         float start_angle_deg;      ///< Frame start angle
         float end_angle_deg;        ///< Frame end angle
+    };
+
+    struct Diagnostics {
+        bool initialized;
+        bool uart_ready;
+        uint32_t frames_parsed;
+        uint32_t crc_failures;
+        uint32_t parse_misses;
+        uint32_t last_raw_len;
+        std::string last_raw_hex;
+        MeasurementResult last_decoded;
     };
 
     struct Config {
@@ -68,6 +80,7 @@ public:
     bool isReady() const;
 
     bool readSingle(MeasurementResult& result);
+    Diagnostics getDiagnostics() const;
 
     const char* selfTest();
 
