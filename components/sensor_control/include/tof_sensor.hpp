@@ -3,20 +3,21 @@
 #include "sensor_common.hpp"
 
 // ═══════════════════════════════════════════════════════════════
-// DRIVER SELECTION - Change this ONE line to switch drivers
+// DRIVER SELECTION (compile-time)
+// Set ONE of SHELFBOT_TOF_DRIVER_* to 1 (see sensor_common.hpp).
 // ═══════════════════════════════════════════════════════════════
 
-#include "vl53l0x.hpp"    // ← This include determines which driver is used
-//#include "vl53l1.hpp"    // ← This include determines which driver is used
-//#include "vl53l1_modbus.hpp"    // ← This include determines which driver is used
-//#include "lydsto.hpp"    // ← This include determines which driver is used
-
-// Options:
-//   "vl53l0x.hpp"         → for VL53L0X (I2C)
-//   "lydsto.hpp"          → for LYDSTO (UART, LDS02RR/XV11 packet protocol)
-//   "vl53l1.hpp"          → for VL53L1 (I2C)
-//   "vl53l1_modbus.hpp"   → for VL53L1_Modbus (UART)
-// ═══════════════════════════════════════════════════════════════
+#if SHELFBOT_TOF_DRIVER_VL53L0X
+#include "vl53l0x.hpp"
+#elif SHELFBOT_TOF_DRIVER_VL53L1
+#include "vl53l1.hpp"
+#elif SHELFBOT_TOF_DRIVER_VL53L1_MODBUS
+#include "vl53l1_modbus.hpp"
+#elif SHELFBOT_TOF_DRIVER_LYDSTO
+#include "lydsto.hpp"
+#else
+#error "No ToF driver selected. Enable exactly one SHELFBOT_TOF_DRIVER_* macro."
+#endif
 
 // Forward declaration not needed - TofDriver typedef comes from included header
 

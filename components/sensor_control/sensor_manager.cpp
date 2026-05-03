@@ -74,6 +74,13 @@ void SensorManager::initialize(const SensorControl::Config& config) {
                     latest_data_.ultrasonic_readings[i].distance_cm = distances[i] / 10.0f;
                 }
                 latest_data_.timestamp_us = esp_timer_get_time();
+#if SHELFBOT_ENABLE_LIDAR
+                latest_data_.lidar_measurement.distance_mm = latest_data_.tof_measurements[0].distance_mm;
+                latest_data_.lidar_measurement.valid = latest_data_.tof_measurements[0].valid;
+                latest_data_.lidar_measurement.status = latest_data_.tof_measurements[0].status;
+                latest_data_.lidar_measurement.timestamp_us = latest_data_.tof_measurements[0].timestamp_us;
+                latest_data_.lidar_measurement.timeout_occurred = latest_data_.tof_measurements[0].timeout_occurred;
+#endif
                 xSemaphoreGive(data_mutex_);
             }
         };
@@ -86,6 +93,13 @@ void SensorManager::initialize(const SensorControl::Config& config) {
                     latest_data_.tof_measurements[i] = measurements[i];
                 }
                 latest_data_.timestamp_us = esp_timer_get_time();
+#if SHELFBOT_ENABLE_LIDAR
+                latest_data_.lidar_measurement.distance_mm = latest_data_.tof_measurements[0].distance_mm;
+                latest_data_.lidar_measurement.valid = latest_data_.tof_measurements[0].valid;
+                latest_data_.lidar_measurement.status = latest_data_.tof_measurements[0].status;
+                latest_data_.lidar_measurement.timestamp_us = latest_data_.tof_measurements[0].timestamp_us;
+                latest_data_.lidar_measurement.timeout_occurred = latest_data_.tof_measurements[0].timeout_occurred;
+#endif
                 xSemaphoreGive(data_mutex_);
             }
         };
@@ -113,6 +127,9 @@ void SensorManager::initialize(const SensorControl::Config& config) {
         latest_data_.tof_measurements[i] = SensorCommon::TofMeasurement();
     }
     latest_data_.timestamp_us = 0;
+#if SHELFBOT_ENABLE_LIDAR
+    latest_data_.lidar_measurement = SensorCommon::LidarMeasurement();
+#endif
 
     initialized_ = true;
     ESP_LOGI(TAG, "SensorManager initialized successfully");

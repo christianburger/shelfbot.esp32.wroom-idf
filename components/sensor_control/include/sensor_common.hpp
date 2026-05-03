@@ -6,6 +6,30 @@
 
 namespace SensorCommon {
 
+// Compile-time feature toggles (override with -D at build time)
+#ifndef SHELFBOT_ENABLE_ULTRASONIC
+#define SHELFBOT_ENABLE_ULTRASONIC 1
+#endif
+#ifndef SHELFBOT_ENABLE_TOF
+#define SHELFBOT_ENABLE_TOF 1
+#endif
+#ifndef SHELFBOT_ENABLE_LIDAR
+#define SHELFBOT_ENABLE_LIDAR 1
+#endif
+
+#ifndef SHELFBOT_TOF_DRIVER_VL53L0X
+#define SHELFBOT_TOF_DRIVER_VL53L0X 1
+#endif
+#ifndef SHELFBOT_TOF_DRIVER_VL53L1
+#define SHELFBOT_TOF_DRIVER_VL53L1 0
+#endif
+#ifndef SHELFBOT_TOF_DRIVER_VL53L1_MODBUS
+#define SHELFBOT_TOF_DRIVER_VL53L1_MODBUS 0
+#endif
+#ifndef SHELFBOT_TOF_DRIVER_LYDSTO
+#define SHELFBOT_TOF_DRIVER_LYDSTO 0
+#endif
+
   constexpr int NUM_ULTRASONIC_SENSORS = 4;
   constexpr int NUM_TOF_SENSORS = 1;
   constexpr int NUM_SENSORS = NUM_ULTRASONIC_SENSORS + NUM_TOF_SENSORS;
@@ -35,6 +59,19 @@ namespace SensorCommon {
     float distance_cm() const { return distance_mm / 10.0f; }
   };
 
+  struct LidarMeasurement {
+    uint16_t distance_mm;
+    bool valid;
+    uint8_t status;
+    int64_t timestamp_us;
+    bool timeout_occurred;
+
+    LidarMeasurement() : distance_mm(0), valid(false), status(0),
+                         timestamp_us(0), timeout_occurred(false) {}
+
+    float distance_cm() const { return distance_mm / 10.0f; }
+  };
+
   // Sensor data packet for sharing between components
   struct SensorDataPacket {
     // Ultrasonic sensors
@@ -42,6 +79,10 @@ namespace SensorCommon {
 
     // ToF sensors
     TofMeasurement tof_measurements[NUM_TOF_SENSORS];
+
+#if SHELFBOT_ENABLE_LIDAR
+    LidarMeasurement lidar_measurement;
+#endif
 
     int64_t timestamp_us;
 
@@ -53,6 +94,9 @@ namespace SensorCommon {
       for (int i = 0; i < NUM_TOF_SENSORS; i++) {
         tof_measurements[i] = TofMeasurement();
       }
+#if SHELFBOT_ENABLE_LIDAR
+      lidar_measurement = LidarMeasurement();
+#endif
     }
   };
 

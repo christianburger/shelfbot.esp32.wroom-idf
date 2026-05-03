@@ -309,9 +309,9 @@ cJSON* HttpServer::create_sensor_json(const SensorCommon::SensorDataPacket& sens
     cJSON* tof_json = create_tof_json(sensor_data);
     cJSON_AddItemToObject(root, "tof", tof_json);
 
-    const auto& lidar = sensor_data.tof_measurements[0];
+    const auto& lidar = sensor_data.lidar_measurement;
     cJSON* lidar_json = cJSON_CreateObject();
-    cJSON_AddStringToObject(lidar_json, "source", "tof_measurements[0]");
+    cJSON_AddStringToObject(lidar_json, "source", "lidar_measurement");
     cJSON_AddBoolToObject(lidar_json, "valid", lidar.valid);
     cJSON_AddNumberToObject(lidar_json, "distance_mm", lidar.distance_mm);
     cJSON_AddNumberToObject(lidar_json, "distance_cm", lidar.distance_cm());
@@ -380,9 +380,9 @@ esp_err_t HttpServer::lidar_handler(httpd_req_t* req) {
         return ESP_OK;
     }
 
-    const auto& m = sensor_data.tof_measurements[0];
+    const auto& m = sensor_data.lidar_measurement;
     cJSON* root = cJSON_CreateObject();
-    cJSON_AddStringToObject(root, "source", "tof_measurements[0]");
+    cJSON_AddStringToObject(root, "source", "lidar_measurement");
     cJSON_AddBoolToObject(root, "valid", m.valid);
     cJSON_AddNumberToObject(root, "distance_mm", m.distance_mm);
     cJSON_AddNumberToObject(root, "distance_cm", m.distance_cm());
