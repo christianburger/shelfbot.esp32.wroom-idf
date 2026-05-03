@@ -1,24 +1,24 @@
 #pragma once
 #include <idf_c_includes.hpp>
+#include "duart_modbus.hpp"
 
 // ═══════════════════════════════════════════════════════════════
-// LYDSTO DRIVER CONFIGURATION - EDIT ALL SETTINGS HERE
+// LYDSTO_MODBUS DRIVER CONFIGURATION - EDIT ALL SETTINGS HERE
 // ═══════════════════════════════════════════════════════════════
-#define LYDSTO_I2C_PORT         I2C_NUM_0
-#define LYDSTO_SDA_PIN          GPIO_NUM_21
-#define LYDSTO_SCL_PIN          GPIO_NUM_22
-#define LYDSTO_I2C_FREQ_HZ      400000
-#define LYDSTO_I2C_ADDRESS      0x29
-#define LYDSTO_XSHUT_PIN        GPIO_NUM_NC  // GPIO_NUM_NC if not used
-#define LYDSTO_IO_2V8           true
-#define LYDSTO_TIMEOUT_MS       500
-#define LYDSTO_TIMING_BUDGET_US 200000
-#define LYDSTO_SIGNAL_RATE_MCPS 0.25f
+#define LYDSTO_UART_PORT      UART_NUM_1
+#define LYDSTO_TX_PIN         GPIO_NUM_17
+#define LYDSTO_RX_PIN         GPIO_NUM_16
+#define LYDSTO_BAUD_RATE      115200
+#define LYDSTO_SLAVE_ADDR     0x01
+#define LYDSTO_TIMEOUT_MS     500
+#define LYDSTO_RANGING_MODE   1  // 0=High Precision (30ms, 1.3m), 1=Long Distance (200ms, 4.0m)
+#define LYDSTO_CONTINUOUS     true
 // ═══════════════════════════════════════════════════════════════
 
 /**
  * @brief LYDSTO ToF Driver - Simple and Explicit Implementation
  *
+ * Communicates via Modbus/UART protocol (TOF400F module)
  * All configuration is defined above in #defines.
  * No external configuration accepted.
  */
@@ -49,91 +49,52 @@ public:
     void setTimeout(uint16_t timeout_ms);
     bool timeoutOccurred();
 
-    // ── I2C Handle Access (for external scanning) ──
-    static i2c_master_bus_handle_t getBusHandle() { return shared_bus_handle_; }
-
-    static bool lockI2C();
-    static void unlockI2C();
-
     // Non-copyable
     LYDSTO_Driver(const LYDSTO_Driver&) = delete;
     LYDSTO_Driver& operator=(const LYDSTO_Driver&) = delete;
 
 private:
     // ── Configuration (from #defines) ──
-    i2c_port_t  i2c_port_;
-    gpio_num_t  sda_pin_;
-    gpio_num_t  scl_pin_;
-    gpio_num_t  xshut_pin_;
-    uint8_t     i2c_address_;
-    uint32_t    i2c_freq_hz_;
-    bool        io_2v8_;
+    uart_port_t uart_port_;
+    gpio_num_t  uart_tx_pin_;
+    gpio_num_t  uart_rx_pin_;
+    uint32_t    baud_rate_;
+    uint8_t     modbus_slave_address_;
     uint16_t    timeout_ms_;
-    uint32_t    timing_budget_us_;
-    float       signal_rate_limit_mcps_;
+    uint8_t     ranging_mode_;  // 0=High Precision, 1=Long Distance
+    bool        enable_continuous_;
 
-    // ── Hardware handles (SHARED BUS, INDIVIDUAL DEVICES) ──
-    static i2c_master_bus_handle_t shared_bus_handle_;
-    static SemaphoreHandle_t       shared_i2c_mutex_;
-    static int                     bus_reference_count_;
-
-    i2c_master_dev_handle_t dev_handle_;  // Each instance has its own device
+    // ── Hardware handle ──
+    DuartModbus* modbus_;
 
     // ── State ──
-    bool     initialized_;
-    uint8_t  stop_variable_;
-    uint32_t measurement_timing_budget_us_;
-    bool     did_timeout_;
+    bool initialized_;
+    bool timeout_occurred_;
 
-    // ── I2C Operations ──
-    esp_err_t writeReg8(uint8_t reg, uint8_t value);
-    esp_err_t writeReg16(uint8_t reg, uint16_t value);
-    esp_err_t writeReg32(uint8_t reg, uint32_t value);
-    esp_err_t readReg8(uint8_t reg, uint8_t* value);
-    esp_err_t readReg16(uint8_t reg, uint16_t* value);
-    esp_err_t readReg32(uint8_t reg, uint32_t* value);
-    esp_err_t writeMulti(uint8_t reg, const uint8_t* src, uint8_t count);
-    esp_err_t readMulti(uint8_t reg, uint8_t* dst, uint8_t count);
+    // ── TOF400F Register addresses ──
+    static constexpr uint16_t REG_SPECIAL                = 0x0001;
+    static constexpr uint16_t REG_DEVICE_ADDR            = 0x0002;
+    static constexpr uint16_t REG_BAUD_RATE              = 0x0003;
+    static constexpr uint16_t REG_RANGE_MODE             = 0x0004;
+    static constexpr uint16_t REG_CONTINUOUS_OUTPUT      = 0x0005;
+    static constexpr uint16_t REG_LOAD_CALIBRATION       = 0x0006;
+    static constexpr uint16_t REG_OFFSET_CORRECTION      = 0x0007;
+    static constexpr uint16_t REG_XTALK_CORRECTION       = 0x0008;
+    static constexpr uint16_t REG_DISABLE_IIC            = 0x0009;
+    static constexpr uint16_t REG_MEASUREMENT            = 0x0010;
+    static constexpr uint16_t REG_OFFSET_CALIBRATION     = 0x0020;
+    static constexpr uint16_t REG_XTALK_CALIBRATION      = 0x0021;
 
     // ── Initialization helpers ──
-    struct RegisterWrite {
-        uint8_t     reg;
-        uint8_t     value;
-        uint16_t    delay_ms;
-        std::string comment;
-    };
+    const char* initModbus();
+    const char* testCommunication();
+    const char* readCurrentConfiguration();
+    const char* configureRangingMode();
+    const char* configureContinuousMode();
+    const char* verifyConfiguration();
 
-    bool      loadRegisterSequence(const char* csv_data, std::vector<RegisterWrite>& seq);
-    esp_err_t executeRegisterSequence(const std::vector<RegisterWrite>& seq);
-    esp_err_t loadInitSequence();
-
-    // ── Calibration ──
-    esp_err_t configureSPAD(uint8_t* count, bool* type_is_aperture);
-    esp_err_t performSingleRefCalibration(uint8_t vhv_init_byte);
-
-    // ── Timing calculation ──
-    struct SequenceStepEnables {
-        bool tcc, msrc, dss, pre_range, final_range;
-    };
-
-    struct SequenceStepTimeouts {
-        uint16_t pre_range_vcsel_period_pclks, final_range_vcsel_period_pclks;
-        uint16_t msrc_dss_tcc_mclks, pre_range_mclks, final_range_mclks;
-        uint32_t msrc_dss_tcc_us, pre_range_us, final_range_us;
-    };
-
-    uint32_t timeoutMclksToMicroseconds(uint16_t timeout_period_mclks, uint8_t vcsel_period_pclks);
-    uint32_t timeoutMicrosecondsToMclks(uint32_t timeout_period_us, uint8_t vcsel_period_pclks);
-    uint16_t decodeTimeout(uint16_t reg_val);
-    uint16_t encodeTimeout(uint16_t timeout_mclks);
-    void getSequenceStepEnables(SequenceStepEnables* enables);
-    void getSequenceStepTimeouts(SequenceStepEnables* enables, SequenceStepTimeouts* timeouts);
-
-    // ── Configuration (internal use) ──
-    const char* setSignalRateLimit(float limit_mcps);
-    const char* setMeasurementTimingBudget(uint32_t budget_us);
-    uint32_t    getMeasurementTimingBudget();
-    const char* setVcselPulsePeriod(uint8_t type, uint8_t period_pclks);
+    // ── Helper functions ──
+    void logModbusResponse(const char* operation, const DuartModbus::ModbusResponse& response);
 };
 
 // ═══════════════════════════════════════════════════════════════

@@ -3,623 +3,308 @@
 static const char* TAG = "TofDriver_LYDSTO";
 
 // ═══════════════════════════════════════════════════════════════
-// Static member initialization
-// ═══════════════════════════════════════════════════════════════
-i2c_master_bus_handle_t LYDSTO_Driver::shared_bus_handle_ = nullptr;
-SemaphoreHandle_t LYDSTO_Driver::shared_i2c_mutex_ = nullptr;
-int LYDSTO_Driver::bus_reference_count_ = 0;
-
-// ═══════════════════════════════════════════════════════════════
-// Register addresses
-// ═══════════════════════════════════════════════════════════════
-namespace Reg {
-    constexpr uint8_t SYSRANGE_START                            = 0x00;
-    constexpr uint8_t SYSTEM_THRESH_HIGH                        = 0x0C;
-    constexpr uint8_t SYSTEM_THRESH_LOW                         = 0x0E;
-    constexpr uint8_t SYSTEM_SEQUENCE_CONFIG                    = 0x01;
-    constexpr uint8_t SYSTEM_RANGE_CONFIG                       = 0x09;
-    constexpr uint8_t SYSTEM_INTERMEASUREMENT_PERIOD            = 0x04;
-    constexpr uint8_t SYSTEM_INTERRUPT_CONFIG_GPIO              = 0x0A;
-    constexpr uint8_t GPIO_HV_MUX_ACTIVE_HIGH                   = 0x84;
-    constexpr uint8_t SYSTEM_INTERRUPT_CLEAR                    = 0x0B;
-    constexpr uint8_t RESULT_INTERRUPT_STATUS                   = 0x13;
-    constexpr uint8_t RESULT_RANGE_STATUS                       = 0x14;
-    constexpr uint8_t RESULT_RANGE_VALUE                        = 0x1E;
-    constexpr uint8_t I2C_SLAVE_DEVICE_ADDRESS                  = 0x8A;
-    constexpr uint8_t MSRC_CONFIG_CONTROL                       = 0x60;
-    constexpr uint8_t PRE_RANGE_CONFIG_VCSEL_PERIOD             = 0x50;
-    constexpr uint8_t PRE_RANGE_CONFIG_TIMEOUT_MACROP_HI        = 0x51;
-    constexpr uint8_t PRE_RANGE_CONFIG_TIMEOUT_MACROP_LO        = 0x52;
-    constexpr uint8_t FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT = 0x44;
-    constexpr uint8_t FINAL_RANGE_CONFIG_VCSEL_PERIOD           = 0x70;
-    constexpr uint8_t FINAL_RANGE_CONFIG_TIMEOUT_MACROP_HI      = 0x71;
-    constexpr uint8_t FINAL_RANGE_CONFIG_TIMEOUT_MACROP_LO      = 0x72;
-    constexpr uint8_t MSRC_CONFIG_TIMEOUT_MACROP                = 0x46;
-    constexpr uint8_t SOFT_RESET_GO2_SOFT_RESET_N               = 0xBF;
-    constexpr uint8_t IDENTIFICATION_MODEL_ID                   = 0xC0;
-    constexpr uint8_t IDENTIFICATION_REVISION_ID                = 0xC2;
-    constexpr uint8_t OSC_CALIBRATE_VAL                         = 0xF8;
-    constexpr uint8_t GLOBAL_CONFIG_VCSEL_WIDTH                 = 0x32;
-    constexpr uint8_t GLOBAL_CONFIG_SPAD_ENABLES_REF_0          = 0xB0;
-    constexpr uint8_t GLOBAL_CONFIG_REF_EN_START_SELECT         = 0xB6;
-    constexpr uint8_t DYNAMIC_SPAD_NUM_REQUESTED_REF_SPAD       = 0x4E;
-    constexpr uint8_t DYNAMIC_SPAD_REF_EN_START_OFFSET          = 0x4F;
-    constexpr uint8_t POWER_MANAGEMENT_GO1_POWER_FORCE          = 0x80;
-    constexpr uint8_t VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV         = 0x89;
-    constexpr uint8_t ALGO_PHASECAL_LIM                         = 0x30;
-    constexpr uint8_t ALGO_PHASECAL_CONFIG_TIMEOUT              = 0x30;
-}
-
-#define decodeVcselPeriod(reg_val)   (((reg_val) + 1) << 1)
-#define encodeVcselPeriod(period_pclks) (((period_pclks) >> 1) - 1)
-#define calcMacroPeriod(vcsel_period_pclks) \
-    ((((uint32_t)2304 * (vcsel_period_pclks) * 1655) + 500) / 1000)
-
-// ═══════════════════════════════════════════════════════════════
 // Constructor / Destructor
 // ═══════════════════════════════════════════════════════════════
 LYDSTO_Driver::LYDSTO_Driver()
-    : i2c_port_(LYDSTO_I2C_PORT),
-      sda_pin_(LYDSTO_SDA_PIN),
-      scl_pin_(LYDSTO_SCL_PIN),
-      xshut_pin_(LYDSTO_XSHUT_PIN),
-      i2c_address_(LYDSTO_I2C_ADDRESS),
-      i2c_freq_hz_(LYDSTO_I2C_FREQ_HZ),
-      io_2v8_(LYDSTO_IO_2V8),
+    : uart_port_(LYDSTO_UART_PORT),
+      uart_tx_pin_(LYDSTO_TX_PIN),
+      uart_rx_pin_(LYDSTO_RX_PIN),
+      baud_rate_(LYDSTO_BAUD_RATE),
+      modbus_slave_address_(LYDSTO_SLAVE_ADDR),
       timeout_ms_(LYDSTO_TIMEOUT_MS),
-      timing_budget_us_(LYDSTO_TIMING_BUDGET_US),
-      signal_rate_limit_mcps_(LYDSTO_SIGNAL_RATE_MCPS),
-      dev_handle_(nullptr),
+      ranging_mode_(LYDSTO_RANGING_MODE),
+      enable_continuous_(LYDSTO_CONTINUOUS),
+      modbus_(nullptr),
       initialized_(false),
-      stop_variable_(0),
-      measurement_timing_budget_us_(0),
-      did_timeout_(false) {
-
-  // Create shared mutex on first instance
-  if (shared_i2c_mutex_ == nullptr) {
-    shared_i2c_mutex_ = xSemaphoreCreateMutex();
-    if (!shared_i2c_mutex_) {
-      ESP_LOGE(TAG, "Failed to create shared I2C mutex");
-    }
-  }
+      timeout_occurred_(false) {
 }
 
 LYDSTO_Driver::~LYDSTO_Driver() {
-  // Remove this device from the bus
-  if (dev_handle_) {
-    i2c_master_bus_rm_device(dev_handle_);
-    dev_handle_ = nullptr;
-  }
-
-  // Lock before modifying shared resources
-  if (shared_i2c_mutex_) {
-    xSemaphoreTake(shared_i2c_mutex_, portMAX_DELAY);
-  }
-
-  // Decrement reference count
-  if (bus_reference_count_ > 0) {
-    bus_reference_count_--;
-  }
-
-  // Delete bus only when last instance is destroyed
-  if (bus_reference_count_ == 0 && shared_bus_handle_) {
-    ESP_LOGI(TAG, "Last instance destroyed - deleting shared I2C bus");
-    i2c_del_master_bus(shared_bus_handle_);
-    shared_bus_handle_ = nullptr;
-
-    // Delete mutex as well
-    if (shared_i2c_mutex_) {
-      SemaphoreHandle_t temp_mutex = shared_i2c_mutex_;
-      shared_i2c_mutex_ = nullptr;
-      xSemaphoreGive(temp_mutex);
-      vSemaphoreDelete(temp_mutex);
+    if (modbus_) {
+        delete modbus_;
+        modbus_ = nullptr;
     }
-  } else if (shared_i2c_mutex_) {
-    xSemaphoreGive(shared_i2c_mutex_);
-  }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// I2C Locking
+// Helper: Log Modbus Response
 // ═══════════════════════════════════════════════════════════════
-bool LYDSTO_Driver::lockI2C() {
-  if (!shared_i2c_mutex_) return false;
-  bool locked = xSemaphoreTake(shared_i2c_mutex_, pdMS_TO_TICKS(1000)) == pdTRUE;
-  if (!locked) {
-    ESP_LOGE(TAG, "I2C lock acquire failed");
-  }
-  return locked;
-}
+void LYDSTO_Driver::logModbusResponse(const char* operation, const DuartModbus::ModbusResponse& response) {
+    ESP_LOGI(TAG, "    %s:", operation);
+    ESP_LOGI(TAG, "      Success: %s", response.success ? "YES" : "NO");
+    ESP_LOGI(TAG, "      ESP Error: %s", esp_err_to_name(response.esp_error));
 
-void LYDSTO_Driver::unlockI2C() {
-  if (shared_i2c_mutex_) {
-    xSemaphoreGive(shared_i2c_mutex_);
-  }
+    if (response.success) {
+        ESP_LOGI(TAG, "      Slave Address: 0x%02X", response.slave_address);
+        ESP_LOGI(TAG, "      Function Code: 0x%02X", response.function_code);
+        ESP_LOGI(TAG, "      Data bytes: %zu", response.data.size());
+
+        if (!response.data.empty()) {
+            char hex_str[256] = {0};
+            size_t offset = 0;
+            for (size_t i = 0; i < response.data.size() && offset < sizeof(hex_str) - 4; i++) {
+                offset += snprintf(hex_str + offset, sizeof(hex_str) - offset, "%02X ", response.data[i]);
+            }
+            ESP_LOGI(TAG, "      Data: %s", hex_str);
+        }
+    } else {
+        ESP_LOGE(TAG, "      Error Code: 0x%02X", response.error_code);
+    }
 }
 
 // ═══════════════════════════════════════════════════════════════
-// I2C Operations
+// Initialization Helpers
 // ═══════════════════════════════════════════════════════════════
-esp_err_t LYDSTO_Driver::writeReg8(uint8_t reg, uint8_t value) {
-    uint8_t buf[2] = {reg, value};
-    return i2c_master_transmit(dev_handle_, buf, 2, timeout_ms_);
-}
-
-esp_err_t LYDSTO_Driver::writeReg16(uint8_t reg, uint16_t value) {
-    uint8_t buf[3] = {reg, (uint8_t)(value >> 8), (uint8_t)(value & 0xFF)};
-    return i2c_master_transmit(dev_handle_, buf, 3, timeout_ms_);
-}
-
-esp_err_t LYDSTO_Driver::writeReg32(uint8_t reg, uint32_t value) {
-    uint8_t buf[5] = {
-        reg,
-        (uint8_t)(value >> 24),
-        (uint8_t)(value >> 16),
-        (uint8_t)(value >> 8),
-        (uint8_t)(value)
+const char* LYDSTO_Driver::initModbus() {
+    DuartModbus::Config modbus_config = {
+        .uart_port = uart_port_,
+        .tx_pin = uart_tx_pin_,
+        .rx_pin = uart_rx_pin_,
+        .baud_rate = baud_rate_,
+        .parity = 0,          // No parity
+        .stop_bits = 1,       // 1 stop bit
+        .data_bits = 8,       // 8 data bits
+        .timeout_ms = timeout_ms_,
+        .max_retries = 3
     };
-    return i2c_master_transmit(dev_handle_, buf, 5, timeout_ms_);
-}
 
-esp_err_t LYDSTO_Driver::readReg8(uint8_t reg, uint8_t* value) {
-    return i2c_master_transmit_receive(dev_handle_, &reg, 1, value, 1, timeout_ms_);
-}
+    ESP_LOGI(TAG, "  Creating Modbus instance with:");
+    ESP_LOGI(TAG, "    Baud rate: %lu", (unsigned long)modbus_config.baud_rate);
+    ESP_LOGI(TAG, "    Data bits: %d, Parity: %d, Stop bits: %d",
+             modbus_config.data_bits, modbus_config.parity, modbus_config.stop_bits);
+    ESP_LOGI(TAG, "    Timeout: %lu ms, Retries: %d",
+             (unsigned long)modbus_config.timeout_ms, modbus_config.max_retries);
 
-esp_err_t LYDSTO_Driver::readReg16(uint8_t reg, uint16_t* value) {
-    uint8_t buf[2];
-    esp_err_t err = i2c_master_transmit_receive(dev_handle_, &reg, 1, buf, 2, timeout_ms_);
-    if (err == ESP_OK) {
-        *value = (buf[0] << 8) | buf[1];
+    modbus_ = new DuartModbus(modbus_config);
+    const char* err = modbus_->init();
+    if (err != nullptr) {
+        ESP_LOGE(TAG, "  Modbus initialization failed: %s", err);
+        return "Modbus init failed";
     }
-    return err;
+
+    ESP_LOGI(TAG, "  Modbus driver initialized successfully");
+    return nullptr;
 }
 
-esp_err_t LYDSTO_Driver::readReg32(uint8_t reg, uint32_t* value) {
-    uint8_t buf[4];
-    esp_err_t err = i2c_master_transmit_receive(dev_handle_, &reg, 1, buf, 4, timeout_ms_);
-    if (err == ESP_OK) {
-        *value = (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3];
+const char* LYDSTO_Driver::testCommunication() {
+    ESP_LOGI(TAG, "  Testing communication with slave 0x%02X...", modbus_slave_address_);
+
+    // Test: Read special register (0x0001)
+    ESP_LOGI(TAG, "  Reading SPECIAL register (0x0001)...");
+    auto response = modbus_->readHoldingRegisters(
+        modbus_slave_address_,
+        REG_SPECIAL,
+        1,
+        timeout_ms_
+    );
+
+    logModbusResponse("Read SPECIAL", response);
+
+    if (!response.success) {
+        ESP_LOGE(TAG, "  FAILED: Device not responding to read commands");
+        ESP_LOGE(TAG, "  Troubleshooting hints:");
+        ESP_LOGE(TAG, "    - Check TX/RX wiring (TX->RX, RX->TX)");
+        ESP_LOGE(TAG, "    - Verify device has power (3.3V-5V)");
+        ESP_LOGE(TAG, "    - Check slave address (default is 0x01)");
+        ESP_LOGE(TAG, "    - Verify baud rate (default is 115200)");
+        return "Device not responding";
     }
-    return err;
+
+    ESP_LOGI(TAG, "  Communication test PASSED");
+    return nullptr;
 }
 
-esp_err_t LYDSTO_Driver::writeMulti(uint8_t reg, const uint8_t* src, uint8_t count) {
-    std::vector<uint8_t> buf(count + 1);
-    buf[0] = reg;
-    std::memcpy(&buf[1], src, count);
-    return i2c_master_transmit(dev_handle_, buf.data(), buf.size(), timeout_ms_);
-}
+const char* LYDSTO_Driver::readCurrentConfiguration() {
+    ESP_LOGI(TAG, "  Reading current configuration from device...");
 
-esp_err_t LYDSTO_Driver::readMulti(uint8_t reg, uint8_t* dst, uint8_t count) {
-    return i2c_master_transmit_receive(dev_handle_, &reg, 1, dst, count, timeout_ms_);
-}
+    // Read IIC disable setting (0x0009)
+    ESP_LOGI(TAG, "  Reading DISABLE_IIC register (0x0009)...");
+    auto response = modbus_->readHoldingRegisters(
+        modbus_slave_address_,
+        REG_DISABLE_IIC,
+        1,
+        timeout_ms_
+    );
 
-// ═══════════════════════════════════════════════════════════════
-// CSV Sequence Loading
-// ═══════════════════════════════════════════════════════════════
-bool LYDSTO_Driver::loadRegisterSequence(const char* csv_data, std::vector<RegisterWrite>& sequence) {
-    sequence.clear();
-    std::istringstream stream(csv_data);
-    std::string line;
+    logModbusResponse("Read DISABLE_IIC", response);
 
-    while (std::getline(stream, line)) {
-        if (line.empty() || line[0] == '#') continue;
+    if (response.success && response.data.size() >= 2) {
+        uint16_t iic_state = (response.data[0] << 8) | response.data[1];
+        ESP_LOGI(TAG, "  Current IIC state: 0x%04X (%s mode)",
+                 iic_state, iic_state == 0x0000 ? "UART/Modbus" : "I2C");
 
-        std::istringstream ls(line);
-        std::string reg_str, val_str, delay_str, comment;
+        if (iic_state != 0x0000) {
+            ESP_LOGW(TAG, "  Device is currently in I2C mode");
+            ESP_LOGI(TAG, "  Switching device to UART/Modbus mode...");
 
-        if (!std::getline(ls, reg_str, ',')) continue;
-        if (!std::getline(ls, val_str, ',')) continue;
-        if (!std::getline(ls, delay_str, ',')) continue;
-        std::getline(ls, comment);
+            auto write_response = modbus_->writeSingleRegister(
+                modbus_slave_address_,
+                REG_DISABLE_IIC,
+                0x0000,
+                false,
+                timeout_ms_
+            );
 
-        RegisterWrite w;
-        w.reg      = (uint8_t)std::stoul(reg_str, nullptr, 16);
-        w.value    = (uint8_t)std::stoul(val_str, nullptr, 16);
-        w.delay_ms = (uint16_t)std::stoul(delay_str);
-        w.comment  = comment;
-        sequence.push_back(w);
-    }
-    return !sequence.empty();
-}
+            logModbusResponse("Write DISABLE_IIC (enable UART)", write_response);
 
-esp_err_t LYDSTO_Driver::executeRegisterSequence(const std::vector<RegisterWrite>& sequence) {
-    for (const auto& w : sequence) {
-        esp_err_t err = writeReg8(w.reg, w.value);
-        if (err != ESP_OK) {
-            ESP_LOGE(TAG, "Failed to write 0x%02X=0x%02X: %s", w.reg, w.value, esp_err_to_name(err));
-            return err;
+            if (!write_response.success) {
+                ESP_LOGE(TAG, "  FAILED: Could not switch to UART mode");
+                return "Failed to switch to UART mode";
+            }
+
+            vTaskDelay(pdMS_TO_TICKS(100));
+
+            // Verify the switch
+            response = modbus_->readHoldingRegisters(
+                modbus_slave_address_,
+                REG_DISABLE_IIC,
+                1,
+                timeout_ms_
+            );
+
+            if (response.success && response.data.size() >= 2) {
+                uint16_t new_state = (response.data[0] << 8) | response.data[1];
+                if (new_state != 0x0000) {
+                    ESP_LOGE(TAG, "  VERIFICATION FAILED: Still in I2C mode");
+                    return "Device stuck in I2C mode";
+                }
+                ESP_LOGI(TAG, "  Mode switch successful - now in UART mode");
+            }
         }
-        if (w.delay_ms > 0) {
-            vTaskDelay(pdMS_TO_TICKS(w.delay_ms));
-        }
-    }
-    return ESP_OK;
-}
-
-static const char* INIT_SEQUENCE_CSV = R"(
-0x88,0x00,0,Set I2C standard mode
-0x80,0x01,0,Enable power
-0xFF,0x01,0,Access hidden registers
-0x00,0x00,0,Clear register 0x00
-0x00,0x01,0,Set register 0x00
-0xFF,0x00,0,Return to normal registers
-0x80,0x00,0,Disable power sequence
-0x01,0xFF,0,Set SYSTEM_SEQUENCE_CONFIG
-0xFF,0x01,0,Access page 1
-0x00,0x00,0,Clear base register
-0xFF,0x00,0,Return to page 0
-0x09,0x00,0,Set register 0x09
-0x10,0x00,0,Set register 0x10
-0x11,0x00,0,Set register 0x11
-0x24,0x01,0,Set register 0x24
-0x25,0xFF,0,Set register 0x25
-0x75,0x00,0,Set register 0x75
-0xFF,0x01,0,Access page 1
-0x4E,0x2C,0,Set register 0x4E
-0x48,0x00,0,Set register 0x48
-0x30,0x20,0,Set register 0x30
-0xFF,0x00,0,Return to page 0
-0x30,0x09,0,Set register 0x30
-0x54,0x00,0,Set register 0x54
-0x31,0x04,0,Set register 0x31
-0x32,0x03,0,Set register 0x32
-0x40,0x83,0,Set register 0x40
-0x46,0x25,0,Set register 0x46
-0x60,0x00,0,Set register 0x60
-0x27,0x00,0,Set register 0x27
-0x50,0x06,0,Set PRE_RANGE_CONFIG_VCSEL_PERIOD
-0x51,0x00,0,Set PRE_RANGE_CONFIG_TIMEOUT_MACROP_HI
-0x52,0x96,0,Set PRE_RANGE_CONFIG_TIMEOUT_MACROP_LO
-0x56,0x08,0,Set PRE_RANGE_CONFIG_VALID_PHASE_LOW
-0x57,0x30,0,Set PRE_RANGE_CONFIG_VALID_PHASE_HIGH
-0x61,0x00,0,Set PRE_RANGE_CONFIG_SIGMA_THRESH_HI
-0x62,0x00,0,Set PRE_RANGE_CONFIG_SIGMA_THRESH_LO
-0x64,0x00,0,Set PRE_RANGE_MIN_COUNT_RATE_RTN_LIMIT byte 1
-0x65,0x00,0,Set PRE_RANGE_MIN_COUNT_RATE_RTN_LIMIT byte 2
-0x66,0xA0,0,Set register 0x66
-0xFF,0x01,0,Access page 1
-0x22,0x32,0,Set register 0x22
-0x47,0x14,0,Set FINAL_RANGE_CONFIG_VALID_PHASE_LOW
-0x49,0xFF,0,Set register 0x49
-0x4A,0x00,0,Set register 0x4A
-0xFF,0x00,0,Return to page 0
-0x7A,0x0A,0,Set register 0x7A
-0x7B,0x00,0,Set register 0x7B
-0x78,0x21,0,Set register 0x78
-0xFF,0x01,0,Access page 1
-0x23,0x34,0,Set register 0x23
-0x42,0x00,0,Set register 0x42
-0x44,0xFF,0,Set FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT byte 1
-0x45,0x26,0,Set FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT byte 2
-0x46,0x05,0,Set register 0x46
-0x40,0x40,0,Set register 0x40
-0x0E,0x06,0,Set register 0x0E
-0x20,0x1A,0,Set register 0x20
-0x43,0x40,0,Set register 0x43
-0xFF,0x00,0,Return to page 0
-0x34,0x03,0,Set register 0x34
-0x35,0x44,0,Set register 0x35
-0xFF,0x01,0,Access page 1
-0x31,0x04,0,Set register 0x31
-0x4B,0x09,0,Set register 0x4B
-0x4C,0x05,0,Set register 0x4C
-0x4D,0x04,0,Set register 0x4D
-0xFF,0x00,0,Return to page 0
-0x44,0x00,0,Set FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT byte 1
-0x45,0x20,0,Set FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT byte 2
-0x47,0x08,0,Set FINAL_RANGE_CONFIG_VALID_PHASE_LOW
-0x48,0x28,0,Set FINAL_RANGE_CONFIG_VALID_PHASE_HIGH
-0x67,0x00,0,Set FINAL_RANGE_CONFIG_MIN_SNR
-0x70,0x04,0,Set FINAL_RANGE_CONFIG_VCSEL_PERIOD
-0x71,0x01,0,Set FINAL_RANGE_CONFIG_TIMEOUT_MACROP_HI
-0x72,0xFE,0,Set FINAL_RANGE_CONFIG_TIMEOUT_MACROP_LO
-0x76,0x00,0,Set register 0x76
-0x77,0x00,0,Set register 0x77
-0xFF,0x01,0,Access page 1
-0x0D,0x01,0,Set register 0x0D
-0xFF,0x00,0,Return to page 0
-0x80,0x01,0,Set register 0x80
-0x01,0xF8,0,Set SYSTEM_SEQUENCE_CONFIG
-0xFF,0x01,0,Access page 1
-0x8E,0x01,0,Set register 0x8E
-0x00,0x01,0,Set register 0x00
-0xFF,0x00,0,Return to page 0
-0x80,0x00,0,Clear register 0x80
-0x0A,0x04,0,Set SYSTEM_INTERRUPT_CONFIG_GPIO
-0x0B,0x01,0,Set SYSTEM_INTERRUPT_CLEAR
-)";
-
-esp_err_t LYDSTO_Driver::loadInitSequence() {
-    std::vector<RegisterWrite> sequence;
-    if (!loadRegisterSequence(INIT_SEQUENCE_CSV, sequence)) {
-        ESP_LOGE(TAG, "Failed to parse initialization sequence");
-        return ESP_FAIL;
-    }
-    return executeRegisterSequence(sequence);
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Calibration
-// ═══════════════════════════════════════════════════════════════
-esp_err_t LYDSTO_Driver::configureSPAD(uint8_t* count, bool* type_is_aperture) {
-    *count = 32;
-    *type_is_aperture = true;
-
-    uint8_t ref_spad_map[6];
-    esp_err_t err = readMulti(Reg::GLOBAL_CONFIG_SPAD_ENABLES_REF_0, ref_spad_map, 6);
-    if (err != ESP_OK) return err;
-
-    err = writeReg8(0xFF, 0x01);
-    if (err != ESP_OK) return err;
-
-    err = writeReg8(Reg::DYNAMIC_SPAD_REF_EN_START_OFFSET, 0x00);
-    if (err != ESP_OK) return err;
-
-    err = writeReg8(Reg::DYNAMIC_SPAD_NUM_REQUESTED_REF_SPAD, 0x2C);
-    if (err != ESP_OK) return err;
-
-    err = writeReg8(0xFF, 0x00);
-    if (err != ESP_OK) return err;
-
-    err = writeReg8(Reg::GLOBAL_CONFIG_REF_EN_START_SELECT, 0xB4);
-    if (err != ESP_OK) return err;
-
-    uint8_t first_spad_to_enable = *type_is_aperture ? 12 : 0;
-    uint8_t spads_enabled = 0;
-
-    for (uint8_t i = 0; i < 48; i++) {
-        if (i < first_spad_to_enable || spads_enabled == *count) {
-            ref_spad_map[i / 8] &= ~(1 << (i % 8));
-        } else if ((ref_spad_map[i / 8] >> (i % 8)) & 0x1) {
-            spads_enabled++;
-        }
-    }
-
-    return writeMulti(Reg::GLOBAL_CONFIG_SPAD_ENABLES_REF_0, ref_spad_map, 6);
-}
-
-esp_err_t LYDSTO_Driver::performSingleRefCalibration(uint8_t vhv_init_byte) {
-    esp_err_t err = writeReg8(Reg::SYSRANGE_START, 0x01 | vhv_init_byte);
-    if (err != ESP_OK) return err;
-
-    int64_t start = esp_timer_get_time();
-    uint8_t status;
-
-    do {
-        err = readReg8(Reg::RESULT_INTERRUPT_STATUS, &status);
-        if (err != ESP_OK) return err;
-
-        if ((esp_timer_get_time() - start) / 1000 > timeout_ms_) {
-            did_timeout_ = true;
-            return ESP_ERR_TIMEOUT;
-        }
-        vTaskDelay(1);
-    } while ((status & 0x07) == 0);
-
-    err = writeReg8(Reg::SYSTEM_INTERRUPT_CLEAR, 0x01);
-    if (err != ESP_OK) return err;
-
-    return writeReg8(Reg::SYSRANGE_START, 0x00);
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Timing Calculations (identical to VL53L1)
-// ═══════════════════════════════════════════════════════════════
-uint32_t LYDSTO_Driver::timeoutMclksToMicroseconds(uint16_t timeout_period_mclks, uint8_t vcsel_period_pclks) {
-    uint64_t macro_period_ns = calcMacroPeriod(vcsel_period_pclks);
-    return (uint32_t)(((timeout_period_mclks * macro_period_ns) + (macro_period_ns / 2)) / 1000);
-}
-
-uint32_t LYDSTO_Driver::timeoutMicrosecondsToMclks(uint32_t timeout_period_us, uint8_t vcsel_period_pclks) {
-    uint64_t macro_period_ns = calcMacroPeriod(vcsel_period_pclks);
-    return (uint32_t)((((uint64_t)timeout_period_us * 1000) + (macro_period_ns / 2)) / macro_period_ns);
-}
-
-uint16_t LYDSTO_Driver::decodeTimeout(uint16_t reg_val) {
-    return (uint16_t)((reg_val & 0x00FF) << (uint16_t)((reg_val & 0xFF00) >> 8)) + 1;
-}
-
-uint16_t LYDSTO_Driver::encodeTimeout(uint16_t timeout_mclks) {
-    uint32_t ls_byte = 0;
-    uint16_t ms_byte = 0;
-
-    if (timeout_mclks > 0) {
-        ls_byte = timeout_mclks - 1;
-        while ((ls_byte & 0xFFFFFF00) > 0) {
-            ls_byte >>= 1;
-            ms_byte++;
-        }
-        return (ms_byte << 8) | (uint16_t)(ls_byte & 0xFF);
-    }
-    return 0;
-}
-
-void LYDSTO_Driver::getSequenceStepEnables(SequenceStepEnables* enables) {
-    uint8_t seq_cfg;
-    readReg8(Reg::SYSTEM_SEQUENCE_CONFIG, &seq_cfg);
-    enables->tcc        = (seq_cfg >> 4) & 0x1;
-    enables->dss        = (seq_cfg >> 3) & 0x1;
-    enables->msrc       = (seq_cfg >> 2) & 0x1;
-    enables->pre_range  = (seq_cfg >> 6) & 0x1;
-    enables->final_range= (seq_cfg >> 7) & 0x1;
-}
-
-void LYDSTO_Driver::getSequenceStepTimeouts(SequenceStepEnables* enables, SequenceStepTimeouts* timeouts) {
-    uint8_t vcsel_reg;
-    readReg8(Reg::PRE_RANGE_CONFIG_VCSEL_PERIOD, &vcsel_reg);
-    timeouts->pre_range_vcsel_period_pclks = decodeVcselPeriod(vcsel_reg);
-
-    uint8_t msrc_timeout_reg;
-    readReg8(Reg::MSRC_CONFIG_TIMEOUT_MACROP, &msrc_timeout_reg);
-    timeouts->msrc_dss_tcc_mclks = msrc_timeout_reg + 1;
-    timeouts->msrc_dss_tcc_us    = timeoutMclksToMicroseconds(
-        timeouts->msrc_dss_tcc_mclks, timeouts->pre_range_vcsel_period_pclks);
-
-    uint16_t pre_range_timeout_reg;
-    readReg16(Reg::PRE_RANGE_CONFIG_TIMEOUT_MACROP_HI, &pre_range_timeout_reg);
-    timeouts->pre_range_mclks = decodeTimeout(pre_range_timeout_reg);
-    timeouts->pre_range_us    = timeoutMclksToMicroseconds(
-        timeouts->pre_range_mclks, timeouts->pre_range_vcsel_period_pclks);
-
-    readReg8(Reg::FINAL_RANGE_CONFIG_VCSEL_PERIOD, &vcsel_reg);
-    timeouts->final_range_vcsel_period_pclks = decodeVcselPeriod(vcsel_reg);
-
-    uint16_t final_range_timeout_reg;
-    readReg16(Reg::FINAL_RANGE_CONFIG_TIMEOUT_MACROP_HI, &final_range_timeout_reg);
-    timeouts->final_range_mclks = decodeTimeout(final_range_timeout_reg);
-
-    if (enables->pre_range) {
-        timeouts->final_range_mclks -= timeouts->pre_range_mclks;
-    }
-
-    timeouts->final_range_us = timeoutMclksToMicroseconds(
-        timeouts->final_range_mclks, timeouts->final_range_vcsel_period_pclks);
-}
-
-// ═══════════════════════════════════════════════════════════════
-// Configuration Methods
-// ═══════════════════════════════════════════════════════════════
-const char* LYDSTO_Driver::setSignalRateLimit(float limit_mcps) {
-    if (limit_mcps < 0 || limit_mcps > 511.99f) {
-        return "Rate limit out of range";
-    }
-
-    uint16_t reg_val = (uint16_t)(limit_mcps * (1 << 7));
-    esp_err_t err = writeReg16(Reg::FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT, reg_val);
-
-    return (err == ESP_OK) ? nullptr : "I2C write failed";
-}
-
-const char* LYDSTO_Driver::setMeasurementTimingBudget(uint32_t budget_us) {
-    SequenceStepEnables enables;
-    SequenceStepTimeouts timeouts;
-
-    getSequenceStepEnables(&enables);
-    getSequenceStepTimeouts(&enables, &timeouts);
-
-    const uint32_t StartOverhead = 1910;
-    const uint32_t EndOverhead = 960;
-    const uint32_t MsrcOverhead = 660;
-    const uint32_t TccOverhead = 590;
-    const uint32_t DssOverhead = 690;
-    const uint32_t PreRangeOverhead = 660;
-    const uint32_t FinalRangeOverhead = 550;
-
-    uint32_t used_budget_us = StartOverhead + EndOverhead;
-
-    if (enables.tcc) {
-        used_budget_us += (timeouts.msrc_dss_tcc_us + TccOverhead);
-    }
-
-    if (enables.dss) {
-        used_budget_us += 2 * (timeouts.msrc_dss_tcc_us + DssOverhead);
-    } else if (enables.msrc) {
-        used_budget_us += (timeouts.msrc_dss_tcc_us + MsrcOverhead);
-    }
-
-    if (enables.pre_range) {
-        used_budget_us += (timeouts.pre_range_us + PreRangeOverhead);
-    }
-
-    if (enables.final_range) {
-        used_budget_us += FinalRangeOverhead;
-
-        if (used_budget_us > budget_us) {
-            return "Timing budget too small";
-        }
-
-        uint32_t final_range_timeout_us = budget_us - used_budget_us;
-        uint16_t final_range_timeout_mclks = timeoutMicrosecondsToMclks(
-            final_range_timeout_us, timeouts.final_range_vcsel_period_pclks);
-
-        if (enables.pre_range) {
-            final_range_timeout_mclks -= timeouts.pre_range_mclks;
-        }
-
-        writeReg16(Reg::FINAL_RANGE_CONFIG_TIMEOUT_MACROP_HI,
-                  encodeTimeout(final_range_timeout_mclks));
-        measurement_timing_budget_us_ = budget_us;
     }
 
     return nullptr;
 }
 
-uint32_t LYDSTO_Driver::getMeasurementTimingBudget() {
-    SequenceStepEnables enables;
-    SequenceStepTimeouts timeouts;
+const char* LYDSTO_Driver::configureRangingMode() {
+    uint16_t desired_mode = ranging_mode_;
+    const char* mode_name = (ranging_mode_ == 0) ?
+                            "High Precision (30ms, 1.3m)" : "Long Distance (200ms, 4.0m)";
 
-    getSequenceStepEnables(&enables);
-    getSequenceStepTimeouts(&enables, &timeouts);
+    ESP_LOGI(TAG, "  Setting ranging mode to: %s (0x%04X)", mode_name, desired_mode);
 
-    const uint32_t StartOverhead = 1910;
-    const uint32_t EndOverhead = 960;
-    const uint32_t MsrcOverhead = 660;
-    const uint32_t TccOverhead = 590;
-    const uint32_t DssOverhead = 690;
-    const uint32_t PreRangeOverhead = 660;
-    const uint32_t FinalRangeOverhead = 550;
+    // Read current mode
+    auto read_response = modbus_->readHoldingRegisters(
+        modbus_slave_address_,
+        REG_RANGE_MODE,
+        1,
+        timeout_ms_
+    );
 
-    uint32_t budget_us = StartOverhead + EndOverhead;
-
-    if (enables.tcc) {
-        budget_us += (timeouts.msrc_dss_tcc_us + TccOverhead);
+    uint16_t current_mode = 0xFFFF;
+    if (read_response.success && read_response.data.size() >= 2) {
+        current_mode = (read_response.data[0] << 8) | read_response.data[1];
+        if (current_mode == desired_mode) {
+            ESP_LOGI(TAG, "  Mode already set correctly");
+            return nullptr;
+        }
     }
 
-    if (enables.dss) {
-        budget_us += 2 * (timeouts.msrc_dss_tcc_us + DssOverhead);
-    } else if (enables.msrc) {
-        budget_us += (timeouts.msrc_dss_tcc_us + MsrcOverhead);
+    // Write new mode
+    auto write_response = modbus_->writeSingleRegister(
+        modbus_slave_address_,
+        REG_RANGE_MODE,
+        desired_mode,
+        false,
+        timeout_ms_
+    );
+
+    logModbusResponse("Write RANGE_MODE", write_response);
+
+    if (!write_response.success) {
+        ESP_LOGE(TAG, "  FAILED: Could not write ranging mode");
+        return "Failed to write ranging mode";
     }
 
-    if (enables.pre_range) {
-        budget_us += (timeouts.pre_range_us + PreRangeOverhead);
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Verify
+    read_response = modbus_->readHoldingRegisters(
+        modbus_slave_address_,
+        REG_RANGE_MODE,
+        1,
+        timeout_ms_
+    );
+
+    if (read_response.success && read_response.data.size() >= 2) {
+        uint16_t verified_mode = (read_response.data[0] << 8) | read_response.data[1];
+        if (verified_mode != desired_mode) {
+            ESP_LOGE(TAG, "  VERIFICATION FAILED");
+            return "Ranging mode verification failed";
+        }
+        ESP_LOGI(TAG, "  Verification PASSED");
     }
 
-    if (enables.final_range) {
-        budget_us += (timeouts.final_range_us + FinalRangeOverhead);
-    }
-
-    measurement_timing_budget_us_ = budget_us;
-    return budget_us;
+    return nullptr;
 }
 
-const char* LYDSTO_Driver::setVcselPulsePeriod(uint8_t type, uint8_t period_pclks) {
-    uint8_t vcsel_period_reg = encodeVcselPeriod(period_pclks);
-
-    SequenceStepEnables enables;
-    SequenceStepTimeouts timeouts;
-
-    getSequenceStepEnables(&enables);
-    getSequenceStepTimeouts(&enables, &timeouts);
-
-    if (type == 0) {  // Pre-range
-        writeReg8(Reg::PRE_RANGE_CONFIG_VCSEL_PERIOD, vcsel_period_reg);
-
-        uint16_t new_pre_range_timeout_mclks = timeoutMicrosecondsToMclks(
-            timeouts.pre_range_us, period_pclks);
-        writeReg16(Reg::PRE_RANGE_CONFIG_TIMEOUT_MACROP_HI,
-                  encodeTimeout(new_pre_range_timeout_mclks));
-
-        uint16_t new_msrc_timeout_mclks = timeoutMicrosecondsToMclks(
-            timeouts.msrc_dss_tcc_us, period_pclks);
-        writeReg8(Reg::MSRC_CONFIG_TIMEOUT_MACROP,
-                 (new_msrc_timeout_mclks > 256) ? 255 : (uint8_t)(new_msrc_timeout_mclks - 1));
-    } else {  // Final range
-        writeReg8(Reg::FINAL_RANGE_CONFIG_VCSEL_PERIOD, vcsel_period_reg);
-
-        uint16_t new_final_range_timeout_mclks = timeoutMicrosecondsToMclks(
-            timeouts.final_range_us, period_pclks);
-
-        if (enables.pre_range) {
-            new_final_range_timeout_mclks += timeouts.pre_range_mclks;
-        }
-
-        writeReg16(Reg::FINAL_RANGE_CONFIG_TIMEOUT_MACROP_HI,
-                  encodeTimeout(new_final_range_timeout_mclks));
+const char* LYDSTO_Driver::configureContinuousMode() {
+    if (!enable_continuous_) {
+        ESP_LOGI(TAG, "  Continuous mode disabled by configuration");
+        return nullptr;
     }
 
-    setMeasurementTimingBudget(measurement_timing_budget_us_);
+    uint16_t output_interval = (ranging_mode_ == 0) ? 30 : 200;
+    ESP_LOGI(TAG, "  Setting continuous output interval to: %d ms", output_interval);
+
+    auto write_response = modbus_->writeSingleRegister(
+        modbus_slave_address_,
+        REG_CONTINUOUS_OUTPUT,
+        output_interval,
+        false,
+        timeout_ms_
+    );
+
+    logModbusResponse("Write CONTINUOUS_OUTPUT", write_response);
+
+    if (!write_response.success) {
+        ESP_LOGE(TAG, "  FAILED: Could not write continuous output setting");
+        return "Failed to configure continuous mode";
+    }
+
+    vTaskDelay(pdMS_TO_TICKS(50));
+
+    // Verify
+    auto read_response = modbus_->readHoldingRegisters(
+        modbus_slave_address_,
+        REG_CONTINUOUS_OUTPUT,
+        1,
+        timeout_ms_
+    );
+
+    if (read_response.success && read_response.data.size() >= 2) {
+        uint16_t verified_interval = (read_response.data[0] << 8) | read_response.data[1];
+        if (verified_interval != output_interval) {
+            ESP_LOGE(TAG, "  VERIFICATION FAILED");
+            return "Continuous mode verification failed";
+        }
+        ESP_LOGI(TAG, "  Verification PASSED");
+    }
+
+    return nullptr;
+}
+
+const char* LYDSTO_Driver::verifyConfiguration() {
+    ESP_LOGI(TAG, "  Performing final configuration verification...");
+
+    auto response = modbus_->readHoldingRegisters(
+        modbus_slave_address_,
+        REG_RANGE_MODE,
+        1,
+        timeout_ms_
+    );
+
+    if (!response.success) {
+        return "Final verification failed";
+    }
+
+    uint16_t mode = (response.data[0] << 8) | response.data[1];
+    if (mode != ranging_mode_) {
+        ESP_LOGE(TAG, "  Final check: Ranging mode mismatch");
+        return "Final ranging mode mismatch";
+    }
+
+    ESP_LOGI(TAG, "  Final verification: All settings correct");
     return nullptr;
 }
 
@@ -630,14 +315,13 @@ const char* LYDSTO_Driver::configure() {
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "LYDSTO ToF Driver Configuration");
     ESP_LOGI(TAG, "========================================");
-    ESP_LOGI(TAG, "I2C Port: %d", i2c_port_);
-    ESP_LOGI(TAG, "SDA: GPIO%d, SCL: GPIO%d", sda_pin_, scl_pin_);
-    ESP_LOGI(TAG, "XSHUT: GPIO%d", xshut_pin_);
-    ESP_LOGI(TAG, "Address: 0x%02X, Frequency: %lu Hz", i2c_address_, i2c_freq_hz_);
-    ESP_LOGI(TAG, "IO Voltage: %s", io_2v8_ ? "2.8V" : "1.8V");
+    ESP_LOGI(TAG, "UART Port: %d", uart_port_);
+    ESP_LOGI(TAG, "TX: GPIO%d, RX: GPIO%d", uart_tx_pin_, uart_rx_pin_);
+    ESP_LOGI(TAG, "Baud Rate: %lu", (unsigned long)baud_rate_);
+    ESP_LOGI(TAG, "Slave Address: 0x%02X", modbus_slave_address_);
     ESP_LOGI(TAG, "Timeout: %d ms", timeout_ms_);
-    ESP_LOGI(TAG, "Timing Budget: %lu us", timing_budget_us_);
-    ESP_LOGI(TAG, "Signal Rate Limit: %.2f MCPS", signal_rate_limit_mcps_);
+    ESP_LOGI(TAG, "Ranging Mode: %s", ranging_mode_ == 0 ? "High Precision" : "Long Distance");
+    ESP_LOGI(TAG, "Continuous: %s", enable_continuous_ ? "Enabled" : "Disabled");
     ESP_LOGI(TAG, "========================================");
 
     return nullptr;
@@ -648,92 +332,13 @@ const char* LYDSTO_Driver::init() {
         return nullptr;
     }
 
-    ESP_LOGI(TAG, "[INIT] Acquiring I2C lock");
-    if (!lockI2C()) {
-        return "Failed to lock I2C";
+    ESP_LOGI(TAG, "Initializing Modbus UART communication...");
+    const char* err = initModbus();
+    if (err != nullptr) {
+        return err;
     }
-
-    ESP_LOGI(TAG, "[INIT] Initializing I2C bus and device...");
-
-    // Handle XSHUT pin if configured
-    if (xshut_pin_ != GPIO_NUM_NC) {
-        ESP_LOGI(TAG, "Configuring XSHUT pin (GPIO%d)", xshut_pin_);
-        gpio_config_t xshut_config = {
-            .pin_bit_mask = (1ULL << xshut_pin_),
-            .mode = GPIO_MODE_OUTPUT,
-            .pull_up_en = GPIO_PULLUP_DISABLE,
-            .pull_down_en = GPIO_PULLDOWN_DISABLE,
-            .intr_type = GPIO_INTR_DISABLE,
-        };
-
-        if (gpio_config(&xshut_config) == ESP_OK) {
-            // Reset sensor via XSHUT
-            gpio_set_level(xshut_pin_, 0);
-            vTaskDelay(pdMS_TO_TICKS(10));
-            gpio_set_level(xshut_pin_, 1);
-            vTaskDelay(pdMS_TO_TICKS(10));
-            ESP_LOGI(TAG, "Sensor reset via XSHUT");
-        }
-    }
-
-    // Create I2C bus only if it doesn't exist yet
-    if (shared_bus_handle_ == nullptr) {
-        ESP_LOGI(TAG, "Creating shared I2C bus (first instance)");
-
-        i2c_master_bus_config_t bus_config = {
-            .i2c_port          = i2c_port_,
-            .sda_io_num        = sda_pin_,
-            .scl_io_num        = scl_pin_,
-            .clk_source        = I2C_CLK_SRC_DEFAULT,
-            .glitch_ignore_cnt = 7,
-            .intr_priority     = 0,
-            .trans_queue_depth = 0,
-            .flags             = { .enable_internal_pullup = true },
-        };
-
-        esp_err_t err = i2c_new_master_bus(&bus_config, &shared_bus_handle_);
-        if (err != ESP_OK) {
-            ESP_LOGI(TAG, "[INIT] Releasing I2C lock after bus creation failure");
-            unlockI2C();
-            ESP_LOGE(TAG, "FAILED to create I2C bus: %s", esp_err_to_name(err));
-            return "I2C bus creation failed";
-        }
-        ESP_LOGI(TAG, "Shared I2C bus created");
-    } else {
-        ESP_LOGI(TAG, "Using existing shared I2C bus");
-    }
-
-    // Increment reference count
-    bus_reference_count_++;
-    ESP_LOGI(TAG, "Bus reference count: %d", bus_reference_count_);
-
-    // Add THIS instance as a device on the shared bus
-    i2c_device_config_t dev_config = {
-        .dev_addr_length = I2C_ADDR_BIT_LEN_7,
-        .device_address  = i2c_address_,
-        .scl_speed_hz    = i2c_freq_hz_,
-        .scl_wait_us     = 0,
-        .flags           = {0},
-    };
-
-    esp_err_t err = i2c_master_bus_add_device(shared_bus_handle_, &dev_config, &dev_handle_);
-    if (err != ESP_OK) {
-        // If this fails and we just created the bus, clean it up
-        if (bus_reference_count_ == 1) {
-            i2c_del_master_bus(shared_bus_handle_);
-            shared_bus_handle_ = nullptr;
-        }
-        bus_reference_count_--;
-        ESP_LOGI(TAG, "[INIT] Releasing I2C lock after device add failure");
-        unlockI2C();
-        ESP_LOGE(TAG, "FAILED to add device: %s", esp_err_to_name(err));
-        return "Device add failed";
-    }
-    ESP_LOGI(TAG, "Device added to bus at 0x%02X", i2c_address_);
 
     initialized_ = true;
-    ESP_LOGI(TAG, "[INIT] Releasing I2C lock");
-    unlockI2C();
     return nullptr;
 }
 
@@ -742,115 +347,28 @@ const char* LYDSTO_Driver::setup() {
         return "Not initialized";
     }
 
-    ESP_LOGI(TAG, "Loading initialization sequences...");
+    ESP_LOGI(TAG, "Setting up device configuration...");
 
-    if (!lockI2C()) {
-        return "Failed to lock I2C";
+    const char* err = testCommunication();
+    if (err != nullptr) {
+        return err;
     }
 
-    // Ensure register page 0 and allow FW boot completion (datasheet tBOOT <= 1.2ms)
-    writeReg8(0xFF, 0x00);
-    vTaskDelay(pdMS_TO_TICKS(5));
-
-    // Validate sensor identity using reference registers from datasheet/API examples
-    uint8_t model_id = 0;
-    uint8_t module_type = 0;
-    uint8_t revision_id = 0;
-    uint8_t reg_0x51 = 0;
-    uint8_t reg_0x61 = 0;
-    esp_err_t err = ESP_FAIL;
-
-    for (int attempt = 0; attempt < 5; ++attempt) {
-        writeReg8(0xFF, 0x00);
-        err = readReg8(Reg::IDENTIFICATION_MODEL_ID, &model_id);
-        if (err != ESP_OK) {
-            vTaskDelay(pdMS_TO_TICKS(5));
-            continue;
-        }
-
-        readReg8(0xC1, &module_type);
-        readReg8(Reg::IDENTIFICATION_REVISION_ID, &revision_id);
-        readReg8(0x51, &reg_0x51);
-        readReg8(0x61, &reg_0x61);
-
-        if (model_id == 0xEE) {
-            break;
-        }
-
-        ESP_LOGW(TAG,
-                 "Identity check attempt %d failed: C0=0x%02X C1=0x%02X C2=0x%02X 51=0x%02X 61=0x%02X",
-                 attempt + 1, model_id, module_type, revision_id, reg_0x51, reg_0x61);
-        vTaskDelay(pdMS_TO_TICKS(5));
+    err = readCurrentConfiguration();
+    if (err != nullptr) {
+        return err;
     }
 
-    if (err != ESP_OK) {
-        unlockI2C();
-        ESP_LOGE(TAG, "FAILED to read model ID: %s", esp_err_to_name(err));
-        return "Model ID read failed";
+    err = configureRangingMode();
+    if (err != nullptr) {
+        return err;
     }
 
-    if (model_id != 0xEE) {
-        unlockI2C();
-        ESP_LOGE(TAG, "Model ID mismatch: expected 0xEE, got 0x%02X", model_id);
-        return "Wrong sensor model";
-    }
-    ESP_LOGI(TAG, "Model ID verified: 0x%02X (C1=0x%02X, C2=0x%02X)", model_id, module_type, revision_id);
-
-    // Datasheet/API: enable 2V8 mode when IO lines run at AVDD levels
-    if (io_2v8_) {
-        uint8_t ext_sup_hv = 0;
-        if (readReg8(Reg::VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV, &ext_sup_hv) == ESP_OK) {
-            writeReg8(Reg::VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV, ext_sup_hv | 0x01);
-        }
+    err = configureContinuousMode();
+    if (err != nullptr) {
+        return err;
     }
 
-    // Access stop variable using hidden register page sequence
-    writeReg8(0x80, 0x01);
-    writeReg8(0xFF, 0x01);
-    writeReg8(0x00, 0x00);
-    err = readReg8(0x91, &stop_variable_);
-    writeReg8(0x00, 0x01);
-    writeReg8(0xFF, 0x00);
-    writeReg8(0x80, 0x00);
-    if (err != ESP_OK) {
-        unlockI2C();
-        return "Failed to read stop variable";
-    }
-
-    err = loadInitSequence();
-    if (err != ESP_OK) {
-        unlockI2C();
-        return "Init sequence failed";
-    }
-    ESP_LOGI(TAG, "Initialization sequence loaded");
-
-    uint8_t msrc_config;
-    err = readReg8(Reg::MSRC_CONFIG_CONTROL, &msrc_config);
-    if (err == ESP_OK) {
-        writeReg8(Reg::MSRC_CONFIG_CONTROL, msrc_config | 0x12);
-    }
-
-    setSignalRateLimit(signal_rate_limit_mcps_);
-
-    uint8_t spad_count;
-    bool spad_type_is_aperture;
-    err = configureSPAD(&spad_count, &spad_type_is_aperture);
-    if (err != ESP_OK) {
-        ESP_LOGW(TAG, "SPAD configuration warning (continuing)");
-    }
-
-    writeReg8(Reg::SYSTEM_INTERRUPT_CONFIG_GPIO, 0x04);
-    uint8_t gpio_mux;
-    readReg8(Reg::GPIO_HV_MUX_ACTIVE_HIGH, &gpio_mux);
-    writeReg8(Reg::GPIO_HV_MUX_ACTIVE_HIGH, gpio_mux & ~0x10);
-    writeReg8(Reg::SYSTEM_INTERRUPT_CLEAR, 0x01);
-
-    measurement_timing_budget_us_ = getMeasurementTimingBudget();
-    writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0xE8);
-    setMeasurementTimingBudget(timing_budget_us_);
-    ESP_LOGI(TAG, "Timing budget set: %lu us", timing_budget_us_);
-
-    unlockI2C();
     ESP_LOGI(TAG, "Setup complete");
     return nullptr;
 }
@@ -860,27 +378,10 @@ const char* LYDSTO_Driver::calibrate() {
         return "Not initialized";
     }
 
-    ESP_LOGI(TAG, "Running calibrations...");
+    ESP_LOGI(TAG, "Calibration (Modbus devices typically pre-calibrated)");
+    // TOF400F modules come pre-calibrated
+    // If custom calibration needed, implement here
 
-    writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0x01);
-    esp_err_t err = performSingleRefCalibration(0x40);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "VHV calibration FAILED");
-        return "VHV calibration failed";
-    }
-    ESP_LOGI(TAG, "VHV calibration OK");
-
-    writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0x02);
-    err = performSingleRefCalibration(0x00);
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Phase calibration FAILED");
-        return "Phase calibration failed";
-    }
-    ESP_LOGI(TAG, "Phase calibration OK");
-
-    writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0xE8);
-
-    ESP_LOGI(TAG, "Calibration complete");
     return nullptr;
 }
 
@@ -891,10 +392,15 @@ const char* LYDSTO_Driver::check() {
 
     ESP_LOGI(TAG, "Performing health check...");
 
-    uint8_t model_id;
-    esp_err_t err = readReg8(Reg::IDENTIFICATION_MODEL_ID, &model_id);
-    if (err != ESP_OK || model_id != 0xEE) {
-        ESP_LOGE(TAG, "Health check FAILED: sensor not responding or wrong model");
+    auto response = modbus_->readHoldingRegisters(
+        modbus_slave_address_,
+        REG_SPECIAL,
+        1,
+        timeout_ms_
+    );
+
+    if (!response.success) {
+        ESP_LOGE(TAG, "Health check FAILED: Device not responding");
         return "Health check failed";
     }
 
@@ -907,97 +413,29 @@ bool LYDSTO_Driver::read_sensor(MeasurementResult& result) {
         return false;
     }
 
-    if (!lockI2C()) {
-        result.valid = false;
+    timeout_occurred_ = false;
+
+    auto response = modbus_->readHoldingRegisters(
+        modbus_slave_address_,
+        REG_MEASUREMENT,
+        1,
+        timeout_ms_
+    );
+
+    if (!response.success) {
+        timeout_occurred_ = (response.esp_error == ESP_ERR_TIMEOUT);
         return false;
     }
 
-    // Prepare for measurement
-    writeReg8(0x80, 0x01);
-    writeReg8(0xFF, 0x01);
-    writeReg8(0x00, 0x00);
-    writeReg8(0x91, stop_variable_);
-    writeReg8(0x00, 0x01);
-    writeReg8(0xFF, 0x00);
-    writeReg8(0x80, 0x00);
+    if (response.data.size() < 2) {
+        return false;
+    }
 
-    // Start measurement
-    writeReg8(Reg::SYSRANGE_START, 0x01);
-
-    // Wait for start
-    int64_t start = esp_timer_get_time();
-    uint8_t sysrange_start_val;
-
-    do {
-        esp_err_t err = readReg8(Reg::SYSRANGE_START, &sysrange_start_val);
-        if (err != ESP_OK) {
-            ESP_LOGI(TAG, "[READ] Releasing I2C lock (read start failed)");
-            unlockI2C();
-            return false;
-        }
-
-        if (timeout_ms_ > 0 && (esp_timer_get_time() - start) / 1000 > timeout_ms_) {
-            result.valid = false;
-            result.timeout_occurred = true;
-            did_timeout_ = true;
-            ESP_LOGW(TAG, "[READ] Timeout waiting for start");
-            ESP_LOGI(TAG, "[READ] Releasing I2C lock");
-            unlockI2C();
-            return false;
-        }
-        vTaskDelay(1);
-    } while (sysrange_start_val & 0x01);
-
-    result.timestamp_us = esp_timer_get_time();
-    result.timeout_occurred = false;
+    result.distance_mm = (response.data[0] << 8) | response.data[1];
     result.range_status = 0;
-
-    // Wait for result
-    start = esp_timer_get_time();
-    uint8_t interrupt_status;
-
-    do {
-        esp_err_t err = readReg8(Reg::RESULT_INTERRUPT_STATUS, &interrupt_status);
-        if (err != ESP_OK) {
-            result.valid = false;
-            ESP_LOGI(TAG, "[READ] Releasing I2C lock (interrupt status read failed)");
-            unlockI2C();
-            return false;
-        }
-
-        if (timeout_ms_ > 0 && (esp_timer_get_time() - start) / 1000 > timeout_ms_) {
-            result.valid = false;
-            result.timeout_occurred = true;
-            result.distance_mm = 65535;
-            did_timeout_ = true;
-            ESP_LOGW(TAG, "[READ] Timeout waiting for result");
-            ESP_LOGI(TAG, "[READ] Releasing I2C lock");
-            unlockI2C();
-            return false;
-        }
-        vTaskDelay(1);
-    } while ((interrupt_status & 0x07) == 0);
-
-    // Read distance
-    uint16_t range_mm;
-    esp_err_t err = readReg16(Reg::RESULT_RANGE_STATUS + 10, &range_mm);
-    if (err != ESP_OK) {
-        result.valid = false;
-        ESP_LOGI(TAG, "[READ] Releasing I2C lock (range read failed)");
-        unlockI2C();
-        return false;
-    }
-
-    // Clear interrupt
-    writeReg8(Reg::SYSTEM_INTERRUPT_CLEAR, 0x01);
-
-    result.distance_mm = range_mm;
-    result.valid = (range_mm < 8190);
+    result.valid = (result.distance_mm > 0 && result.distance_mm < 8190);
     result.timeout_occurred = false;
-
-    ESP_LOGI(TAG, "[READ] Measurement complete: %u mm valid=%d status=%u", result.distance_mm, result.valid, result.range_status);
-    ESP_LOGI(TAG, "[READ] Releasing I2C lock");
-    unlockI2C();
+    result.timestamp_us = esp_timer_get_time();
 
     return true;
 }
@@ -1011,7 +449,7 @@ void LYDSTO_Driver::setTimeout(uint16_t timeout_ms) {
 }
 
 bool LYDSTO_Driver::timeoutOccurred() {
-    bool occurred = did_timeout_;
-    did_timeout_ = false;
+    bool occurred = timeout_occurred_;
+    timeout_occurred_ = false;
     return occurred;
 }

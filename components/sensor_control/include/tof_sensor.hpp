@@ -6,14 +6,14 @@
 // DRIVER SELECTION - Change this ONE line to switch drivers
 // ═══════════════════════════════════════════════════════════════
 
-#include "vl53l0x.hpp"    // ← This include determines which driver is used
+//#include "vl53l0x.hpp"    // ← This include determines which driver is used
 //#include "vl53l1.hpp"    // ← This include determines which driver is used
 //#include "vl53l1_modbus.hpp"    // ← This include determines which driver is used
-//#include "lydsto.hpp"    // ← This include determines which driver is used
+#include "lydsto.hpp"    // ← This include determines which driver is used
 
 // Options:
 //   "vl53l0x.hpp"         → for VL53L0X (I2C)
-//   "lydsto.hpp"          → for LYDSTO (I2C, VL53L0X-compatible structure)
+//   "lydsto.hpp"          → for LYDSTO (UART/Modbus)
 //   "vl53l1.hpp"          → for VL53L1 (I2C)
 //   "vl53l1_modbus.hpp"   → for VL53L1_Modbus (UART)
 // ═══════════════════════════════════════════════════════════════
