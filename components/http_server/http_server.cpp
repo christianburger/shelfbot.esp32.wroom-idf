@@ -171,14 +171,31 @@ esp_err_t HttpServer::register_uri_handlers() {
 
 esp_err_t HttpServer::motor_page_handler(httpd_req_t* req) {
     const char* page = R"HTML(
-<!doctype html><html><body><h2>Motor Control</h2>
-<p>Units align with micro-ROS: position_rad, velocity_rad_s.</p>
-<input id='idx' type='number' value='0'/><input id='pos' type='number' value='0'/><input id='vel' type='number' value='0'/>
-<button onclick='setMotor()'>Set</button><pre id='out'></pre>
+<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{font-family:Inter,Arial;background:#0b1020;color:#e2e8f0;margin:0;padding:20px}
+.top{display:flex;justify-content:space-between;align-items:center}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:16px}
+.card{background:#141b34;border:1px solid #334155;border-radius:14px;padding:14px}.row{display:flex;gap:8px;align-items:center;margin:8px 0}
+input{width:100%;padding:8px;border-radius:8px;border:1px solid #475569;background:#0f172a;color:#e2e8f0}
+button{padding:8px 12px;border:0;border-radius:10px;background:#22c55e;color:#04110a;font-weight:700;cursor:pointer}
+.json{background:#020617;border-radius:10px;padding:10px;font-family:monospace;min-height:90px;white-space:pre-wrap}
+.pill{padding:2px 8px;border-radius:999px;background:#1e293b;font-size:12px}
+</style></head><body>
+<div class='top'><h2>Motor Control Dashboard</h2><a href='/' style='color:#93c5fd'>← Main Dashboard</a></div>
+<p>Per-motor independent set/get using micro-ROS units: <b>position_rad</b> and <b>velocity_rad_s</b>.</p>
+<div class='grid' id='motors'></div>
 <script>
-async function load(){document.getElementById('out').textContent=JSON.stringify(await (await fetch('/api/motor/status')).json(),null,2);}
-async function setMotor(){const b={motor:+idx.value,position_rad:+pos.value,velocity_rad_s:+vel.value};await fetch('/api/motor/set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});load();}
-load();setInterval(load,1000);
+const N=5;
+function card(i){return `<div class='card'>
+  <div class='row'><h3 style='margin:0'>Motor ${i}</h3><span class='pill' id='run${i}'>--</span></div>
+  <div class='row'><label>Position (rad)</label></div><div class='row'><input id='pos${i}' type='number' step='0.01' value='0'></div>
+  <div class='row'><label>Velocity (rad/s)</label></div><div class='row'><input id='vel${i}' type='number' step='0.01' value='0'></div>
+  <div class='row'><button onclick='send(${i})'>Apply Motor ${i}</button></div>
+  <div class='json' id='json${i}'>Loading...</div></div>`;}
+document.getElementById('motors').innerHTML=[...Array(N).keys()].map(card).join('');
+async function load(){const data=await (await fetch('/api/motor/status')).json(); data.motors.forEach(m=>{document.getElementById('run'+m.motor).textContent=m.running?'RUNNING':'IDLE';document.getElementById('json'+m.motor).textContent=JSON.stringify(m,null,2);});}
+async function send(i){const b={motor:i,position_rad:+document.getElementById('pos'+i).value,velocity_rad_s:+document.getElementById('vel'+i).value};await fetch('/api/motor/set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});load();}
+load(); setInterval(load,500);
 </script></body></html>)HTML";
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, page, HTTPD_RESP_USE_STRLEN);
