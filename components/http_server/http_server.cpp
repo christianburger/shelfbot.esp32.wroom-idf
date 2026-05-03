@@ -1,5 +1,7 @@
 #include "include/http_server.hpp"
 #include "lidar_sensor.hpp"
+#include "sensor_control.hpp"
+#include "firmware_version.hpp"
 
 static const char *TAG = "http_server";
 
@@ -12,6 +14,21 @@ static esp_err_t root_handler(httpd_req_t *req) {
     ESP_LOGI(TAG, "Serving root page from embedded file");
     httpd_resp_set_type(req, "text/html");
     httpd_resp_send(req, (const char *)index_html_start, index_html_end - index_html_start);
+    return ESP_OK;
+}
+
+static esp_err_t features_handler(httpd_req_t *req) {
+    cJSON *root = cJSON_CreateObject();
+    cJSON_AddStringToObject(root, "firmware_version", FirmwareVersion::get_version_string());
+    cJSON_AddBoolToObject(root, "ultrasonic_enabled", SENSOR_FEATURES.enable_ultrasonic);
+    cJSON_AddBoolToObject(root, "tof_enabled", SENSOR_FEATURES.enable_tof);
+    cJSON_AddBoolToObject(root, "lidar_enabled", SENSOR_FEATURES.enable_lidar);
+
+    const char *json_string = cJSON_Print(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json_string, HTTPD_RESP_USE_STRLEN);
+    cJSON_Delete(root);
+    free((void*)json_string);
     return ESP_OK;
 }
 
@@ -207,11 +224,14 @@ static esp_err_t health_handler(httpd_req_t *req) {
 
     // Check ToF sensor
     std::vector<SensorCommon::Reading> tof_readings;
-    bool tof_healthy = false;
-    if (ToFSensorManager::instance().get_latest_readings(tof_readings) && !tof_readings.empty()) {
+    bool tof_healthy = !SENSOR_FEATURES.enable_tof;
+    if (SENSOR_FEATURES.enable_tof &&
+        ToFSensorManager::instance().get_latest_readings(tof_readings) && !tof_readings.empty()) {
         tof_healthy = tof_readings[0].valid;
         cJSON_AddStringToObject(sensors, "tof", tof_healthy ? "HEALTHY" : "UNHEALTHY");
         cJSON_AddNumberToObject(sensors, "tof_distance", tof_readings[0].distance_cm);
+    } else if (!SENSOR_FEATURES.enable_tof) {
+        cJSON_AddStringToObject(sensors, "tof", "DISABLED");
     } else {
         cJSON_AddStringToObject(sensors, "tof", "OFFLINE");
     }
@@ -290,9 +310,13 @@ void start_webserver(void) {
     config.stack_size = 8192;
 
     ESP_LOGI(TAG, "Starting server on port: '%d'", config.server_port);
+    FirmwareVersion::print_version("http_server");
     if (httpd_start(&server, &config) == ESP_OK) {
         httpd_uri_t root_uri = { .uri = "/", .method = HTTP_GET, .handler = root_handler, .user_ctx = NULL };
         httpd_register_uri_handler(server, &root_uri);
+
+        httpd_uri_t features_uri = { .uri = "/features", .method = HTTP_GET, .handler = features_handler, .user_ctx = NULL };
+        httpd_register_uri_handler(server, &features_uri);
 
         httpd_uri_t status_uri = { .uri = "/status", .method = HTTP_GET, .handler = status_handler, .user_ctx = NULL };
         httpd_register_uri_handler(server, &status_uri);

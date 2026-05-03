@@ -9,6 +9,7 @@
 extern "C" void app_main(void)
 {
   ESP_LOGI("app_main", "App starting...");
+  FirmwareVersion::print_version("app_main");
 
   // Use singleton instance instead of direct construction
   Shelfbot& shelfbot = Shelfbot::get_instance();

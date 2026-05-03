@@ -8,6 +8,19 @@
 #include "sensor_common.hpp"
 #include <cstdint>
 
+struct SensorFeatureConfig {
+  bool enable_ultrasonic;
+  bool enable_tof;
+  bool enable_lidar;
+};
+
+// Explicit main feature table for enabling/disabling drivers.
+static constexpr SensorFeatureConfig SENSOR_FEATURES = {
+  .enable_ultrasonic = true,
+  .enable_tof = false,
+  .enable_lidar = true,
+};
+
 #define NUM_ULTRASONIC_SENSORS 2
 #define NUM_TOF_SENSORS 1
 #define NUM_LYDSTO_SENSORS 1

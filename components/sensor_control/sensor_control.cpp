@@ -15,7 +15,6 @@ static const char* TAG = "sensor_control";
 const float COLLISION_THRESHOLD_CM = 2.0;
 static int64_t last_emergency_stop_time_us = 0;
 static const int64_t EMERGENCY_STOP_COOLDOWN_US = 500000; // 500ms cooldown
-static constexpr bool ENABLE_TOF_SENSORS = false; // Disabled when Lydsto LiDAR mode is active
 
 
 // --- Global Queues ---
@@ -49,7 +48,8 @@ static void sensor_reader_task(void* arg) {
     }
 
     // Read Ultrasonic Sensors
-    if (UltrasonicSensorManager::instance().get_latest_readings(ultrasonic_readings)) {
+    if (SENSOR_FEATURES.enable_ultrasonic &&
+        UltrasonicSensorManager::instance().get_latest_readings(ultrasonic_readings)) {
       for (size_t i = 0; i < ultrasonic_readings.size() && i < NUM_ULTRASONIC_SENSORS; i++) {
         packet.ultrasonic_distances_cm[i] = ultrasonic_readings[i].distance_cm;
         packet.ultrasonic_valid[i] = ultrasonic_readings[i].valid;
@@ -66,7 +66,7 @@ static void sensor_reader_task(void* arg) {
     }
 
     // Read ToF Sensors
-    if (ENABLE_TOF_SENSORS && ToFSensorManager::instance().get_latest_readings(tof_readings)) {
+    if (SENSOR_FEATURES.enable_tof && ToFSensorManager::instance().get_latest_readings(tof_readings)) {
       for (size_t i = 0; i < tof_readings.size() && i < NUM_TOF_SENSORS; i++) {
         packet.tof_distances_cm[i] = tof_readings[i].distance_cm;
         packet.tof_valid[i] = tof_readings[i].valid;
@@ -83,7 +83,8 @@ static void sensor_reader_task(void* arg) {
     }
 
     // Read Lydsto LiDAR-derived proximity sensors
-    if (LidarSensorManager::instance().get_latest_readings(lidar_readings)) {
+    if (SENSOR_FEATURES.enable_lidar &&
+        LidarSensorManager::instance().get_latest_readings(lidar_readings)) {
       for (size_t i = 0; i < lidar_readings.size() && i < NUM_LYDSTO_SENSORS; i++) {
         packet.lydsto_distances_cm[i] = lidar_readings[i].distance_cm;
         packet.lydsto_valid[i] = lidar_readings[i].valid;
@@ -161,12 +162,13 @@ void sensor_control_init() {
     }
   };
 
-  if (!UltrasonicSensorManager::instance().configure(ultrasonic_configs, NUM_ULTRASONIC_SENSORS)) {
+  if (SENSOR_FEATURES.enable_ultrasonic &&
+      !UltrasonicSensorManager::instance().configure(ultrasonic_configs, NUM_ULTRASONIC_SENSORS)) {
     ESP_LOGE(TAG, "Failed to configure ultrasonic sensors");
   }
 
   // Configure ToF Sensors
-  if (ENABLE_TOF_SENSORS) {
+  if (SENSOR_FEATURES.enable_tof) {
     ToFSensorConfig tof_configs[NUM_TOF_SENSORS] = {
       {
         .i2c_port = I2C_NUM_0,
@@ -182,7 +184,7 @@ void sensor_control_init() {
       ESP_LOGE(TAG, "Failed to configure ToF sensors");
     }
   } else {
-    ESP_LOGI(TAG, "ToF sensors disabled (Lydsto LiDAR mode)");
+    ESP_LOGI(TAG, "ToF sensors disabled by feature table");
   }
 
   // Configure Lydsto LiDAR sensor (TX-only UART stream + optional PWM control)
@@ -197,7 +199,8 @@ void sensor_control_init() {
   };
   lidar_configs[0].driver_config.pwm_mode = LydstoLidar::PwmMode::NOT_CONNECTED;
 
-  if (!LidarSensorManager::instance().configure(lidar_configs, NUM_LYDSTO_SENSORS)) {
+  if (SENSOR_FEATURES.enable_lidar &&
+      !LidarSensorManager::instance().configure(lidar_configs, NUM_LYDSTO_SENSORS)) {
     ESP_LOGE(TAG, "Failed to configure Lydsto sensors");
   }
 
@@ -206,17 +209,20 @@ void sensor_control_init() {
 
 void sensor_control_start_task() {
   // Start ultrasonic reading task
-  if (!UltrasonicSensorManager::instance().start_reading_task(100, 5)) {
+  if (SENSOR_FEATURES.enable_ultrasonic &&
+      !UltrasonicSensorManager::instance().start_reading_task(100, 5)) {
     ESP_LOGE(TAG, "Failed to start ultrasonic reading task");
   }
 
   // Start ToF reading task
-  if (ENABLE_TOF_SENSORS && !ToFSensorManager::instance().start_reading_task(100, 5)) {
+  if (SENSOR_FEATURES.enable_tof &&
+      !ToFSensorManager::instance().start_reading_task(100, 5)) {
     ESP_LOGE(TAG, "Failed to start ToF reading task");
   }
 
   // Start Lydsto reading task
-  if (!LidarSensorManager::instance().start_reading_task(100, 5)) {
+  if (SENSOR_FEATURES.enable_lidar &&
+      !LidarSensorManager::instance().start_reading_task(100, 5)) {
     ESP_LOGE(TAG, "Failed to start Lydsto reading task");
   }
 

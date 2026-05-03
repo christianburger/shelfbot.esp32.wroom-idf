@@ -134,6 +134,7 @@
 <body>
 <div class="container">
     <h1>🤖 Shelfbot Control Panel</h1>
+    <div class="status-label" id="fwVersion">Firmware: loading...</div>
 
     <div class="auto-refresh">
         <input type="checkbox" id="autoRefresh" checked>
@@ -141,7 +142,7 @@
     </div>
 
     <div class="status-grid">
-        <div class="status-card">
+        <div class="status-card" id="tofCard">
             <h3>ToF Distance Sensor</h3>
             <div class="status-value" id="tofDistance">-- cm</div>
             <div class="status-label" id="tofStatus">Loading...</div>
@@ -157,7 +158,7 @@
             <button class="refresh-btn" onclick="updateHealth()">Refresh</button>
         </div>
 
-        <div class="status-card">
+        <div class="status-card" id="lidarCard">
             <h3>LiDAR Debug</h3>
             <div class="status-value" id="lidarDistance">-- cm</div>
             <div class="status-label" id="lidarStatus">Loading...</div>
@@ -180,6 +181,7 @@
 <script>
     const NUM_MOTORS = 5;
     let autoRefreshInterval;
+    let featureFlags = { ultrasonic_enabled: true, tof_enabled: true, lidar_enabled: true };
 
     function createMotorControls() {
         const container = document.getElementById('motor-controls-container');
@@ -220,6 +222,7 @@
     }
 
     function updateToF() {
+        if (!featureFlags.tof_enabled) return;
         fetch('/tof')
             .then(r => r.json())
             .then(data => {
@@ -277,6 +280,7 @@
     }
 
     function updateLidarDebug() {
+        if (!featureFlags.lidar_enabled) return;
         fetch('/lidar_debug')
             .then(r => r.json())
             .then(data => {
@@ -325,11 +329,31 @@
 
     document.addEventListener('DOMContentLoaded', () => {
     createMotorControls();
-    updateToF();
-    updateHealth();
-    updateLidarDebug();
+    loadFeatures().then(() => {
+        updateToF();
+        updateHealth();
+        updateLidarDebug();
         startAutoRefresh();
+    });
     });
 </script>
 </body>
 </html>
+    function updateFeatureView() {
+        document.getElementById('tofCard').style.display = featureFlags.tof_enabled ? 'block' : 'none';
+        document.getElementById('lidarCard').style.display = featureFlags.lidar_enabled ? 'block' : 'none';
+    }
+
+    function loadFeatures() {
+        return fetch('/features')
+            .then(r => r.json())
+            .then(data => {
+                featureFlags = data;
+                document.getElementById('fwVersion').textContent = `Firmware: ${data.firmware_version}`;
+                updateFeatureView();
+            })
+            .catch(err => {
+                console.error('Feature fetch error:', err);
+                document.getElementById('fwVersion').textContent = 'Firmware: unavailable';
+            });
+    }
