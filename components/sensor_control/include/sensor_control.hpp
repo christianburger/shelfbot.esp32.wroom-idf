@@ -54,6 +54,7 @@ public:
         // Callbacks (can be nullptr if not needed)
         std::function<void(const std::vector<uint16_t>&)> ultrasonic_callback = nullptr;
         std::function<void(const SensorCommon::TofMeasurement*)> tof_callback = nullptr;
+        std::function<void(const SensorCommon::LidarMeasurement&)> lidar_callback = nullptr;
     };
 
     SensorControl(const Config& config);

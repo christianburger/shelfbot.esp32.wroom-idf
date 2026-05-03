@@ -1,13 +1,15 @@
 #pragma once
 #include <idf_c_includes.hpp>
 #include "sensor_common.hpp"
-#include "tof_sensor.hpp"
+#include "lydsto.hpp"
 
 class LidarSensor {
 public:
-  explicit LidarSensor(TofSensor* tof) : tof_(tof) {}
-  bool is_ready() const { return tof_ && tof_->is_sensor_ready(0); }
+  explicit LidarSensor(const uart_port_t uart_port, int tx_pin, int rx_pin, uint32_t baud_rate);
+  bool is_ready() const { return initialized_ && driver_.isReady(); }
+  esp_err_t initialize();
   esp_err_t read(SensorCommon::LidarMeasurement& out);
 private:
-  TofSensor* tof_;
+  LYDSTO_Driver driver_;
+  bool initialized_;
 };

@@ -100,9 +100,22 @@ esp_err_t SensorControl::initialize_tof() {
 
     ESP_LOGI(TAG, "TOF sensors initialized successfully");
     if (config_.lidar_config.enabled) {
-        lidar_sensor_ = std::make_unique<LidarSensor>(tof_sensor_.get());
+        lidar_sensor_ = std::make_unique<LidarSensor>(
+            static_cast<uart_port_t>(config_.lidar_config.uart_port),
+            config_.lidar_config.uart_tx_pin,
+            config_.lidar_config.uart_rx_pin,
+            config_.lidar_config.baud_rate);
+        if (lidar_sensor_->initialize() != ESP_OK) {
+            ESP_LOGE(TAG, "Lidar UART init failed");
+            lidar_sensor_.reset();
+            return ESP_FAIL;
+        }
         latest_data_.lidar_measurement.active = true;
-        ESP_LOGI(TAG, "LidarSensor initialized (LYDSTO over UART port %d)", config_.lidar_config.uart_port);
+        ESP_LOGI(TAG, "LidarSensor initialized (UART=%d RX=%d TX=%d BAUD=%lu)",
+                 config_.lidar_config.uart_port,
+                 config_.lidar_config.uart_rx_pin,
+                 config_.lidar_config.uart_tx_pin,
+                 static_cast<unsigned long>(config_.lidar_config.baud_rate));
     } else {
         latest_data_.lidar_measurement.active = false;
     }
@@ -288,6 +301,9 @@ void SensorControl::continuous_read_loop() {
             if ((now - last_tof_wake) * portTICK_PERIOD_MS >= config_.tof_read_interval_ms) {
                 if (config_.tof_callback) {
                     config_.tof_callback(latest_data_.tof_measurements);
+                }
+                if (config_.lidar_callback && config_.lidar_config.enabled) {
+                    config_.lidar_callback(latest_data_.lidar_measurement);
                 }
                 last_tof_wake = now;
             }
