@@ -237,54 +237,36 @@ esp_err_t HttpServer::root_handler(httpd_req_t* req) {
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
-                body { font-family: Arial, sans-serif; margin: 40px; }
-                h1 { color: #333; }
-                .endpoint { background: #f5f5f5; padding: 15px; margin: 10px 0; border-radius: 5px; }
-                code { background: #e0e0e0; padding: 2px 5px; border-radius: 3px; }
-                a { color: #0066cc; text-decoration: none; }
+                body { font-family: Inter, Arial, sans-serif; margin: 0; background:#0f172a; color:#e2e8f0; }
+                .container { max-width: 1100px; margin: 0 auto; padding: 28px; }
+                h1 { margin: 0 0 6px; }
+                .subtitle { color:#94a3b8; margin-bottom:24px; }
+                .grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap:16px; }
+                .card { background:#1e293b; border:1px solid #334155; padding:16px; border-radius:12px; }
+                .card h3 { margin-top:0; }
+                code { background:#0b1220; padding:2px 6px; border-radius:4px; color:#93c5fd; }
+                a { color: #93c5fd; text-decoration: none; font-weight:600; }
                 a:hover { text-decoration: underline; }
+                pre { white-space: pre-wrap; background:#020617; color:#a7f3d0; padding:10px; border-radius:8px; min-height:160px; }
             </style>
         </head>
         <body>
-            <h1>📡 Shelfbot ESP32 HTTP Server</h1>
-            <p>Welcome to the Shelfbot sensor monitoring interface.</p>
+            <div class="container">
+                <h1>🤖 Shelfbot Dashboard</h1>
+                <p class="subtitle">Jump to sensors, motor controls, and diagnostics.</p>
 
-            <h2>📊 Sensor Endpoints</h2>
-            <div class="endpoint">
-                <h3><a href="/api/sensors">All Sensors</a></h3>
-                <code>GET /api/sensors</code>
-                <p>Get data from all sensors (ultrasonic + ToF)</p>
-            </div>
+                <div class="grid">
+                    <div class="card"><h3>📦 Sensor Dashboard</h3><p><a href="/api/sensors">Open all sensors JSON</a></p><code>GET /api/sensors</code></div>
+                    <div class="card"><h3>📡 ToF</h3><p><a href="/api/tof">Open ToF JSON</a></p><code>GET /api/tof</code></div>
+                    <div class="card"><h3>🛰️ LiDAR</h3><p><a href="/api/lidar">Open LiDAR JSON</a></p><code>GET /api/lidar</code></div>
+                    <div class="card"><h3>📏 Ultrasonic</h3><p><a href="/api/ultrasonic">Open ultrasonic JSON</a></p><code>GET /api/ultrasonic</code></div>
+                    <div class="card"><h3>⚙️ Motor Control UI</h3><p><a href="/motor.html">Open motor control page</a></p><code>/motor.html</code></div>
+                    <div class="card"><h3>❤️ Health</h3><p><a href="/api/health">Open system health JSON</a></p><code>GET /api/health</code></div>
+                </div>
 
-            <div class="endpoint">
-                <h3><a href="/api/tof">ToF Sensor</a></h3>
-                <code>GET /api/tof</code>
-                <p>Get data from Time-of-Flight sensor</p>
-            </div>
-
-            <div class="endpoint">
-                <h3><a href="/api/lidar">LiDAR Debug</a></h3>
-                <code>GET /api/lidar</code>
-                <p>Get primary LiDAR distance from ToF stream</p>
-            </div>
-
-            <div class="endpoint">
-                <h3><a href="/api/ultrasonic">Ultrasonic Sensors</a></h3>
-                <code>GET /api/ultrasonic</code>
-                <p>Get data from ultrasonic distance sensors</p>
-            </div>
-
-            <h2>⚙️ System Endpoints</h2>
-            <div class="endpoint">
-                <h3><a href="/api/health">System Health</a></h3>
-                <code>GET /api/health</code>
-                <p>Check system health and sensor status</p>
-            </div>
-
-            <h2>🔴 Live Sensor Data</h2>
-            <div class="endpoint">
+                <h3 style="margin-top:24px;">Live Sensor Stream</h3>
                 <code>Auto-refresh: 1s from /api/sensors</code>
-                <pre id="sensor-data" style="white-space: pre-wrap; background:#111; color:#0f0; padding:10px; border-radius:4px; min-height:140px;">Loading...</pre>
+                <pre id="sensor-data">Loading...</pre>
             </div>
 
             <script>
@@ -302,11 +284,6 @@ esp_err_t HttpServer::root_handler(httpd_req_t* req) {
                 refreshSensors();
                 setInterval(refreshSensors, 1000);
             </script>
-
-            <hr>
-            <p style="color: #666; font-size: 0.9em;">
-                Shelfbot ESP32 Firmware | Built with ESP-IDF
-            </p>
         </body>
         </html>
     )";
