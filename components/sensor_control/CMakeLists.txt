@@ -2,6 +2,7 @@ idf_component_register(
   SRCS
   "ultrasonic_sensor.cpp"
   "tof_sensor.cpp"
+  "lidar_sensor.cpp"
   "sensor_control.cpp"
   "sensor_manager.cpp"
   "i2c_scanner.cpp"
