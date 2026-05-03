@@ -282,14 +282,20 @@ const char* LydstoLidar::init() {
         return "UART setup failed";
     }
 
-    if (pimpl_->config.enable_external_speed_control && !pimpl_->setup_pwm()) {
-        return "PWM setup failed";
-    }
-    if (!pimpl_->config.enable_external_speed_control &&
-        pimpl_->config.ground_pwm_when_internal &&
-        pimpl_->config.pwm_pin != GPIO_NUM_NC &&
-        !pimpl_->ground_pwm_pin()) {
-        return "PWM low-level setup failed";
+    if (pimpl_->config.pwm_mode == PwmMode::EXTERNAL_PWM_CONTROL) {
+        if (pimpl_->config.pwm_pin == GPIO_NUM_NC) {
+            return "PWM pin must be connected for EXTERNAL_PWM_CONTROL mode";
+        }
+        if (!pimpl_->setup_pwm()) {
+            return "PWM setup failed";
+        }
+    } else if (pimpl_->config.pwm_mode == PwmMode::DRIVE_LOW_INTERNAL) {
+        if (pimpl_->config.pwm_pin == GPIO_NUM_NC) {
+            return "PWM pin must be connected for DRIVE_LOW_INTERNAL mode";
+        }
+        if (!pimpl_->ground_pwm_pin()) {
+            return "PWM low-level setup failed";
+        }
     }
 
     pimpl_->initialized = true;
@@ -355,12 +361,11 @@ LydstoLidar::Config lydsto_default_config(uart_port_t uart_port,
         .pwm_pin = pwm_pin,
         .uart_rx_buffer_size = 4096,
         .uart_read_timeout_ms = 20,
-        .enable_external_speed_control = false,
+        .pwm_mode = LydstoLidar::PwmMode::NOT_CONNECTED,
         .pwm_frequency_hz = 30000,
         .pwm_duty_cycle = 0.50f,
         .min_distance_mm = 20,
         .max_distance_mm = 12000,
         .min_intensity = 1,
-        .ground_pwm_when_internal = (pwm_pin != GPIO_NUM_NC),
     };
 }

@@ -9,6 +9,12 @@
 
 class LydstoLidar {
 public:
+    enum class PwmMode : uint8_t {
+        NOT_CONNECTED = 0,     // Do not touch PWM line from MCU (external strap decides behavior)
+        DRIVE_LOW_INTERNAL,    // MCU drives PWM pin low for internal speed control mode
+        EXTERNAL_PWM_CONTROL   // MCU generates 20-50kHz PWM, ~50% duty
+    };
+
     struct Point {
         float angle_deg;
         uint16_t distance_mm;
@@ -42,7 +48,7 @@ public:
         uint32_t uart_rx_buffer_size;
         uint32_t uart_read_timeout_ms;
 
-        bool enable_external_speed_control;
+        PwmMode pwm_mode;
         uint32_t pwm_frequency_hz;   // LD19 recommends 20-50kHz, 30kHz typical
         float pwm_duty_cycle;        // External control trigger window: (45%, 55%)
 
@@ -50,8 +56,6 @@ public:
         uint16_t max_distance_mm;
         uint8_t min_intensity;
 
-        // If true and external PWM control is disabled, drive PWM pin low per LD19 guidance.
-        bool ground_pwm_when_internal;
     };
 
     explicit LydstoLidar(const Config& config);
