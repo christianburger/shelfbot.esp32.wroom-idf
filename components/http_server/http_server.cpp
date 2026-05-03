@@ -254,6 +254,52 @@ std::string HttpServer::get_sensor_status_text(const SensorCommon::TofMeasuremen
     }
 }
 
+std::string HttpServer::get_sensor_status_text(const SensorCommon::LidarMeasurement& measurement) {
+    if (!measurement.valid) {
+        return "invalid";
+    }
+
+    switch (measurement.status) {
+        case 0: return "ok";
+        case 1: return "sigma_fail";
+        case 2: return "signal_fail";
+        case 3: return "min_range_fail";
+        case 4: return "phase_fail";
+        case 5: return "hw_fail";
+        case 6: return "range_valid_min_range_clipped";
+        case 7: return "sync_int_fail";
+        case 8: return "no_update";
+        case 9: return "wrapped_target_fail";
+        case 10: return "processing_fail";
+        case 11: return "x_talk_fail";
+        case 12: return "range_ignore_threshold";
+        default: return "unknown";
+    }
+}
+
+std::string HttpServer::get_sensor_status_text(const SensorCommon::Reading& measurement) {
+    if (!measurement.valid) {
+        return "invalid";
+    }
+
+    switch (measurement.status) {
+        case 0: return "ok";
+        case 1: return "sigma_fail";
+        case 2: return "signal_fail";
+        case 3: return "min_range_fail";
+        case 4: return "phase_fail";
+        case 5: return "hw_fail";
+        case 6: return "range_valid_min_range_clipped";
+        case 7: return "sync_int_fail";
+        case 8: return "no_update";
+        case 9: return "wrapped_target_fail";
+        case 10: return "processing_fail";
+        case 11: return "x_talk_fail";
+        case 12: return "range_ignore_threshold";
+        default: return "unknown";
+    }
+}
+
 cJSON* HttpServer::create_tof_json(const SensorCommon::SensorDataPacket& sensor_data) {
     cJSON* tof_array = cJSON_CreateArray();
 
@@ -287,6 +333,7 @@ cJSON* HttpServer::create_ultrasonic_json(const SensorCommon::SensorDataPacket& 
         cJSON_AddNumberToObject(sensor_obj, "distance_cm", reading.distance_cm);
         cJSON_AddBoolToObject(sensor_obj, "valid", reading.valid);
         cJSON_AddNumberToObject(sensor_obj, "status", reading.status);
+        cJSON_AddStringToObject(sensor_obj, "status_text", get_sensor_status_text(reading).c_str());
         cJSON_AddNumberToObject(sensor_obj, "timestamp_us", reading.timestamp_us);
 
         cJSON_AddItemToArray(ultrasonic_array, sensor_obj);
