@@ -18,6 +18,14 @@ public:
     };
 
     struct Config {
+        enum class LidarDriverType : uint8_t {
+            NONE = 0,
+            LYDSTO,
+            VL53L0X,
+            VL53L1,
+            VL53L1_MODBUS
+        };
+
         // Ultrasonic sensors configuration
         std::vector<UltrasonicConfig> ultrasonic_configs;
 
@@ -29,6 +37,12 @@ public:
         };
 
         TofConfig tof_configs[SensorCommon::NUM_TOF_SENSORS];
+
+        struct LidarConfig {
+            bool enabled = false;
+            LidarDriverType driver = LidarDriverType::NONE;
+            uint8_t tof_sensor_index = 0;
+        } lidar_config;
 
         // Reading intervals
         uint32_t ultrasonic_read_interval_ms = 100;
@@ -96,6 +110,7 @@ private:
     // Internal helpers
     esp_err_t initialize_ultrasonic();
     esp_err_t initialize_tof();
+    esp_err_t update_lidar_measurement_from_tof();
 
     static const char* TAG;
 
