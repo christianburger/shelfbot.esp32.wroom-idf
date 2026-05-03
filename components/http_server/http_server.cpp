@@ -3,6 +3,8 @@
 #include <esp_task_wdt.h>
 #include <sstream>
 #include <iomanip>
+#include <algorithm>
+#include "firmware_version.hpp"
 
 const char* HttpServer::TAG = "HttpServer";
 
@@ -120,6 +122,30 @@ esp_err_t HttpServer::register_uri_handlers() {
     };
     httpd_register_uri_handler(server_, &health_uri);
 
+    httpd_uri_t motor_page_uri = {
+        .uri = "/motor.html",
+        .method = HTTP_GET,
+        .handler = motor_page_handler,
+        .user_ctx = nullptr
+    };
+    httpd_register_uri_handler(server_, &motor_page_uri);
+
+    httpd_uri_t motor_status_uri = {
+        .uri = "/api/motor/status",
+        .method = HTTP_GET,
+        .handler = motor_status_handler,
+        .user_ctx = nullptr
+    };
+    httpd_register_uri_handler(server_, &motor_status_uri);
+
+    httpd_uri_t motor_set_uri = {
+        .uri = "/api/motor/set",
+        .method = HTTP_POST,
+        .handler = motor_set_handler,
+        .user_ctx = nullptr
+    };
+    httpd_register_uri_handler(server_, &motor_set_uri);
+
     // CORS OPTIONS handlers
     const char* cors_endpoints[] = {
         "/api/tof",
@@ -127,6 +153,8 @@ esp_err_t HttpServer::register_uri_handlers() {
         "/api/ultrasonic",
         "/api/sensors",
         "/api/health",
+        "/api/motor/status",
+        "/api/motor/set",
     };
 
     for (const auto& endpoint : cors_endpoints) {
@@ -142,10 +170,85 @@ esp_err_t HttpServer::register_uri_handlers() {
     return ESP_OK;
 }
 
+esp_err_t HttpServer::motor_page_handler(httpd_req_t* req) {
+    std::string page = std::string(R"HTML(
+<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
+<style>
+body{font-family:Inter,Arial;background:#0b1020;color:#e2e8f0;margin:0;padding:20px}
+.top{display:flex;justify-content:space-between;align-items:center}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:16px}
+.card{background:#141b34;border:1px solid #334155;border-radius:14px;padding:14px}.row{display:flex;gap:8px;align-items:center;margin:8px 0}
+input{width:100%;padding:8px;border-radius:8px;border:1px solid #475569;background:#0f172a;color:#e2e8f0}
+button{padding:8px 12px;border:0;border-radius:10px;background:#22c55e;color:#04110a;font-weight:700;cursor:pointer}
+.json{background:#020617;border-radius:10px;padding:10px;font-family:monospace;min-height:90px;white-space:pre-wrap}
+.pill{padding:2px 8px;border-radius:999px;background:#1e293b;font-size:12px}
+</style></head><body>
+<div class='top'><h2>Motor Control Dashboard</h2><a href='/' style='color:#93c5fd'>← Main Dashboard</a></div>
+<div class='pill'>Firmware: )HTML") + FirmwareVersion::get_version_string() + R"HTML(</div>
+<p>Per-motor independent set/get using micro-ROS units: <b>position_rad</b> and <b>velocity_rad_s</b>.</p>
+<div class='grid' id='motors'></div>
+<script>
+const N=5;
+function card(i){return `<div class='card'>
+  <div class='row'><h3 style='margin:0'>Motor ${i}</h3><span class='pill' id='run${i}'>--</span></div>
+  <div class='row'><label>Position (rad)</label></div><div class='row'><input id='pos${i}' type='number' step='0.01' value='0'></div>
+  <div class='row'><label>Velocity (rad/s)</label></div><div class='row'><input id='vel${i}' type='number' step='0.01' value='0'></div>
+  <div class='row'><button onclick='send(${i})'>Apply Motor ${i}</button></div>
+  <div class='json' id='json${i}'>Loading...</div></div>`;}
+document.getElementById('motors').innerHTML=[...Array(N).keys()].map(card).join('');
+async function load(){const data=await (await fetch('/api/motor/status')).json(); data.motors.forEach(m=>{document.getElementById('run'+m.motor).textContent=m.running?'RUNNING':'IDLE';document.getElementById('json'+m.motor).textContent=JSON.stringify(m,null,2);});}
+async function send(i){const b={motor:i,position_rad:+document.getElementById('pos'+i).value,velocity_rad_s:+document.getElementById('vel'+i).value};await fetch('/api/motor/set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});load();}
+load(); setInterval(load,500);
+</script></body></html>)HTML";
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    return httpd_resp_send(req, page.c_str(), HTTPD_RESP_USE_STRLEN);
+}
+
+esp_err_t HttpServer::motor_status_handler(httpd_req_t* req) {
+    add_cors_headers(req);
+    cJSON* root = cJSON_CreateObject();
+    cJSON* motors = cJSON_CreateArray();
+    for (int i = 0; i < NUM_MOTORS; i++) {
+        cJSON* m = cJSON_CreateObject();
+        cJSON_AddNumberToObject(m, "motor", i);
+        cJSON_AddNumberToObject(m, "position_rad", motor_control_get_position(i));
+        cJSON_AddNumberToObject(m, "velocity_rad_s", motor_control_get_velocity(i));
+        cJSON_AddBoolToObject(m, "running", motor_control_is_motor_running(i));
+        cJSON_AddItemToArray(motors, m);
+    }
+    cJSON_AddItemToObject(root, "motors", motors);
+    char* json = cJSON_PrintUnformatted(root);
+    httpd_resp_set_type(req, "application/json");
+    httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+    cJSON_free(json);
+    cJSON_Delete(root);
+    return ESP_OK;
+}
+
+esp_err_t HttpServer::motor_set_handler(httpd_req_t* req) {
+    add_cors_headers(req);
+    char buf[256];
+    int len = httpd_req_recv(req, buf, std::min((int)sizeof(buf) - 1, (int)req->content_len));
+    if (len <= 0) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid body");
+    buf[len] = '\0';
+    cJSON* body = cJSON_Parse(buf);
+    if (!body) return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+    cJSON* motor = cJSON_GetObjectItem(body, "motor");
+    cJSON* pos = cJSON_GetObjectItem(body, "position_rad");
+    cJSON* vel = cJSON_GetObjectItem(body, "velocity_rad_s");
+    if (cJSON_IsNumber(motor)) {
+        uint8_t idx = (uint8_t)motor->valueint;
+        if (cJSON_IsNumber(pos)) motor_control_set_position(idx, pos->valuedouble);
+        if (cJSON_IsNumber(vel)) motor_control_set_velocity(idx, vel->valuedouble);
+    }
+    cJSON_Delete(body);
+    httpd_resp_set_type(req, "application/json");
+    return httpd_resp_sendstr(req, "{\"ok\":true}");
+}
+
 // Handler implementations
 
 esp_err_t HttpServer::root_handler(httpd_req_t* req) {
-    const char* html_response = R"(
+    std::string html_response = std::string(R"(
         <!DOCTYPE html>
         <html>
         <head>
@@ -153,54 +256,37 @@ esp_err_t HttpServer::root_handler(httpd_req_t* req) {
             <meta charset="UTF-8">
             <meta name="viewport" content="width=device-width, initial-scale=1">
             <style>
-                body { font-family: Arial, sans-serif; margin: 40px; }
-                h1 { color: #333; }
-                .endpoint { background: #f5f5f5; padding: 15px; margin: 10px 0; border-radius: 5px; }
-                code { background: #e0e0e0; padding: 2px 5px; border-radius: 3px; }
-                a { color: #0066cc; text-decoration: none; }
+                body { font-family: Inter, Arial, sans-serif; margin: 0; background:#0f172a; color:#e2e8f0; }
+                .container { max-width: 1100px; margin: 0 auto; padding: 28px; }
+                h1 { margin: 0 0 6px; }
+                .subtitle { color:#94a3b8; margin-bottom:24px; }
+                .grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap:16px; }
+                .card { background:#1e293b; border:1px solid #334155; padding:16px; border-radius:12px; }
+                .card h3 { margin-top:0; }
+                code { background:#0b1220; padding:2px 6px; border-radius:4px; color:#93c5fd; }
+                a { color: #93c5fd; text-decoration: none; font-weight:600; }
                 a:hover { text-decoration: underline; }
+                pre { white-space: pre-wrap; background:#020617; color:#a7f3d0; padding:10px; border-radius:8px; min-height:160px; }
             </style>
         </head>
         <body>
-            <h1>📡 Shelfbot ESP32 HTTP Server</h1>
-            <p>Welcome to the Shelfbot sensor monitoring interface.</p>
+            <div class="container">
+                <h1>🤖 Shelfbot Dashboard</h1>
+                <p class="subtitle">Jump to sensors, motor controls, and diagnostics.</p>
+                <p class="subtitle">Firmware: )") + FirmwareVersion::get_version_string() + R"(</p>
 
-            <h2>📊 Sensor Endpoints</h2>
-            <div class="endpoint">
-                <h3><a href="/api/sensors">All Sensors</a></h3>
-                <code>GET /api/sensors</code>
-                <p>Get data from all sensors (ultrasonic + ToF)</p>
-            </div>
+                <div class="grid">
+                    <div class="card"><h3>📦 Sensor Dashboard</h3><p><a href="/api/sensors">Open all sensors JSON</a></p><code>GET /api/sensors</code></div>
+                    <div class="card"><h3>📡 ToF</h3><p><a href="/api/tof">Open ToF JSON</a></p><code>GET /api/tof</code></div>
+                    <div class="card"><h3>🛰️ LiDAR</h3><p><a href="/api/lidar">Open LiDAR JSON</a></p><code>GET /api/lidar</code></div>
+                    <div class="card"><h3>📏 Ultrasonic</h3><p><a href="/api/ultrasonic">Open ultrasonic JSON</a></p><code>GET /api/ultrasonic</code></div>
+                    <div class="card"><h3>⚙️ Motor Control UI</h3><p><a href="/motor.html">Open motor control page</a></p><code>/motor.html</code></div>
+                    <div class="card"><h3>❤️ Health</h3><p><a href="/api/health">Open system health JSON</a></p><code>GET /api/health</code></div>
+                </div>
 
-            <div class="endpoint">
-                <h3><a href="/api/tof">ToF Sensor</a></h3>
-                <code>GET /api/tof</code>
-                <p>Get data from Time-of-Flight sensor</p>
-            </div>
-
-            <div class="endpoint">
-                <h3><a href="/api/lidar">LiDAR Debug</a></h3>
-                <code>GET /api/lidar</code>
-                <p>Get primary LiDAR distance from ToF stream</p>
-            </div>
-
-            <div class="endpoint">
-                <h3><a href="/api/ultrasonic">Ultrasonic Sensors</a></h3>
-                <code>GET /api/ultrasonic</code>
-                <p>Get data from ultrasonic distance sensors</p>
-            </div>
-
-            <h2>⚙️ System Endpoints</h2>
-            <div class="endpoint">
-                <h3><a href="/api/health">System Health</a></h3>
-                <code>GET /api/health</code>
-                <p>Check system health and sensor status</p>
-            </div>
-
-            <h2>🔴 Live Sensor Data</h2>
-            <div class="endpoint">
+                <h3 style="margin-top:24px;">Live Sensor Stream</h3>
                 <code>Auto-refresh: 1s from /api/sensors</code>
-                <pre id="sensor-data" style="white-space: pre-wrap; background:#111; color:#0f0; padding:10px; border-radius:4px; min-height:140px;">Loading...</pre>
+                <pre id="sensor-data">Loading...</pre>
             </div>
 
             <script>
@@ -218,17 +304,12 @@ esp_err_t HttpServer::root_handler(httpd_req_t* req) {
                 refreshSensors();
                 setInterval(refreshSensors, 1000);
             </script>
-
-            <hr>
-            <p style="color: #666; font-size: 0.9em;">
-                Shelfbot ESP32 Firmware | Built with ESP-IDF
-            </p>
         </body>
         </html>
     )";
 
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, html_response, strlen(html_response));
+    return httpd_resp_send(req, html_response.c_str(), HTTPD_RESP_USE_STRLEN);
 }
 
 std::string HttpServer::get_sensor_status_text(const SensorCommon::TofMeasurement& measurement) {

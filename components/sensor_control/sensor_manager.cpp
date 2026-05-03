@@ -1,5 +1,6 @@
 #include "include/sensor_manager.hpp"
 #include "include/sensor_control.hpp"
+#include "firmware_version.hpp"
 #include <sstream>
 
 static const char* TAG = "SensorManager";
@@ -15,6 +16,7 @@ void SensorManager::monitor_task(void* arg) {
 
 void SensorManager::monitor_loop() {
     ESP_LOGI(TAG, "Sensor monitor loop started (independent of network connectivity)");
+    uint32_t monitor_line_counter = 0;
 
     while (monitor_task_running_) {
         SensorCommon::SensorDataPacket snapshot;
@@ -40,6 +42,10 @@ void SensorManager::monitor_loop() {
                      snapshot.ultrasonic_readings[3].distance_cm,
                      tof_distance_stream.str().c_str(),
                      tof_valid_stream.str().c_str());
+            monitor_line_counter++;
+            if (monitor_line_counter % 40 == 0) {
+                ESP_LOGI(TAG, "Firmware Version (every 40 lines): %s", FirmwareVersion::get_version_string());
+            }
         } else {
             ESP_LOGW(TAG, "Sensor snapshot unavailable");
         }
@@ -74,13 +80,6 @@ void SensorManager::initialize(const SensorControl::Config& config) {
                     latest_data_.ultrasonic_readings[i].distance_cm = distances[i] / 10.0f;
                 }
                 latest_data_.timestamp_us = esp_timer_get_time();
-#if SHELFBOT_HAS_LIDAR
-                latest_data_.lidar_measurement.distance_mm = latest_data_.tof_measurements[0].distance_mm;
-                latest_data_.lidar_measurement.valid = latest_data_.tof_measurements[0].valid;
-                latest_data_.lidar_measurement.status = latest_data_.tof_measurements[0].status;
-                latest_data_.lidar_measurement.timestamp_us = latest_data_.tof_measurements[0].timestamp_us;
-                latest_data_.lidar_measurement.timeout_occurred = latest_data_.tof_measurements[0].timeout_occurred;
-#endif
                 xSemaphoreGive(data_mutex_);
             }
         };
@@ -93,13 +92,6 @@ void SensorManager::initialize(const SensorControl::Config& config) {
                     latest_data_.tof_measurements[i] = measurements[i];
                 }
                 latest_data_.timestamp_us = esp_timer_get_time();
-#if SHELFBOT_HAS_LIDAR
-                latest_data_.lidar_measurement.distance_mm = latest_data_.tof_measurements[0].distance_mm;
-                latest_data_.lidar_measurement.valid = latest_data_.tof_measurements[0].valid;
-                latest_data_.lidar_measurement.status = latest_data_.tof_measurements[0].status;
-                latest_data_.lidar_measurement.timestamp_us = latest_data_.tof_measurements[0].timestamp_us;
-                latest_data_.lidar_measurement.timeout_occurred = latest_data_.tof_measurements[0].timeout_occurred;
-#endif
                 xSemaphoreGive(data_mutex_);
             }
         };
@@ -122,14 +114,15 @@ void SensorManager::initialize(const SensorControl::Config& config) {
     // Initialize the latest_data_ structure
     for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS; i++) {
         latest_data_.ultrasonic_readings[i] = SensorCommon::Reading();
+        latest_data_.ultrasonic_readings[i].active = (i < static_cast<int>(config.ultrasonic_configs.size()));
     }
     for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
         latest_data_.tof_measurements[i] = SensorCommon::TofMeasurement();
+        latest_data_.tof_measurements[i].active = config.tof_configs[i].enabled;
     }
     latest_data_.timestamp_us = 0;
-#if SHELFBOT_HAS_LIDAR
     latest_data_.lidar_measurement = SensorCommon::LidarMeasurement();
-#endif
+    latest_data_.lidar_measurement.active = config.lidar_config.enabled;
 
     initialized_ = true;
     ESP_LOGI(TAG, "SensorManager initialized successfully");
