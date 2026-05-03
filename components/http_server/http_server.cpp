@@ -262,6 +262,29 @@ std::string HttpServer::get_sensor_status_text_impl(bool valid, uint8_t status) 
         default: return "unknown";
     }
 }
+std::string HttpServer::get_sensor_status_text(const SensorCommon::LidarMeasurement& measurement) {
+    if (!measurement.valid) {
+        return "invalid";
+    }
+
+    switch (measurement.status) {
+        case 0: return "ok";
+        case 1: return "sigma_fail";
+        case 2: return "signal_fail";
+        case 3: return "min_range_fail";
+        case 4: return "phase_fail";
+        case 5: return "hw_fail";
+        case 6: return "range_valid_min_range_clipped";
+        case 7: return "sync_int_fail";
+        case 8: return "no_update";
+        case 9: return "wrapped_target_fail";
+        case 10: return "processing_fail";
+        case 11: return "x_talk_fail";
+        case 12: return "range_ignore_threshold";
+        default: return "unknown";
+    }
+}
+
 
 cJSON* HttpServer::create_tof_json(const SensorCommon::SensorDataPacket& sensor_data) {
     cJSON* tof_array = cJSON_CreateArray();
