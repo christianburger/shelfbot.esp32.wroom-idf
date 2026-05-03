@@ -99,10 +99,13 @@ esp_err_t SensorControl::initialize_tof() {
     }
 
     ESP_LOGI(TAG, "TOF sensors initialized successfully");
-#if SHELFBOT_HAS_LIDAR
-    lidar_sensor_ = std::make_unique<LidarSensor>(tof_sensor_.get());
-    ESP_LOGI(TAG, "LidarSensor initialized");
-#endif
+    if (config_.lidar_config.enabled) {
+        lidar_sensor_ = std::make_unique<LidarSensor>(tof_sensor_.get());
+        latest_data_.lidar_measurement.active = true;
+        ESP_LOGI(TAG, "LidarSensor initialized (driver=%d)", static_cast<int>(config_.lidar_config.driver));
+    } else {
+        latest_data_.lidar_measurement.active = false;
+    }
     return ESP_OK;
 }
 
@@ -134,6 +137,36 @@ esp_err_t SensorControl::initialize() {
     ESP_LOGI(TAG, "Sensor Control Initialization Complete");
     ESP_LOGI(TAG, "=========================================");
 
+    for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS; i++) {
+        latest_data_.ultrasonic_readings[i].active = (i < static_cast<int>(config_.ultrasonic_configs.size()));
+    }
+    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
+        latest_data_.tof_measurements[i].active = config_.tof_configs[i].enabled;
+    }
+    latest_data_.lidar_measurement.active = config_.lidar_config.enabled;
+
+    return ESP_OK;
+}
+
+esp_err_t SensorControl::update_lidar_measurement_from_tof() {
+    latest_data_.lidar_measurement.active = config_.lidar_config.enabled;
+    if (!config_.lidar_config.enabled) {
+        latest_data_.lidar_measurement.valid = false;
+        latest_data_.lidar_measurement.status = 0;
+        return ESP_OK;
+    }
+
+    uint8_t idx = config_.lidar_config.tof_sensor_index;
+    if (idx >= SensorCommon::NUM_TOF_SENSORS) {
+        return ESP_ERR_INVALID_ARG;
+    }
+
+    const auto& tof = latest_data_.tof_measurements[idx];
+    latest_data_.lidar_measurement.distance_mm = tof.distance_mm;
+    latest_data_.lidar_measurement.valid = tof.valid;
+    latest_data_.lidar_measurement.status = tof.status;
+    latest_data_.lidar_measurement.timestamp_us = tof.timestamp_us;
+    latest_data_.lidar_measurement.timeout_occurred = tof.timeout_occurred;
     return ESP_OK;
 }
 
@@ -236,13 +269,7 @@ void SensorControl::continuous_read_loop() {
             }
 
             latest_data_.timestamp_us = timestamp;
-#if SHELFBOT_HAS_LIDAR
-            latest_data_.lidar_measurement.distance_mm = latest_data_.tof_measurements[0].distance_mm;
-            latest_data_.lidar_measurement.valid = latest_data_.tof_measurements[0].valid;
-            latest_data_.lidar_measurement.status = latest_data_.tof_measurements[0].status;
-            latest_data_.lidar_measurement.timestamp_us = latest_data_.tof_measurements[0].timestamp_us;
-            latest_data_.lidar_measurement.timeout_occurred = latest_data_.tof_measurements[0].timeout_occurred;
-#endif
+            update_lidar_measurement_from_tof();
 
             xSemaphoreGive(data_mutex_);
 

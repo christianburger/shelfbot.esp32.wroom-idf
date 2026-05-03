@@ -19,7 +19,7 @@ namespace SensorCommon {
     bool active;          // Compile-time configured presence
     bool valid;           // Quick validity flag
 
-    Reading() : distance_cm(0.0f), status(0), timestamp_us(0), active(SHELFBOT_HAS_ULTRASONIC), valid(false) {}
+    Reading() : distance_cm(0.0f), status(0), timestamp_us(0), active(false), valid(false) {}
   };
 
   // ToF sensor data structure
@@ -31,7 +31,7 @@ namespace SensorCommon {
     int64_t timestamp_us;
     bool timeout_occurred;
 
-    TofMeasurement() : distance_mm(0), active(SHELFBOT_HAS_TOF), valid(false), status(0),
+    TofMeasurement() : distance_mm(0), active(false), valid(false), status(0),
                        timestamp_us(0), timeout_occurred(false) {}
 
     // Helper to get distance in cm
@@ -46,7 +46,7 @@ namespace SensorCommon {
     int64_t timestamp_us;
     bool timeout_occurred;
 
-    LidarMeasurement() : distance_mm(0), active(SHELFBOT_HAS_LIDAR), valid(false), status(0),
+    LidarMeasurement() : distance_mm(0), active(false), valid(false), status(0),
                          timestamp_us(0), timeout_occurred(false) {}
 
     float distance_cm() const { return distance_mm / 10.0f; }
