@@ -2,6 +2,7 @@
 #include "sensor_control.hpp"
 #include "ultrasonic_sensor.hpp"
 #include "tof_sensor.hpp"
+#include "lidar_sensor.hpp"
 #include "sensor_common.hpp"
 #include "firmware_version.hpp"
 
@@ -98,6 +99,10 @@ esp_err_t SensorControl::initialize_tof() {
     }
 
     ESP_LOGI(TAG, "TOF sensors initialized successfully");
+#if SHELFBOT_HAS_LIDAR
+    lidar_sensor_ = std::make_unique<LidarSensor>(tof_sensor_.get());
+    ESP_LOGI(TAG, "LidarSensor initialized");
+#endif
     return ESP_OK;
 }
 
@@ -231,7 +236,7 @@ void SensorControl::continuous_read_loop() {
             }
 
             latest_data_.timestamp_us = timestamp;
-#if SHELFBOT_ENABLE_LIDAR
+#if SHELFBOT_HAS_LIDAR
             latest_data_.lidar_measurement.distance_mm = latest_data_.tof_measurements[0].distance_mm;
             latest_data_.lidar_measurement.valid = latest_data_.tof_measurements[0].valid;
             latest_data_.lidar_measurement.status = latest_data_.tof_measurements[0].status;
