@@ -3,7 +3,6 @@
 #ifndef SHELFBOT_SENSOR_COMMON_H
 #define SHELFBOT_SENSOR_COMMON_H
 #include <idf_c_includes.hpp>
-#include "sensor_control.h"
 
 namespace SensorCommon {
 
@@ -16,10 +15,10 @@ namespace SensorCommon {
     float distance_cm;    // Distance in centimeters
     uint8_t status;       // 0 = OK, >0 = error code
     int64_t timestamp_us; // Microseconds since boot
-    bool active;          // Compile-time configured presence
+    bool active;          // Runtime-configured presence
     bool valid;           // Quick validity flag
 
-    Reading() : distance_cm(0.0f), status(0), timestamp_us(0), active(SHELFBOT_HAS_ULTRASONIC), valid(false) {}
+    Reading() : distance_cm(0.0f), status(0), timestamp_us(0), active(false), valid(false) {}
   };
 
   // ToF sensor data structure
@@ -31,7 +30,7 @@ namespace SensorCommon {
     int64_t timestamp_us;
     bool timeout_occurred;
 
-    TofMeasurement() : distance_mm(0), active(SHELFBOT_HAS_TOF), valid(false), status(0),
+    TofMeasurement() : distance_mm(0), active(false), valid(false), status(0),
                        timestamp_us(0), timeout_occurred(false) {}
 
     // Helper to get distance in cm
@@ -45,9 +44,10 @@ namespace SensorCommon {
     uint8_t status;
     int64_t timestamp_us;
     bool timeout_occurred;
+    uint8_t health;       // 0=unknown, 1=ok, >1 degraded/error
 
-    LidarMeasurement() : distance_mm(0), active(SHELFBOT_HAS_LIDAR), valid(false), status(0),
-                         timestamp_us(0), timeout_occurred(false) {}
+    LidarMeasurement() : distance_mm(0), active(false), valid(false), status(0),
+                         timestamp_us(0), timeout_occurred(false), health(0) {}
 
     float distance_cm() const { return distance_mm / 10.0f; }
   };
