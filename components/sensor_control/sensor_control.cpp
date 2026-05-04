@@ -100,15 +100,25 @@ esp_err_t SensorControl::initialize_tof() {
 
     ESP_LOGI(TAG, "TOF sensors initialized successfully");
     if (config_.lidar_config.enabled) {
+#if SHELFBOT_DRIVER_LYDSTO
+        ESP_LOGW(TAG, "LiDAR is enabled, but SHELFBOT_DRIVER_LYDSTO already uses UART LYDSTO as the ToF driver.");
+        ESP_LOGW(TAG, "Skipping separate LidarSensor init to avoid double-installing UART driver on same peripheral.");
+        latest_data_.lidar_measurement.active = false;
+        latest_data_.lidar_measurement.valid = false;
+        latest_data_.lidar_measurement.health = 3; // conflict/misconfiguration
+#else
         lidar_sensor_ = std::make_unique<LidarSensor>(
             static_cast<uart_port_t>(config_.lidar_config.uart_port),
             config_.lidar_config.uart_tx_pin,
             config_.lidar_config.uart_rx_pin,
             config_.lidar_config.baud_rate);
         if (lidar_sensor_->initialize() != ESP_OK) {
-            ESP_LOGE(TAG, "Lidar UART init failed");
+            ESP_LOGW(TAG, "Lidar UART init failed; continuing without LiDAR");
             lidar_sensor_.reset();
-            return ESP_FAIL;
+            latest_data_.lidar_measurement.active = false;
+            latest_data_.lidar_measurement.valid = false;
+            latest_data_.lidar_measurement.health = 2;
+            return ESP_OK;
         }
         latest_data_.lidar_measurement.active = true;
         ESP_LOGI(TAG, "LidarSensor initialized (UART=%d RX=%d TX=%d BAUD=%lu)",
@@ -116,6 +126,7 @@ esp_err_t SensorControl::initialize_tof() {
                  config_.lidar_config.uart_rx_pin,
                  config_.lidar_config.uart_tx_pin,
                  static_cast<unsigned long>(config_.lidar_config.baud_rate));
+#endif
     } else {
         latest_data_.lidar_measurement.active = false;
     }

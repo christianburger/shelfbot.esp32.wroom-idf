@@ -18,7 +18,10 @@ public:
         int64_t  timestamp_us;
     };
 
-    LYDSTO_Driver();
+    LYDSTO_Driver(uart_port_t uart_port = LYDSTO_UART_PORT,
+                  int uart_tx_pin = LYDSTO_TX_PIN,
+                  int uart_rx_pin = LYDSTO_RX_PIN,
+                  uint32_t baud_rate = LYDSTO_BAUD_RATE);
     ~LYDSTO_Driver();
 
     const char* configure();
