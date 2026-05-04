@@ -149,11 +149,15 @@ esp_err_t SensorControl::initialize() {
         return err;
     }
 
+#if SHELFBOT_HAS_TOF
     err = initialize_tof();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "TOF initialization failed");
         ESP_LOGW(TAG, "Continuing without TOF sensors");
     }
+#else
+    ESP_LOGW(TAG, "TOF category disabled at compile-time (SHELFBOT_HAS_TOF=0)");
+#endif
 
     initialized_ = true;
 
@@ -286,11 +290,13 @@ void SensorControl::continuous_read_loop() {
 
             // Read ToF sensors
             SensorCommon::TofMeasurement tof_results[SensorCommon::NUM_TOF_SENSORS];
+#if SHELFBOT_HAS_TOF
             if (tof_sensor_ && tof_sensor_->read_all(tof_results) == ESP_OK) {
                 for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
                     latest_data_.tof_measurements[i] = tof_results[i];
                 }
             }
+#endif
 
             latest_data_.timestamp_us = timestamp;
             update_lidar_measurement();

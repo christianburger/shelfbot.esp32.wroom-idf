@@ -352,9 +352,10 @@ void Shelfbot::begin() {
         {.trig_pin = 32, .echo_pin = 33, .timeout_us = 30000, .max_distance_mm = 4000}
     };
 
-    // Configure 3 ToF sensors
+    // Configure ToF sensors (disabled: no ToF devices connected)
     for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
         sensor_config.tof_configs[i].timeout_ms = 500;
+        sensor_config.tof_configs[i].enabled = false;
     }
 
     sensor_config.ultrasonic_read_interval_ms = 100;
