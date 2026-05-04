@@ -99,6 +99,10 @@ esp_err_t SensorControl::initialize_tof() {
     }
 
     ESP_LOGI(TAG, "TOF sensors initialized successfully");
+    return ESP_OK;
+}
+
+esp_err_t SensorControl::initialize_lidar() {
     if (config_.lidar_config.enabled) {
 #if SHELFBOT_DRIVER_LYDSTO
         ESP_LOGW(TAG, "LiDAR is enabled, but SHELFBOT_DRIVER_LYDSTO already uses UART LYDSTO as the ToF driver.");
@@ -158,6 +162,11 @@ esp_err_t SensorControl::initialize() {
 #else
     ESP_LOGW(TAG, "TOF category disabled at compile-time (SHELFBOT_HAS_TOF=0)");
 #endif
+
+    err = initialize_lidar();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "LiDAR initialization had errors; continuing without LiDAR");
+    }
 
     initialized_ = true;
 
