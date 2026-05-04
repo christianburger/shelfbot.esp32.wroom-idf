@@ -1,6 +1,6 @@
 #include "lydsto.hpp"
 
-static const char* TAG = "TofDriver_LYDSTO";
+static const char* TAG = "LidarDriver_LYDSTO";
 
 static void log_hex_preview(const char* prefix, const uint8_t* data, size_t len) {
     char line[3 * 24 + 1] = {0};
