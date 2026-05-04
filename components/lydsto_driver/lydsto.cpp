@@ -17,7 +17,8 @@ static void log_hex_preview(const char* prefix, const uint8_t* data, size_t len)
 LYDSTO_Driver::LYDSTO_Driver(uart_port_t uart_port, int uart_tx_pin, int uart_rx_pin, uint32_t baud_rate)
     : uart_port_(uart_port), uart_tx_pin_(uart_tx_pin), uart_rx_pin_(uart_rx_pin),
       baud_rate_(baud_rate), timeout_ms_(LYDSTO_TIMEOUT_MS),
-      initialized_(false), timeout_occurred_(false), parser_len_(0) {}
+      initialized_(false), timeout_occurred_(false), parser_len_(0),
+      total_rx_bytes_(0), header_fa_hits_(0), valid_packets_(0), failed_reads_(0) {}
 
 LYDSTO_Driver::~LYDSTO_Driver() {
     uart_driver_delete(uart_port_);
@@ -83,6 +84,10 @@ bool LYDSTO_Driver::readPacket(uint8_t* packet) {
     while (esp_timer_get_time() < deadline) {
         int n = uart_read_bytes(uart_port_, rx_tmp, sizeof(rx_tmp), pdMS_TO_TICKS(20));
         if (n > 0) {
+            total_rx_bytes_ += static_cast<uint32_t>(n);
+            for (int i = 0; i < n; ++i) {
+                if (rx_tmp[i] == COMMAND) header_fa_hits_++;
+            }
             if (sample_log_budget > 0) {
                 log_hex_preview("RX chunk", rx_tmp, static_cast<size_t>(n));
                 sample_log_budget--;
@@ -97,6 +102,7 @@ bool LYDSTO_Driver::readPacket(uint8_t* packet) {
                 if (validPacket(parser_buf_ + i)) {
                     log_hex_preview("Valid packet", parser_buf_ + i, PACKET_LEN);
                     memcpy(packet, parser_buf_ + i, PACKET_LEN);
+                    valid_packets_++;
                     size_t remain = parser_len_ - (i + PACKET_LEN);
                     memmove(parser_buf_, parser_buf_ + i + PACKET_LEN, remain);
                     parser_len_ = remain;
@@ -120,10 +126,19 @@ bool LYDSTO_Driver::read_sensor(MeasurementResult& result) {
     result.timestamp_us = esp_timer_get_time();
     uint8_t p[PACKET_LEN];
     if (!readPacket(p) || !validPacket(p)) {
+        failed_reads_++;
         size_t buffered = 0;
         uart_get_buffered_data_len(uart_port_, &buffered);
         ESP_LOGW(TAG, "read_sensor failed (timeout=%d buffered=%u)",
                  static_cast<int>(timeout_occurred_), static_cast<unsigned>(buffered));
+        if ((failed_reads_ % 20) == 0) {
+            ESP_LOGW(TAG,
+                     "RX stats: bytes=%lu fa_headers=%lu valid_packets=%lu failed_reads=%lu",
+                     static_cast<unsigned long>(total_rx_bytes_),
+                     static_cast<unsigned long>(header_fa_hits_),
+                     static_cast<unsigned long>(valid_packets_),
+                     static_cast<unsigned long>(failed_reads_));
+        }
         if (parser_len_ > 0) {
             log_hex_preview("Parser tail", parser_buf_, parser_len_);
         }
