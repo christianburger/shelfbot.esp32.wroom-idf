@@ -39,9 +39,9 @@ public:
     LYDSTO_Driver& operator=(const LYDSTO_Driver&) = delete;
 
 private:
-    static constexpr uint8_t PACKET_LEN = 22;
-    static constexpr uint8_t COMMAND = 0xFA;
-    static constexpr uint8_t INDEX_LO = 0xA0;
+    static constexpr uint8_t PACKET_LEN = 47;
+    static constexpr uint8_t COMMAND = 0x54;
+    static constexpr uint8_t LENGTH_BYTE = 0x2C;
 
     uart_port_t uart_port_;
     int uart_tx_pin_;

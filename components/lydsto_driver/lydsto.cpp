@@ -52,25 +52,18 @@ void LYDSTO_Driver::setTimeout(uint16_t timeout_ms) { timeout_ms_ = timeout_ms; 
 bool LYDSTO_Driver::timeoutOccurred() { return timeout_occurred_; }
 
 bool LYDSTO_Driver::validPacket(const uint8_t* p) const {
-    if (p[0] != COMMAND || p[1] < INDEX_LO || p[1] > 0xF9) return false;
-    uint32_t chk32 = 0;
-    for (int i = 0; i < 20; i += 2) {
-        uint16_t w = p[i] | (static_cast<uint16_t>(p[i + 1]) << 8);
-        chk32 = (chk32 << 1) + w;
-    }
-    uint16_t checksum = (chk32 & 0x7FFF) + (chk32 >> 15);
-    checksum &= 0x7FFF;
-    return (p[20] == (checksum & 0xFF)) && (p[21] == (checksum >> 8));
+    if (p[0] != COMMAND || p[1] != LENGTH_BYTE) return false;
+    uint16_t start_angle = p[4] | (static_cast<uint16_t>(p[5]) << 8);
+    uint16_t end_angle = p[42] | (static_cast<uint16_t>(p[43]) << 8);
+    if (start_angle > 36000 || end_angle > 36000) return false;
+    return true;
 }
 
 bool LYDSTO_Driver::extractMinDistance(const uint8_t* p, uint16_t& min_mm) const {
     min_mm = 0xFFFF;
-    for (int i = 0; i < 4; ++i) {
-        int off = 4 + i * 4;
-        uint8_t dataL = p[off];
-        uint8_t dataM = p[off + 1];
-        if (dataM & 0xC0) continue; // invalid or warning
-        uint16_t mm = dataL | ((dataM & 0x3F) << 8);
+    for (int i = 0; i < 12; ++i) {
+        int off = 6 + i * 3;
+        uint16_t mm = p[off] | (static_cast<uint16_t>(p[off + 1]) << 8);
         if (mm > 0 && mm < min_mm) min_mm = mm;
     }
     return min_mm != 0xFFFF;
