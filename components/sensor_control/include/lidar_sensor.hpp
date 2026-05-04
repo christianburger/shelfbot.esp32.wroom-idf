@@ -12,4 +12,8 @@ public:
 private:
   LYDSTO_Driver driver_;
   bool initialized_;
+  uart_port_t uart_port_;
+  int tx_pin_;
+  int rx_pin_;
+  uint32_t baud_rate_;
 };
