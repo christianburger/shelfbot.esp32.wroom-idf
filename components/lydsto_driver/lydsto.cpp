@@ -150,7 +150,7 @@ bool LYDSTO_Driver::read_sensor(MeasurementResult& result) {
         result.valid = false;
         result.range_status = 2;
         result.timeout_occurred = false;
-        return false;
+        return true;
     }
     result.distance_mm = mm;
     result.valid = true;
