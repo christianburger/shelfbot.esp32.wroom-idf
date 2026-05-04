@@ -2,9 +2,9 @@
 
 static const char* TAG = "TofDriver_LYDSTO";
 
-LYDSTO_Driver::LYDSTO_Driver()
-    : uart_port_(LYDSTO_UART_PORT), uart_tx_pin_(LYDSTO_TX_PIN), uart_rx_pin_(LYDSTO_RX_PIN),
-      baud_rate_(LYDSTO_BAUD_RATE), timeout_ms_(LYDSTO_TIMEOUT_MS),
+LYDSTO_Driver::LYDSTO_Driver(uart_port_t uart_port, int uart_tx_pin, int uart_rx_pin, uint32_t baud_rate)
+    : uart_port_(uart_port), uart_tx_pin_(uart_tx_pin), uart_rx_pin_(uart_rx_pin),
+      baud_rate_(baud_rate), timeout_ms_(LYDSTO_TIMEOUT_MS),
       initialized_(false), timeout_occurred_(false) {}
 
 LYDSTO_Driver::~LYDSTO_Driver() {
@@ -14,6 +14,8 @@ LYDSTO_Driver::~LYDSTO_Driver() {
 const char* LYDSTO_Driver::configure() { return nullptr; }
 
 const char* LYDSTO_Driver::init() {
+    ESP_LOGI(TAG, "UART init start (UART=%d RX=%d TX=%d BAUD=%lu)",
+             static_cast<int>(uart_port_), uart_rx_pin_, uart_tx_pin_, static_cast<unsigned long>(baud_rate_));
     uart_config_t cfg{};
     cfg.baud_rate = baud_rate_;
     cfg.data_bits = UART_DATA_8_BITS;
@@ -23,7 +25,9 @@ const char* LYDSTO_Driver::init() {
     if (uart_param_config(uart_port_, &cfg) != ESP_OK) return "uart_param_config failed";
     if (uart_set_pin(uart_port_, uart_tx_pin_, uart_rx_pin_, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK) return "uart_set_pin failed";
     if (uart_driver_install(uart_port_, 4096, 0, 0, nullptr, 0) != ESP_OK) return "uart_driver_install failed";
+    uart_flush_input(uart_port_);
     initialized_ = true;
+    ESP_LOGI(TAG, "UART init done");
     return nullptr;
 }
 
@@ -79,6 +83,10 @@ bool LYDSTO_Driver::read_sensor(MeasurementResult& result) {
     result.timestamp_us = esp_timer_get_time();
     uint8_t p[PACKET_LEN];
     if (!readPacket(p) || !validPacket(p)) {
+        size_t buffered = 0;
+        uart_get_buffered_data_len(uart_port_, &buffered);
+        ESP_LOGW(TAG, "read_sensor failed (timeout=%d buffered=%u)",
+                 static_cast<int>(timeout_occurred_), static_cast<unsigned>(buffered));
         result.valid = false;
         result.timeout_occurred = timeout_occurred_;
         result.range_status = 1;
