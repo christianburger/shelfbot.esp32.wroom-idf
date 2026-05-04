@@ -360,6 +360,13 @@ void Shelfbot::begin() {
     sensor_config.ultrasonic_read_interval_ms = 100;
     sensor_config.tof_read_interval_ms = 200;
 
+    // Configure LYDSTO LiDAR over UART (RX on GPIO3)
+    sensor_config.lidar_config.enabled = true;
+    sensor_config.lidar_config.uart_port = UART_NUM_2;
+    sensor_config.lidar_config.uart_tx_pin = UART_PIN_NO_CHANGE;
+    sensor_config.lidar_config.uart_rx_pin = GPIO_NUM_3;
+    sensor_config.lidar_config.baud_rate = 115200;
+
     // Initialize the global sensor manager
     SensorManager::get_instance().initialize(sensor_config);
     SensorManager::get_instance().start();
