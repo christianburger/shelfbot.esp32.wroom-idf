@@ -117,6 +117,7 @@ private:
     // Internal helpers
     esp_err_t initialize_ultrasonic();
     esp_err_t initialize_tof();
+    esp_err_t initialize_lidar();
     esp_err_t update_lidar_measurement();
 
     static const char* TAG;
