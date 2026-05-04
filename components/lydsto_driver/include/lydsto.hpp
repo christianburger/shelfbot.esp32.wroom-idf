@@ -51,6 +51,8 @@ private:
 
     bool initialized_;
     bool timeout_occurred_;
+    uint8_t parser_buf_[512];
+    size_t parser_len_;
 
     bool readPacket(uint8_t* packet);
     bool validPacket(const uint8_t* packet) const;
