@@ -45,9 +45,13 @@ namespace SensorCommon {
     int64_t timestamp_us;
     bool timeout_occurred;
     uint8_t health;       // 0=unknown, 1=ok, >1 degraded/error
+    float start_angle_deg;
+    float end_angle_deg;
+    float min_distance_angle_deg;
 
     LidarMeasurement() : distance_mm(0), active(false), valid(false), status(0),
-                         timestamp_us(0), timeout_occurred(false), health(0) {}
+                         timestamp_us(0), timeout_occurred(false), health(0),
+                         start_angle_deg(0.0f), end_angle_deg(0.0f), min_distance_angle_deg(0.0f) {}
 
     float distance_cm() const { return distance_mm / 10.0f; }
   };
