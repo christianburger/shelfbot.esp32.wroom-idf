@@ -4,6 +4,7 @@
 #include "tof_sensor.hpp"
 #include "lidar_sensor.hpp"
 #include "sensor_common.hpp"
+#include "lidar_packet_parser.hpp"
 #include "firmware_version.hpp"
 
 const char* SensorControl::TAG = "SensorControl";
@@ -197,7 +198,22 @@ esp_err_t SensorControl::update_lidar_measurement() {
         latest_data_.lidar_measurement.health = 2;
         return ESP_ERR_INVALID_STATE;
     }
-    return lidar_sensor_->read(latest_data_.lidar_measurement);
+    esp_err_t err = lidar_sensor_->read(latest_data_.lidar_measurement);
+    if (err == ESP_OK) {
+        uint32_t count = lidar_sensor_->packet_count();
+        if (count > 0 && (count % 20) == 0) {
+            uint8_t raw[47];
+            if (lidar_sensor_->get_last_raw_packet(raw, sizeof(raw))) {
+                LidarParsedPacket parsed{};
+                if (LidarPacketParser::parse(raw, sizeof(raw), parsed)) {
+                    ESP_LOGW(TAG, "=== LiDAR RAW PACKET #%lu BEGIN ===", static_cast<unsigned long>(count));
+                    ESP_LOGW(TAG, "%s", parsed.json.c_str());
+                    ESP_LOGW(TAG, "=== LiDAR RAW PACKET #%lu END ===", static_cast<unsigned long>(count));
+                }
+            }
+        }
+    }
+    return err;
 }
 
 bool SensorControl::is_ready() const {

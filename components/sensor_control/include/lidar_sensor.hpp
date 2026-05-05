@@ -9,6 +9,8 @@ public:
   bool is_ready() const { return initialized_ && driver_.isReady(); }
   esp_err_t initialize();
   esp_err_t read(SensorCommon::LidarMeasurement& out);
+  bool get_last_raw_packet(uint8_t* out, size_t len) const { return driver_.get_last_packet(out, len); }
+  uint32_t packet_count() const { return driver_.get_packet_count(); }
 private:
   LYDSTO_Driver driver_;
   bool initialized_;

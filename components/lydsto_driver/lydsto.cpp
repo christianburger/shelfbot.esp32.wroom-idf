@@ -14,11 +14,22 @@ static void log_hex_preview(const char* prefix, const uint8_t* data, size_t len)
     ESP_LOGW(TAG, "%s (%uB): %s", prefix, static_cast<unsigned>(len), line);
 }
 
+static uint8_t crc8_poly4d(const uint8_t* data, size_t len) {
+    uint8_t crc = 0x00;
+    for (size_t i = 0; i < len; ++i) {
+        crc ^= data[i];
+        for (int b = 0; b < 8; ++b) {
+            crc = (crc & 0x80) ? static_cast<uint8_t>((crc << 1) ^ 0x4D) : static_cast<uint8_t>(crc << 1);
+        }
+    }
+    return crc;
+}
+
 LYDSTO_Driver::LYDSTO_Driver(uart_port_t uart_port, int uart_tx_pin, int uart_rx_pin, uint32_t baud_rate)
     : uart_port_(uart_port), uart_tx_pin_(uart_tx_pin), uart_rx_pin_(uart_rx_pin),
       baud_rate_(baud_rate), timeout_ms_(LYDSTO_TIMEOUT_MS),
       initialized_(false), timeout_occurred_(false), parser_len_(0),
-      total_rx_bytes_(0), header_fa_hits_(0), valid_packets_(0), failed_reads_(0) {}
+      total_rx_bytes_(0), header_fa_hits_(0), valid_packets_(0), failed_reads_(0), has_last_packet_(false) {}
 
 LYDSTO_Driver::~LYDSTO_Driver() {
     uart_driver_delete(uart_port_);
@@ -50,12 +61,22 @@ const char* LYDSTO_Driver::check() { return initialized_ ? nullptr : "Not initia
 bool LYDSTO_Driver::isReady() const { return initialized_; }
 void LYDSTO_Driver::setTimeout(uint16_t timeout_ms) { timeout_ms_ = timeout_ms; }
 bool LYDSTO_Driver::timeoutOccurred() { return timeout_occurred_; }
+bool LYDSTO_Driver::get_last_packet(uint8_t* out, size_t len) const {
+    if (!has_last_packet_ || !out || len < PACKET_LEN) return false;
+    memcpy(out, last_packet_, PACKET_LEN);
+    return true;
+}
 
 bool LYDSTO_Driver::validPacket(const uint8_t* p) const {
     if (p[0] != COMMAND || p[1] != LENGTH_BYTE) return false;
     uint16_t start_angle = p[4] | (static_cast<uint16_t>(p[5]) << 8);
     uint16_t end_angle = p[42] | (static_cast<uint16_t>(p[43]) << 8);
     if (start_angle > 36000 || end_angle > 36000) return false;
+    uint8_t expected_crc = crc8_poly4d(p, PACKET_LEN - 1);
+    uint8_t frame_crc = p[PACKET_LEN - 1];
+    if (expected_crc != frame_crc) {
+        return false;
+    }
     return true;
 }
 
@@ -95,6 +116,8 @@ bool LYDSTO_Driver::readPacket(uint8_t* packet) {
                 if (validPacket(parser_buf_ + i)) {
                     log_hex_preview("Valid packet", parser_buf_ + i, PACKET_LEN);
                     memcpy(packet, parser_buf_ + i, PACKET_LEN);
+                    memcpy(last_packet_, packet, PACKET_LEN);
+                    has_last_packet_ = true;
                     valid_packets_++;
                     size_t remain = parser_len_ - (i + PACKET_LEN);
                     memmove(parser_buf_, parser_buf_ + i + PACKET_LEN, remain);
@@ -131,6 +154,9 @@ bool LYDSTO_Driver::read_sensor(MeasurementResult& result) {
                      static_cast<unsigned long>(header_fa_hits_),
                      static_cast<unsigned long>(valid_packets_),
                      static_cast<unsigned long>(failed_reads_));
+            if (total_rx_bytes_ > 5000 && valid_packets_ == 0) {
+                ESP_LOGW(TAG, "No valid frames despite traffic. Check UART mismatch: baud/parity/stop bits/voltage levels.");
+            }
         }
         if (parser_len_ > 0) {
             log_hex_preview("Parser tail", parser_buf_, parser_len_);

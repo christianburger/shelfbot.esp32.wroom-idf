@@ -34,6 +34,8 @@ public:
 
     void setTimeout(uint16_t timeout_ms);
     bool timeoutOccurred();
+    bool get_last_packet(uint8_t* out, size_t len) const;
+    uint32_t get_packet_count() const { return valid_packets_; }
 
     LYDSTO_Driver(const LYDSTO_Driver&) = delete;
     LYDSTO_Driver& operator=(const LYDSTO_Driver&) = delete;
@@ -57,6 +59,8 @@ private:
     uint32_t header_fa_hits_;
     uint32_t valid_packets_;
     uint32_t failed_reads_;
+    uint8_t last_packet_[47];
+    bool has_last_packet_;
 
     bool readPacket(uint8_t* packet);
     bool validPacket(const uint8_t* packet) const;
