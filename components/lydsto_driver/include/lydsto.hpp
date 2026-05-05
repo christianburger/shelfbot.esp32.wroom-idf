@@ -16,6 +16,9 @@ public:
         bool     valid;
         bool     timeout_occurred;
         int64_t  timestamp_us;
+        float    start_angle_deg;
+        float    end_angle_deg;
+        float    min_distance_angle_deg;
     };
 
     LYDSTO_Driver(uart_port_t uart_port = LYDSTO_UART_PORT,
@@ -64,5 +67,5 @@ private:
 
     bool readPacket(uint8_t* packet);
     bool validPacket(const uint8_t* packet) const;
-    bool extractMinDistance(const uint8_t* packet, uint16_t& min_mm) const;
+    bool extractMinDistance(const uint8_t* packet, uint16_t& min_mm, int& min_idx) const;
 };

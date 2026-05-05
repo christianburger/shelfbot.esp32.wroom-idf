@@ -24,6 +24,9 @@ esp_err_t LidarSensor::read(SensorCommon::LidarMeasurement& out) {
   out.status = m.range_status;
   out.timestamp_us = m.timestamp_us;
   out.timeout_occurred = m.timeout_occurred;
+  out.start_angle_deg = m.start_angle_deg;
+  out.end_angle_deg = m.end_angle_deg;
+  out.min_distance_angle_deg = m.min_distance_angle_deg;
   out.health = out.valid ? 1 : 2;
   if (!ok) {
     ESP_LOGW("LidarSensor", "Read failed (timeout=%d status=%u valid=%d dist=%u)",

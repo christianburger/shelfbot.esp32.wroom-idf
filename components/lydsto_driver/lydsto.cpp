@@ -80,14 +80,18 @@ bool LYDSTO_Driver::validPacket(const uint8_t* p) const {
     return true;
 }
 
-bool LYDSTO_Driver::extractMinDistance(const uint8_t* p, uint16_t& min_mm) const {
+bool LYDSTO_Driver::extractMinDistance(const uint8_t* p, uint16_t& min_mm, int& min_idx) const {
     min_mm = 0xFFFF;
+    min_idx = -1;
     for (int i = 0; i < 12; ++i) {
         int off = 6 + i * 3;
         uint16_t mm = p[off] | (static_cast<uint16_t>(p[off + 1]) << 8);
-        if (mm > 0 && mm < min_mm) min_mm = mm;
+        if (mm > 0 && mm < min_mm) {
+            min_mm = mm;
+            min_idx = i;
+        }
     }
-    return min_mm != 0xFFFF;
+    return min_idx >= 0;
 }
 
 bool LYDSTO_Driver::readPacket(uint8_t* packet) {
@@ -172,13 +176,25 @@ bool LYDSTO_Driver::read_sensor(MeasurementResult& result) {
         return false;
     }
     uint16_t mm;
-    if (!extractMinDistance(p, mm)) {
+    int min_idx = -1;
+    uint16_t sa = p[4] | (static_cast<uint16_t>(p[5]) << 8);
+    uint16_t ea = p[42] | (static_cast<uint16_t>(p[43]) << 8);
+    float start_deg = sa / 100.0f;
+    float end_deg = ea / 100.0f;
+    float span = end_deg - start_deg;
+    if (span < 0.0f) span += 360.0f;
+    result.start_angle_deg = start_deg;
+    result.end_angle_deg = end_deg;
+    if (!extractMinDistance(p, mm, min_idx)) {
         result.valid = false;
         result.range_status = 2;
         result.timeout_occurred = false;
+        result.min_distance_angle_deg = start_deg;
         return true;
     }
     result.distance_mm = mm;
+    result.min_distance_angle_deg = start_deg + (span * static_cast<float>(min_idx) / 11.0f);
+    if (result.min_distance_angle_deg >= 360.0f) result.min_distance_angle_deg -= 360.0f;
     result.valid = true;
     result.range_status = 0;
     result.timeout_occurred = false;
