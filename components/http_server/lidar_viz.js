@@ -8,11 +8,16 @@
   const startLogBtn = document.getElementById('startLogBtn');
   const stopLogBtn = document.getElementById('stopLogBtn');
   const saveLogBtn = document.getElementById('saveLogBtn');
+  const persistBtn = document.getElementById('persistBtn');
+  const clearPersistBtn = document.getElementById('clearPersistBtn');
   const logStatus = document.getElementById('logStatus');
   let fileHandle = null;
   let writable = null;
   let memoryLog = [];
   let loggingActive = false;
+  let persistMode = false;
+  let persistedPoints = [];
+  const persistLimit = 3000;
 
   function el(name, attrs) {
     const node = document.createElementNS('http://www.w3.org/2000/svg', name);
@@ -62,6 +67,20 @@
   function drawScan(data) {
     drawGrid();
     const points = normalizePoints(data).filter(p => p.valid);
+    if (persistMode && points.length > 0) {
+      for (const p of points) {
+        persistedPoints.push({ distance_mm: p.distance_mm, angle_deg: p.angle_deg, intensity: p.intensity });
+      }
+      if (persistedPoints.length > persistLimit) {
+        persistedPoints.splice(0, persistedPoints.length - persistLimit);
+      }
+    }
+    if (persistMode && persistedPoints.length > 0) {
+      persistedPoints.forEach((p) => {
+        const pt = pointToXY(p.distance_mm, p.angle_deg);
+        svg.appendChild(el('circle', {cx:pt.x, cy:pt.y, r:1.5, fill:'#60a5fa', opacity:'0.5'}));
+      });
+    }
     points.forEach((p) => {
       const pt = pointToXY(p.distance_mm, p.angle_deg);
       const dot = el('circle', {cx:pt.x, cy:pt.y, r:2.5, fill:'#4ade80', cursor:'pointer'});
@@ -106,6 +125,21 @@
         timestamp_ms: data.timestamp_ms
       }, null, 2);
     }
+  }
+
+  function togglePersistMode() {
+    persistMode = !persistMode;
+    persistBtn.textContent = `Persist Points: ${persistMode ? 'ON' : 'OFF'}`;
+    if (!persistMode) {
+      logStatus.textContent = `Persistence off (${persistedPoints.length} buffered points kept).`;
+    } else {
+      logStatus.textContent = `Persistence on (buffer limit ${persistLimit} points).`;
+    }
+  }
+
+  function clearPersistedPoints() {
+    persistedPoints = [];
+    logStatus.textContent = 'Persisted point buffer cleared.';
   }
 
   async function writeLogLine(data) {
@@ -182,4 +216,6 @@
   startLogBtn.addEventListener('click', startLocalLog);
   stopLogBtn.addEventListener('click', stopLocalLog);
   saveLogBtn.addEventListener('click', downloadBackupLog);
+  persistBtn.addEventListener('click', togglePersistMode);
+  clearPersistBtn.addEventListener('click', clearPersistedPoints);
 })();
