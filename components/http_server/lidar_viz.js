@@ -30,9 +30,30 @@
     };
   }
 
+  function normalizePoints(data) {
+    if (Array.isArray(data.points) && data.points.length > 0 && data.points[0].d !== undefined) {
+      const start = Number(data.start_angle_deg || 0);
+      const end = Number(data.end_angle_deg || start);
+      let span = end - start;
+      if (span < 0) span += 360;
+      return data.points.map((p, i) => ({
+        distance_mm: Number(p.d || 0),
+        intensity: Number(p.c || 0),
+        angle_deg: (start + (span * i / Math.max(1, data.points.length - 1))) % 360,
+        valid: Number(p.d || 0) > 0
+      }));
+    }
+    return (data.points || []).map(p => ({
+      distance_mm: Number(p.distance_mm || 0),
+      intensity: Number(p.intensity || 0),
+      angle_deg: Number(p.angle_deg || 0),
+      valid: Boolean(p.valid) && Number(p.distance_mm || 0) > 0
+    }));
+  }
+
   function drawScan(data) {
     drawGrid();
-    const points = (data.points || []).filter(p => p && p.valid && p.distance_mm > 0);
+    const points = normalizePoints(data).filter(p => p.valid);
     points.forEach((p) => {
       const pt = pointToXY(p.distance_mm, p.angle_deg);
       const dot = el('circle', {cx:pt.x, cy:pt.y, r:2.5, fill:'#4ade80', cursor:'pointer'});
@@ -54,7 +75,20 @@
     });
 
     if (points.length === 0) {
-      meta.textContent = 'No valid points in current frame.';
+      const fallback = Number(data.distance_mm || 0);
+      const fallbackAngle = Number(data.min_distance_angle_deg || 0);
+      if (fallback > 0) {
+        const fp = pointToXY(fallback, fallbackAngle);
+        svg.appendChild(el('circle', {cx:fp.x, cy:fp.y, r:4, fill:'#f59e0b'}));
+        meta.textContent = JSON.stringify({
+          info: 'No per-point packet in response; showing min-distance fallback.',
+          distance_mm: fallback,
+          min_distance_angle_deg: fallbackAngle,
+          timestamp_us: data.timestamp_us
+        }, null, 2);
+      } else {
+        meta.textContent = 'No valid point data in current frame.';
+      }
     } else {
       meta.textContent = JSON.stringify({
         start_angle_deg: data.start_angle_deg,

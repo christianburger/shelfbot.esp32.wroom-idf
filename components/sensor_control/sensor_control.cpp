@@ -447,6 +447,13 @@ bool SensorControl::is_lidar_ready() const {
     return config_.lidar_config.enabled && lidar_sensor_ && lidar_sensor_->is_ready();
 }
 
+bool SensorControl::get_last_lidar_raw_packet(uint8_t* out, size_t len) const {
+    if (!lidar_sensor_) {
+        return false;
+    }
+    return lidar_sensor_->get_last_raw_packet(out, len);
+}
+
 esp_err_t SensorControl::self_test() {
     esp_err_t overall_result = ESP_OK;
 

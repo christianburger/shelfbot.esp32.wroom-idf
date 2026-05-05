@@ -91,6 +91,7 @@ public:
     esp_err_t self_test();
     bool tof_probe(uint8_t sensor_index = 0);
     uint8_t lidar_health() const;
+    bool get_last_lidar_raw_packet(uint8_t* out, size_t len) const;
 
     // Get latest data for ROS publishing
     bool get_latest_data(SensorCommon::SensorDataPacket* data);
