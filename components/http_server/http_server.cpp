@@ -534,24 +534,18 @@ esp_err_t HttpServer::lidar_handler(httpd_req_t* req) {
     cJSON_AddStringToObject(root, "status_text", get_sensor_status_text(m).c_str());
     cJSON_AddNumberToObject(root, "timestamp_us", m.timestamp_us);
     cJSON_AddBoolToObject(root, "timeout_occurred", m.timeout_occurred);
-    if (SensorControl* control = SensorManager::get_instance().get_sensor_control()) {
-        uint8_t raw[47];
-        if (control->get_last_lidar_raw_packet(raw, sizeof(raw))) {
-            LidarParsedPacket parsed{};
-            if (LidarPacketParser::parse(raw, sizeof(raw), parsed)) {
-                cJSON_AddNumberToObject(root, "speed", parsed.speed);
-                cJSON_AddNumberToObject(root, "timestamp", parsed.timestamp);
-                cJSON_AddNumberToObject(root, "crc", parsed.crc);
-                cJSON* points = cJSON_CreateArray();
-                for (int i = 0; i < 12; ++i) {
-                    cJSON* pt = cJSON_CreateObject();
-                    cJSON_AddNumberToObject(pt, "d", parsed.distances_mm[i]);
-                    cJSON_AddNumberToObject(pt, "c", parsed.confidences[i]);
-                    cJSON_AddItemToArray(points, pt);
-                }
-                cJSON_AddItemToObject(root, "points", points);
-            }
+    if (m.has_packet_points) {
+        cJSON_AddNumberToObject(root, "speed", m.packet_speed);
+        cJSON_AddNumberToObject(root, "timestamp", m.packet_timestamp);
+        cJSON_AddNumberToObject(root, "crc", m.packet_crc);
+        cJSON* points = cJSON_CreateArray();
+        for (int i = 0; i < 12; ++i) {
+            cJSON* pt = cJSON_CreateObject();
+            cJSON_AddNumberToObject(pt, "d", m.packet_distances_mm[i]);
+            cJSON_AddNumberToObject(pt, "c", m.packet_confidences[i]);
+            cJSON_AddItemToArray(points, pt);
         }
+        cJSON_AddItemToObject(root, "points", points);
     }
 
     char* json_str = cJSON_PrintUnformatted(root);

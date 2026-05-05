@@ -208,6 +208,12 @@ esp_err_t SensorControl::update_lidar_measurement() {
                 if (LidarPacketParser::parse(raw, sizeof(raw), parsed)) {
                     ESP_LOGW(TAG, "=== LiDAR RAW PACKET #%lu BEGIN ===", static_cast<unsigned long>(count));
                     ESP_LOGW(TAG, "%s", parsed.json.c_str());
+                    ESP_LOGW(TAG,
+                             "LiDAR CRC check packet#%lu: frame_crc=0x%02X calc_crc=0x%02X valid=%d",
+                             static_cast<unsigned long>(count),
+                             static_cast<unsigned>(parsed.crc),
+                             static_cast<unsigned>(parsed.crc_calculated),
+                             static_cast<int>(parsed.crc_valid));
                     ESP_LOGW(TAG, "=== LiDAR RAW PACKET #%lu END ===", static_cast<unsigned long>(count));
                 }
             }

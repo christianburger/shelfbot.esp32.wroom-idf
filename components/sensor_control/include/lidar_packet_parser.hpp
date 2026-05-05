@@ -12,6 +12,8 @@ struct LidarParsedPacket {
     std::array<uint8_t, 12> confidences;
     uint16_t timestamp;
     uint8_t crc;
+    uint8_t crc_calculated;
+    bool crc_valid;
     std::string json;
 };
 

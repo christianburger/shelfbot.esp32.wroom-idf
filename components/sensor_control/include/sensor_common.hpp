@@ -48,10 +48,18 @@ namespace SensorCommon {
     float start_angle_deg;
     float end_angle_deg;
     float min_distance_angle_deg;
+    bool has_packet_points;
+    uint16_t packet_speed;
+    uint16_t packet_timestamp;
+    uint8_t packet_crc;
+    uint16_t packet_distances_mm[12];
+    uint8_t packet_confidences[12];
 
     LidarMeasurement() : distance_mm(0), active(false), valid(false), status(0),
                          timestamp_us(0), timeout_occurred(false), health(0),
-                         start_angle_deg(0.0f), end_angle_deg(0.0f), min_distance_angle_deg(0.0f) {}
+                         start_angle_deg(0.0f), end_angle_deg(0.0f), min_distance_angle_deg(0.0f),
+                         has_packet_points(false), packet_speed(0), packet_timestamp(0), packet_crc(0),
+                         packet_distances_mm{0}, packet_confidences{0} {}
 
     float distance_cm() const { return distance_mm / 10.0f; }
   };
