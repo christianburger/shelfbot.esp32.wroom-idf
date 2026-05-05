@@ -5,6 +5,14 @@
   const cx = size/2;
   const cy = size/2;
   const scale = 0.12; // mm to px
+  const startLogBtn = document.getElementById('startLogBtn');
+  const stopLogBtn = document.getElementById('stopLogBtn');
+  const saveLogBtn = document.getElementById('saveLogBtn');
+  const logStatus = document.getElementById('logStatus');
+  let fileHandle = null;
+  let writable = null;
+  let memoryLog = [];
+  let loggingActive = false;
 
   function el(name, attrs) {
     const node = document.createElementNS('http://www.w3.org/2000/svg', name);
@@ -100,10 +108,69 @@
     }
   }
 
+  async function writeLogLine(data) {
+    const line = JSON.stringify({
+      captured_at_iso: new Date().toISOString(),
+      lidar: data
+    }) + '\n';
+    memoryLog.push(line);
+    if (writable) {
+      await writable.write(line);
+    }
+  }
+
+  async function startLocalLog() {
+    if (!window.showSaveFilePicker) {
+      logStatus.textContent = 'File System Access API unavailable; using in-memory backup only.';
+      loggingActive = true;
+      return;
+    }
+    try {
+      fileHandle = await window.showSaveFilePicker({
+        suggestedName: `lidar-raw-${Date.now()}.ndjson`,
+        types: [{ description: 'NDJSON', accept: { 'application/x-ndjson': ['.ndjson'] } }]
+      });
+      writable = await fileHandle.createWritable();
+      loggingActive = true;
+      logStatus.textContent = 'Local logging: ON (writing to selected file)';
+    } catch (e) {
+      logStatus.textContent = 'Log start canceled or failed: ' + e;
+    }
+  }
+
+  async function stopLocalLog() {
+    loggingActive = false;
+    if (writable) {
+      await writable.close();
+      writable = null;
+      logStatus.textContent = 'Local logging: stopped and file closed.';
+    } else {
+      logStatus.textContent = 'Local logging: stopped.';
+    }
+  }
+
+  function downloadBackupLog() {
+    if (memoryLog.length === 0) {
+      logStatus.textContent = 'No captured samples yet.';
+      return;
+    }
+    const blob = new Blob(memoryLog, { type: 'application/x-ndjson' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `lidar-raw-backup-${Date.now()}.ndjson`;
+    a.click();
+    URL.revokeObjectURL(url);
+    logStatus.textContent = `Downloaded backup with ${memoryLog.length} frames.`;
+  }
+
   async function refresh() {
     try {
       const res = await fetch('/api/lidar');
       const data = await res.json();
+      if (loggingActive) {
+        await writeLogLine(data);
+      }
       drawScan(data);
     } catch (e) {
       meta.textContent = 'Failed to fetch /api/lidar: ' + e;
@@ -112,4 +179,7 @@
 
   refresh();
   setInterval(refresh, 400);
+  startLogBtn.addEventListener('click', startLocalLog);
+  stopLogBtn.addEventListener('click', stopLocalLog);
+  saveLogBtn.addEventListener('click', downloadBackupLog);
 })();
