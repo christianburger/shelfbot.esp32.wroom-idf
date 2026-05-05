@@ -5,6 +5,7 @@
 #include <iomanip>
 #include <algorithm>
 #include "firmware_version.hpp"
+#include "lidar_packet_parser.hpp"
 
 const char* HttpServer::TAG = "HttpServer";
 extern const uint8_t _binary_lidar_html_start[] asm("_binary_lidar_html_start");
