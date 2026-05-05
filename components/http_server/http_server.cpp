@@ -420,6 +420,9 @@ cJSON* HttpServer::create_sensor_json(const SensorCommon::SensorDataPacket& sens
     cJSON_AddNumberToObject(lidar_json, "distance_mm", lidar.distance_mm);
     cJSON_AddNumberToObject(lidar_json, "distance_cm", lidar.distance_cm());
     cJSON_AddNumberToObject(lidar_json, "status", lidar.status);
+    cJSON_AddNumberToObject(lidar_json, "start_angle_deg", lidar.start_angle_deg);
+    cJSON_AddNumberToObject(lidar_json, "end_angle_deg", lidar.end_angle_deg);
+    cJSON_AddNumberToObject(lidar_json, "min_distance_angle_deg", lidar.min_distance_angle_deg);
     cJSON_AddStringToObject(lidar_json, "status_text", get_sensor_status_text(lidar).c_str());
     cJSON_AddNumberToObject(lidar_json, "timestamp_us", lidar.timestamp_us);
     cJSON_AddBoolToObject(lidar_json, "timeout_occurred", lidar.timeout_occurred);
@@ -491,6 +494,9 @@ esp_err_t HttpServer::lidar_handler(httpd_req_t* req) {
     cJSON_AddNumberToObject(root, "distance_mm", m.distance_mm);
     cJSON_AddNumberToObject(root, "distance_cm", m.distance_cm());
     cJSON_AddNumberToObject(root, "status", m.status);
+    cJSON_AddNumberToObject(root, "start_angle_deg", m.start_angle_deg);
+    cJSON_AddNumberToObject(root, "end_angle_deg", m.end_angle_deg);
+    cJSON_AddNumberToObject(root, "min_distance_angle_deg", m.min_distance_angle_deg);
     cJSON_AddStringToObject(root, "status_text", get_sensor_status_text(m).c_str());
     cJSON_AddNumberToObject(root, "timestamp_us", m.timestamp_us);
     cJSON_AddBoolToObject(root, "timeout_occurred", m.timeout_occurred);
