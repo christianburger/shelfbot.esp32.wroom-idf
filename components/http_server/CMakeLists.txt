@@ -16,3 +16,13 @@ target_add_binary_data(
     "index.html"
     BINARY
 )
+target_add_binary_data(
+    ${COMPONENT_LIB}
+    "lidar.html"
+    BINARY
+)
+target_add_binary_data(
+    ${COMPONENT_LIB}
+    "lidar_viz.js"
+    BINARY
+)
