@@ -33,6 +33,17 @@
     svg.appendChild(el('line', {x1:0,y1:cy,x2:size,y2:cy,stroke:'#1e293b'}));
     svg.appendChild(el('line', {x1:cx,y1:0,x2:cx,y2:size,stroke:'#1e293b'}));
     svg.appendChild(el('circle', {cx, cy, r:4, fill:'#22d3ee'}));
+    const labels = [
+      { txt: '0°', x: cx, y: 18 },
+      { txt: '90°', x: size - 30, y: cy - 8 },
+      { txt: '180°', x: cx - 16, y: size - 10 },
+      { txt: '270°', x: 8, y: cy - 8 }
+    ];
+    labels.forEach(l => {
+      const t = el('text', { x: l.x, y: l.y, fill: '#94a3b8', 'font-size': '12px' });
+      t.textContent = l.txt;
+      svg.appendChild(t);
+    });
   }
 
   function pointToXY(distanceMm, angleDeg) {

@@ -8,7 +8,7 @@ namespace SensorCommon {
 
   constexpr int NUM_ULTRASONIC_SENSORS = 4;
   constexpr int NUM_TOF_SENSORS = 1;
-  constexpr int NUM_SENSORS = NUM_ULTRASONIC_SENSORS + NUM_TOF_SENSORS;
+  constexpr int NUM_SENSORS = NUM_ULTRASONIC_SENSORS + NUM_TOF_SENSORS + 1; // +1 LiDAR
 
   // Ultrasonic sensor reading structure
   struct Reading {

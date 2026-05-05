@@ -93,6 +93,13 @@ void Shelfbot::distance_sensors_timer_callback(rcl_timer_t * timer, int64_t last
             for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS && idx < SensorCommon::NUM_SENSORS; i++, idx++) {
                 distance_sensors_data[idx] = sensor_data.tof_measurements[i].distance_mm / 10.0f;
             }
+            // Publish LiDAR min distance (convert mm to cm) as final slot
+            if (idx < SensorCommon::NUM_SENSORS) {
+                distance_sensors_data[idx] = sensor_data.lidar_measurement.valid
+                    ? (sensor_data.lidar_measurement.distance_mm / 10.0f)
+                    : -1.0f;
+                idx++;
+            }
             distance_sensors_msg.data.size = idx;
             RCSOFTCHECK(rcl_publish(&distance_sensors_publisher, &distance_sensors_msg, NULL));
         }
