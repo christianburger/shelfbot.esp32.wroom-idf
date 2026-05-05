@@ -8,30 +8,59 @@ namespace SensorCommon {
 
   constexpr int NUM_ULTRASONIC_SENSORS = 4;
   constexpr int NUM_TOF_SENSORS = 1;
-  constexpr int NUM_SENSORS = NUM_ULTRASONIC_SENSORS + NUM_TOF_SENSORS;
+  constexpr int NUM_SENSORS = NUM_ULTRASONIC_SENSORS + NUM_TOF_SENSORS + 1; // +1 LiDAR
 
   // Ultrasonic sensor reading structure
   struct Reading {
     float distance_cm;    // Distance in centimeters
     uint8_t status;       // 0 = OK, >0 = error code
     int64_t timestamp_us; // Microseconds since boot
+    bool active;          // Runtime-configured presence
     bool valid;           // Quick validity flag
 
-    Reading() : distance_cm(0.0f), status(0), timestamp_us(0), valid(false) {}
+    Reading() : distance_cm(0.0f), status(0), timestamp_us(0), active(false), valid(false) {}
   };
 
   // ToF sensor data structure
   struct TofMeasurement {
     uint16_t distance_mm;
+    bool active;
     bool valid;
     uint8_t status;       // 0 = OK, >0 = error code
     int64_t timestamp_us;
     bool timeout_occurred;
 
-    TofMeasurement() : distance_mm(0), valid(false), status(0),
+    TofMeasurement() : distance_mm(0), active(false), valid(false), status(0),
                        timestamp_us(0), timeout_occurred(false) {}
 
     // Helper to get distance in cm
+    float distance_cm() const { return distance_mm / 10.0f; }
+  };
+
+  struct LidarMeasurement {
+    uint16_t distance_mm;
+    bool active;
+    bool valid;
+    uint8_t status;
+    int64_t timestamp_us;
+    bool timeout_occurred;
+    uint8_t health;       // 0=unknown, 1=ok, >1 degraded/error
+    float start_angle_deg;
+    float end_angle_deg;
+    float min_distance_angle_deg;
+    bool has_packet_points;
+    uint16_t packet_speed;
+    uint16_t packet_timestamp;
+    uint8_t packet_crc;
+    uint16_t packet_distances_mm[12];
+    uint8_t packet_confidences[12];
+
+    LidarMeasurement() : distance_mm(0), active(false), valid(false), status(0),
+                         timestamp_us(0), timeout_occurred(false), health(0),
+                         start_angle_deg(0.0f), end_angle_deg(0.0f), min_distance_angle_deg(0.0f),
+                         has_packet_points(false), packet_speed(0), packet_timestamp(0), packet_crc(0),
+                         packet_distances_mm{0}, packet_confidences{0} {}
+
     float distance_cm() const { return distance_mm / 10.0f; }
   };
 
@@ -43,6 +72,8 @@ namespace SensorCommon {
     // ToF sensors
     TofMeasurement tof_measurements[NUM_TOF_SENSORS];
 
+    LidarMeasurement lidar_measurement;
+
     int64_t timestamp_us;
 
     // Constructor to initialize arrays
@@ -53,6 +84,7 @@ namespace SensorCommon {
       for (int i = 0; i < NUM_TOF_SENSORS; i++) {
         tof_measurements[i] = TofMeasurement();
       }
+      lidar_measurement = LidarMeasurement();
     }
   };
 

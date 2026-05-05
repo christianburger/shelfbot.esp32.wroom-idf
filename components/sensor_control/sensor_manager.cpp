@@ -1,5 +1,6 @@
 #include "include/sensor_manager.hpp"
 #include "include/sensor_control.hpp"
+#include "firmware_version.hpp"
 #include <sstream>
 
 static const char* TAG = "SensorManager";
@@ -15,6 +16,7 @@ void SensorManager::monitor_task(void* arg) {
 
 void SensorManager::monitor_loop() {
     ESP_LOGI(TAG, "Sensor monitor loop started (independent of network connectivity)");
+    uint32_t monitor_line_counter = 0;
 
     while (monitor_task_running_) {
         SensorCommon::SensorDataPacket snapshot;
@@ -32,14 +34,21 @@ void SensorManager::monitor_loop() {
             }
 
             ESP_LOGI(TAG,
-                     "Snapshot us=%lld | US[%.1f, %.1f, %.1f, %.1f] cm | TOF[%s] mm valid[%s]",
+                     "Snapshot us=%lld | US[%.1f, %.1f, %.1f, %.1f] cm | TOF[%s] mm valid[%s] | LiDAR[%u]mm valid[%d] st[%u]",
                      static_cast<long long>(snapshot.timestamp_us),
                      snapshot.ultrasonic_readings[0].distance_cm,
                      snapshot.ultrasonic_readings[1].distance_cm,
                      snapshot.ultrasonic_readings[2].distance_cm,
                      snapshot.ultrasonic_readings[3].distance_cm,
                      tof_distance_stream.str().c_str(),
-                     tof_valid_stream.str().c_str());
+                     tof_valid_stream.str().c_str(),
+                     static_cast<unsigned>(snapshot.lidar_measurement.distance_mm),
+                     static_cast<int>(snapshot.lidar_measurement.valid),
+                     static_cast<unsigned>(snapshot.lidar_measurement.status));
+            monitor_line_counter++;
+            if (monitor_line_counter % 40 == 0) {
+                ESP_LOGI(TAG, "Firmware Version (every 40 lines): %s", FirmwareVersion::get_version_string());
+            }
         } else {
             ESP_LOGW(TAG, "Sensor snapshot unavailable");
         }
@@ -90,6 +99,15 @@ void SensorManager::initialize(const SensorControl::Config& config) {
             }
         };
 
+    config_with_callbacks.lidar_callback =
+        [this](const SensorCommon::LidarMeasurement& measurement) {
+            if (xSemaphoreTake(data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
+                latest_data_.lidar_measurement = measurement;
+                latest_data_.timestamp_us = esp_timer_get_time();
+                xSemaphoreGive(data_mutex_);
+            }
+        };
+
     ESP_LOGI(TAG, "Sensor setup stage: create SensorControl");
 
     // Create and initialize sensor control
@@ -108,11 +126,15 @@ void SensorManager::initialize(const SensorControl::Config& config) {
     // Initialize the latest_data_ structure
     for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS; i++) {
         latest_data_.ultrasonic_readings[i] = SensorCommon::Reading();
+        latest_data_.ultrasonic_readings[i].active = (i < static_cast<int>(config.ultrasonic_configs.size()));
     }
     for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
         latest_data_.tof_measurements[i] = SensorCommon::TofMeasurement();
+        latest_data_.tof_measurements[i].active = config.tof_configs[i].enabled;
     }
     latest_data_.timestamp_us = 0;
+    latest_data_.lidar_measurement = SensorCommon::LidarMeasurement();
+    latest_data_.lidar_measurement.active = config.lidar_config.enabled;
 
     initialized_ = true;
     ESP_LOGI(TAG, "SensorManager initialized successfully");

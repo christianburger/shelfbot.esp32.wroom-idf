@@ -2,7 +2,9 @@
 #include "sensor_control.hpp"
 #include "ultrasonic_sensor.hpp"
 #include "tof_sensor.hpp"
+#include "lidar_sensor.hpp"
 #include "sensor_common.hpp"
+#include "lidar_packet_parser.hpp"
 #include "firmware_version.hpp"
 
 const char* SensorControl::TAG = "SensorControl";
@@ -12,6 +14,7 @@ SensorControl::SensorControl(const Config& config)
     : config_(config),
       ultrasonic_array_(nullptr),
       tof_sensor_(nullptr),
+      lidar_sensor_(nullptr),
       initialized_(false),
       continuous_mode_(false),
       continuous_task_handle_(nullptr),
@@ -100,6 +103,41 @@ esp_err_t SensorControl::initialize_tof() {
     return ESP_OK;
 }
 
+esp_err_t SensorControl::initialize_lidar() {
+    if (config_.lidar_config.enabled) {
+#if SHELFBOT_DRIVER_LYDSTO
+        ESP_LOGW(TAG, "LiDAR is enabled, but SHELFBOT_DRIVER_LYDSTO already uses UART LYDSTO as the ToF driver.");
+        ESP_LOGW(TAG, "Skipping separate LidarSensor init to avoid double-installing UART driver on same peripheral.");
+        latest_data_.lidar_measurement.active = false;
+        latest_data_.lidar_measurement.valid = false;
+        latest_data_.lidar_measurement.health = 3; // conflict/misconfiguration
+#else
+        lidar_sensor_ = std::make_unique<LidarSensor>(
+            static_cast<uart_port_t>(config_.lidar_config.uart_port),
+            config_.lidar_config.uart_tx_pin,
+            config_.lidar_config.uart_rx_pin,
+            config_.lidar_config.baud_rate);
+        if (lidar_sensor_->initialize() != ESP_OK) {
+            ESP_LOGW(TAG, "Lidar UART init failed; continuing without LiDAR");
+            lidar_sensor_.reset();
+            latest_data_.lidar_measurement.active = false;
+            latest_data_.lidar_measurement.valid = false;
+            latest_data_.lidar_measurement.health = 2;
+            return ESP_OK;
+        }
+        latest_data_.lidar_measurement.active = true;
+        ESP_LOGI(TAG, "LidarSensor initialized (UART=%d RX=%d TX=%d BAUD=%lu)",
+                 config_.lidar_config.uart_port,
+                 config_.lidar_config.uart_rx_pin,
+                 config_.lidar_config.uart_tx_pin,
+                 static_cast<unsigned long>(config_.lidar_config.baud_rate));
+#endif
+    } else {
+        latest_data_.lidar_measurement.active = false;
+    }
+    return ESP_OK;
+}
+
 esp_err_t SensorControl::initialize() {
     if (initialized_) {
         return ESP_OK;
@@ -116,10 +154,19 @@ esp_err_t SensorControl::initialize() {
         return err;
     }
 
+#if SHELFBOT_HAS_TOF
     err = initialize_tof();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "TOF initialization failed");
         ESP_LOGW(TAG, "Continuing without TOF sensors");
+    }
+#else
+    ESP_LOGW(TAG, "TOF category disabled at compile-time (SHELFBOT_HAS_TOF=0)");
+#endif
+
+    err = initialize_lidar();
+    if (err != ESP_OK) {
+        ESP_LOGW(TAG, "LiDAR initialization had errors; continuing without LiDAR");
     }
 
     initialized_ = true;
@@ -128,7 +175,51 @@ esp_err_t SensorControl::initialize() {
     ESP_LOGI(TAG, "Sensor Control Initialization Complete");
     ESP_LOGI(TAG, "=========================================");
 
+    for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS; i++) {
+        latest_data_.ultrasonic_readings[i].active = (i < static_cast<int>(config_.ultrasonic_configs.size()));
+    }
+    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
+        latest_data_.tof_measurements[i].active = config_.tof_configs[i].enabled;
+    }
+    latest_data_.lidar_measurement.active = config_.lidar_config.enabled;
+
     return ESP_OK;
+}
+
+esp_err_t SensorControl::update_lidar_measurement() {
+    latest_data_.lidar_measurement.active = config_.lidar_config.enabled;
+    if (!config_.lidar_config.enabled) {
+        latest_data_.lidar_measurement.valid = false;
+        latest_data_.lidar_measurement.status = 0;
+        return ESP_OK;
+    }
+
+    if (!lidar_sensor_) {
+        latest_data_.lidar_measurement.health = 2;
+        return ESP_ERR_INVALID_STATE;
+    }
+    esp_err_t err = lidar_sensor_->read(latest_data_.lidar_measurement);
+    if (err == ESP_OK) {
+        uint32_t count = lidar_sensor_->packet_count();
+        if (count > 0 && (count % 20) == 0) {
+            uint8_t raw[47];
+            if (lidar_sensor_->get_last_raw_packet(raw, sizeof(raw))) {
+                LidarParsedPacket parsed{};
+                if (LidarPacketParser::parse(raw, sizeof(raw), parsed)) {
+                    ESP_LOGW(TAG, "=== LiDAR RAW PACKET #%lu BEGIN ===", static_cast<unsigned long>(count));
+                    ESP_LOGW(TAG, "%s", parsed.json.c_str());
+                    ESP_LOGW(TAG,
+                             "LiDAR CRC check packet#%lu: frame_crc=0x%02X calc_crc=0x%02X valid=%d",
+                             static_cast<unsigned long>(count),
+                             static_cast<unsigned>(parsed.crc),
+                             static_cast<unsigned>(parsed.crc_calculated),
+                             static_cast<int>(parsed.crc_valid));
+                    ESP_LOGW(TAG, "=== LiDAR RAW PACKET #%lu END ===", static_cast<unsigned long>(count));
+                }
+            }
+        }
+    }
+    return err;
 }
 
 bool SensorControl::is_ready() const {
@@ -168,6 +259,13 @@ esp_err_t SensorControl::read_tof(SensorCommon::TofMeasurement results[SensorCom
     }
 
     return tof_sensor_->read_all(results);
+}
+
+esp_err_t SensorControl::read_lidar(SensorCommon::LidarMeasurement& result) {
+    if (!config_.lidar_config.enabled || !lidar_sensor_) {
+        return ESP_ERR_INVALID_STATE;
+    }
+    return lidar_sensor_->read(result);
 }
 
 esp_err_t SensorControl::read_tof_single(uint8_t sensor_index, SensorCommon::TofMeasurement& result) {
@@ -223,13 +321,16 @@ void SensorControl::continuous_read_loop() {
 
             // Read ToF sensors
             SensorCommon::TofMeasurement tof_results[SensorCommon::NUM_TOF_SENSORS];
+#if SHELFBOT_HAS_TOF
             if (tof_sensor_ && tof_sensor_->read_all(tof_results) == ESP_OK) {
                 for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
                     latest_data_.tof_measurements[i] = tof_results[i];
                 }
             }
+#endif
 
             latest_data_.timestamp_us = timestamp;
+            update_lidar_measurement();
 
             xSemaphoreGive(data_mutex_);
 
@@ -248,6 +349,9 @@ void SensorControl::continuous_read_loop() {
             if ((now - last_tof_wake) * portTICK_PERIOD_MS >= config_.tof_read_interval_ms) {
                 if (config_.tof_callback) {
                     config_.tof_callback(latest_data_.tof_measurements);
+                }
+                if (config_.lidar_callback && config_.lidar_config.enabled) {
+                    config_.lidar_callback(latest_data_.lidar_measurement);
                 }
                 last_tof_wake = now;
             }
@@ -345,6 +449,17 @@ bool SensorControl::is_ultrasonic_ready() const {
     return ultrasonic_array_ != nullptr;
 }
 
+bool SensorControl::is_lidar_ready() const {
+    return config_.lidar_config.enabled && lidar_sensor_ && lidar_sensor_->is_ready();
+}
+
+bool SensorControl::get_last_lidar_raw_packet(uint8_t* out, size_t len) const {
+    if (!lidar_sensor_) {
+        return false;
+    }
+    return lidar_sensor_->get_last_raw_packet(out, len);
+}
+
 esp_err_t SensorControl::self_test() {
     esp_err_t overall_result = ESP_OK;
 
@@ -364,6 +479,10 @@ esp_err_t SensorControl::self_test() {
 
 bool SensorControl::tof_probe(uint8_t sensor_index) {
     return tof_sensor_ && tof_sensor_->probe(sensor_index);
+}
+
+uint8_t SensorControl::lidar_health() const {
+    return latest_data_.lidar_measurement.health;
 }
 
 bool SensorControl::get_latest_data(SensorCommon::SensorDataPacket* data) {

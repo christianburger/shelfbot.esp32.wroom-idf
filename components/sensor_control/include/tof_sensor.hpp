@@ -1,20 +1,20 @@
 #pragma once
 #include <idf_c_includes.hpp>
 #include "sensor_common.hpp"
+#include "sensor_control.h"
 
-// ═══════════════════════════════════════════════════════════════
-// DRIVER SELECTION - Change this ONE line to switch drivers
-// ═══════════════════════════════════════════════════════════════
-
-#include "vl53l0x.hpp"    // ← This include determines which driver is used
-//#include "vl53l1.hpp"    // ← This include determines which driver is used
-//#include "vl53l1_modbus.hpp"    // ← This include determines which driver is used
-
-// Options:
-//   "vl53l0x.hpp"         → for VL53L0X (I2C)
-//   "vl53l1.hpp"          → for VL53L1 (I2C)
-//   "vl53l1_modbus.hpp"   → for VL53L1_Modbus (UART)
-// ═══════════════════════════════════════════════════════════════
+// Driver selection from sensor_control.h
+#if SHELFBOT_DRIVER_VL53L0X
+#include "vl53l0x.hpp"
+#elif SHELFBOT_DRIVER_VL53L1
+#include "vl53l1.hpp"
+#elif SHELFBOT_DRIVER_VL53L1_MODBUS
+#include "vl53l1_modbus.hpp"
+#elif SHELFBOT_DRIVER_LYDSTO
+#include "lydsto.hpp"
+#else
+#error "Select one driver in sensor_control.h"
+#endif
 
 // Forward declaration not needed - TofDriver typedef comes from included header
 
