@@ -44,6 +44,8 @@ private:
   static esp_err_t sensors_handler(httpd_req_t* req);
   static esp_err_t health_handler(httpd_req_t* req);
   static esp_err_t motor_page_handler(httpd_req_t* req);
+  static esp_err_t lidar_page_handler(httpd_req_t* req);
+  static esp_err_t lidar_js_handler(httpd_req_t* req);
   static esp_err_t motor_status_handler(httpd_req_t* req);
   static esp_err_t motor_set_handler(httpd_req_t* req);
 
