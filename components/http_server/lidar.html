@@ -1,0 +1,42 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Shelfbot LiDAR Viewer</title>
+  <style>
+    body{font-family:Inter,Arial,sans-serif;margin:0;background:#0f172a;color:#e2e8f0}
+    .wrap{max-width:1100px;margin:0 auto;padding:24px}
+    .top{display:flex;justify-content:space-between;align-items:center}
+    .card{background:#1e293b;border:1px solid #334155;border-radius:12px;padding:16px;margin-top:16px}
+    a{color:#93c5fd;text-decoration:none;font-weight:600}
+    a:hover{text-decoration:underline}
+    #meta{font-family:monospace;white-space:pre-wrap;color:#a7f3d0}
+    svg{width:100%;max-width:700px;height:auto;background:#020617;border-radius:12px;border:1px solid #334155}
+    .legend{font-size:13px;color:#94a3b8;margin-top:8px}
+    .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
+    button{background:#22c55e;border:0;border-radius:8px;padding:8px 12px;color:#04110a;font-weight:700;cursor:pointer}
+    button.secondary{background:#334155;color:#e2e8f0}
+    #logStatus{font-size:13px;color:#94a3b8}
+  </style>
+</head>
+<body>
+<div class="wrap">
+  <div class="top"><h1>🛰️ LiDAR Live Viewer</h1><a href="/">← Main Dashboard</a></div>
+  <div class="card">
+    <svg id="lidar" viewBox="0 0 600 600" role="img" aria-label="Live LiDAR scan"></svg>
+    <div class="legend">Click any point to inspect angle and distance.</div>
+    <div class="toolbar">
+      <button id="startLogBtn">Start Local Log</button>
+      <button id="stopLogBtn" class="secondary">Stop Local Log</button>
+      <button id="saveLogBtn" class="secondary">Download Log Backup</button>
+      <button id="persistBtn" class="secondary">Persist Points: OFF</button>
+      <button id="clearPersistBtn" class="secondary">Clear Persisted</button>
+      <span id="logStatus">Local logging: off</span>
+    </div>
+  </div>
+  <div class="card"><h3>Scan Metadata</h3><div id="meta">Loading...</div></div>
+</div>
+<script src="/lidar_viz.js"></script>
+</body>
+</html>

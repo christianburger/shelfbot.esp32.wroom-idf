@@ -7,6 +7,10 @@
 #include "firmware_version.hpp"
 
 const char* HttpServer::TAG = "HttpServer";
+extern const uint8_t _binary_lidar_html_start[] asm("_binary_lidar_html_start");
+extern const uint8_t _binary_lidar_html_end[] asm("_binary_lidar_html_end");
+extern const uint8_t _binary_lidar_viz_js_start[] asm("_binary_lidar_viz_js_start");
+extern const uint8_t _binary_lidar_viz_js_end[] asm("_binary_lidar_viz_js_end");
 
 // Helper function to add CORS headers
 static void add_cors_headers(httpd_req_t* req) {
@@ -130,6 +134,22 @@ esp_err_t HttpServer::register_uri_handlers() {
     };
     httpd_register_uri_handler(server_, &motor_page_uri);
 
+    httpd_uri_t lidar_page_uri = {
+        .uri = "/lidar.html",
+        .method = HTTP_GET,
+        .handler = lidar_page_handler,
+        .user_ctx = nullptr
+    };
+    httpd_register_uri_handler(server_, &lidar_page_uri);
+
+    httpd_uri_t lidar_js_uri = {
+        .uri = "/lidar_viz.js",
+        .method = HTTP_GET,
+        .handler = lidar_js_handler,
+        .user_ctx = nullptr
+    };
+    httpd_register_uri_handler(server_, &lidar_js_uri);
+
     httpd_uri_t motor_status_uri = {
         .uri = "/api/motor/status",
         .method = HTTP_GET,
@@ -201,6 +221,18 @@ load(); setInterval(load,500);
 </script></body></html>)HTML";
     httpd_resp_set_type(req, "text/html; charset=utf-8");
     return httpd_resp_send(req, page.c_str(), HTTPD_RESP_USE_STRLEN);
+}
+
+esp_err_t HttpServer::lidar_page_handler(httpd_req_t* req) {
+    httpd_resp_set_type(req, "text/html; charset=utf-8");
+    const size_t len = _binary_lidar_html_end - _binary_lidar_html_start;
+    return httpd_resp_send(req, reinterpret_cast<const char*>(_binary_lidar_html_start), len);
+}
+
+esp_err_t HttpServer::lidar_js_handler(httpd_req_t* req) {
+    httpd_resp_set_type(req, "application/javascript; charset=utf-8");
+    const size_t len = _binary_lidar_viz_js_end - _binary_lidar_viz_js_start;
+    return httpd_resp_send(req, reinterpret_cast<const char*>(_binary_lidar_viz_js_start), len);
 }
 
 esp_err_t HttpServer::motor_status_handler(httpd_req_t* req) {
@@ -279,6 +311,7 @@ esp_err_t HttpServer::root_handler(httpd_req_t* req) {
                     <div class="card"><h3>📦 Sensor Dashboard</h3><p><a href="/api/sensors">Open all sensors JSON</a></p><code>GET /api/sensors</code></div>
                     <div class="card"><h3>📡 ToF</h3><p><a href="/api/tof">Open ToF JSON</a></p><code>GET /api/tof</code></div>
                     <div class="card"><h3>🛰️ LiDAR</h3><p><a href="/api/lidar">Open LiDAR JSON</a></p><code>GET /api/lidar</code></div>
+                    <div class="card"><h3>🗺️ LiDAR Viewer</h3><p><a href="/lidar.html">Open live LiDAR visualization</a></p><code>/lidar.html</code></div>
                     <div class="card"><h3>📏 Ultrasonic</h3><p><a href="/api/ultrasonic">Open ultrasonic JSON</a></p><code>GET /api/ultrasonic</code></div>
                     <div class="card"><h3>⚙️ Motor Control UI</h3><p><a href="/motor.html">Open motor control page</a></p><code>/motor.html</code></div>
                     <div class="card"><h3>❤️ Health</h3><p><a href="/api/health">Open system health JSON</a></p><code>GET /api/health</code></div>
@@ -420,6 +453,9 @@ cJSON* HttpServer::create_sensor_json(const SensorCommon::SensorDataPacket& sens
     cJSON_AddNumberToObject(lidar_json, "distance_mm", lidar.distance_mm);
     cJSON_AddNumberToObject(lidar_json, "distance_cm", lidar.distance_cm());
     cJSON_AddNumberToObject(lidar_json, "status", lidar.status);
+    cJSON_AddNumberToObject(lidar_json, "start_angle_deg", lidar.start_angle_deg);
+    cJSON_AddNumberToObject(lidar_json, "end_angle_deg", lidar.end_angle_deg);
+    cJSON_AddNumberToObject(lidar_json, "min_distance_angle_deg", lidar.min_distance_angle_deg);
     cJSON_AddStringToObject(lidar_json, "status_text", get_sensor_status_text(lidar).c_str());
     cJSON_AddNumberToObject(lidar_json, "timestamp_us", lidar.timestamp_us);
     cJSON_AddBoolToObject(lidar_json, "timeout_occurred", lidar.timeout_occurred);
@@ -491,9 +527,25 @@ esp_err_t HttpServer::lidar_handler(httpd_req_t* req) {
     cJSON_AddNumberToObject(root, "distance_mm", m.distance_mm);
     cJSON_AddNumberToObject(root, "distance_cm", m.distance_cm());
     cJSON_AddNumberToObject(root, "status", m.status);
+    cJSON_AddNumberToObject(root, "start_angle_deg", m.start_angle_deg);
+    cJSON_AddNumberToObject(root, "end_angle_deg", m.end_angle_deg);
+    cJSON_AddNumberToObject(root, "min_distance_angle_deg", m.min_distance_angle_deg);
     cJSON_AddStringToObject(root, "status_text", get_sensor_status_text(m).c_str());
     cJSON_AddNumberToObject(root, "timestamp_us", m.timestamp_us);
     cJSON_AddBoolToObject(root, "timeout_occurred", m.timeout_occurred);
+    if (m.has_packet_points) {
+        cJSON_AddNumberToObject(root, "speed", m.packet_speed);
+        cJSON_AddNumberToObject(root, "timestamp", m.packet_timestamp);
+        cJSON_AddNumberToObject(root, "crc", m.packet_crc);
+        cJSON* points = cJSON_CreateArray();
+        for (int i = 0; i < 12; ++i) {
+            cJSON* pt = cJSON_CreateObject();
+            cJSON_AddNumberToObject(pt, "d", m.packet_distances_mm[i]);
+            cJSON_AddNumberToObject(pt, "c", m.packet_confidences[i]);
+            cJSON_AddItemToArray(points, pt);
+        }
+        cJSON_AddItemToObject(root, "points", points);
+    }
 
     char* json_str = cJSON_PrintUnformatted(root);
     if (json_str) {

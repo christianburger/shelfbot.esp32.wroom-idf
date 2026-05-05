@@ -93,6 +93,13 @@ void Shelfbot::distance_sensors_timer_callback(rcl_timer_t * timer, int64_t last
             for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS && idx < SensorCommon::NUM_SENSORS; i++, idx++) {
                 distance_sensors_data[idx] = sensor_data.tof_measurements[i].distance_mm / 10.0f;
             }
+            // Publish LiDAR min distance (convert mm to cm) as final slot
+            if (idx < SensorCommon::NUM_SENSORS) {
+                distance_sensors_data[idx] = sensor_data.lidar_measurement.valid
+                    ? (sensor_data.lidar_measurement.distance_mm / 10.0f)
+                    : -1.0f;
+                idx++;
+            }
             distance_sensors_msg.data.size = idx;
             RCSOFTCHECK(rcl_publish(&distance_sensors_publisher, &distance_sensors_msg, NULL));
         }
@@ -352,13 +359,21 @@ void Shelfbot::begin() {
         {.trig_pin = 32, .echo_pin = 33, .timeout_us = 30000, .max_distance_mm = 4000}
     };
 
-    // Configure 3 ToF sensors
+    // Configure ToF sensors (disabled: no ToF devices connected)
     for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
         sensor_config.tof_configs[i].timeout_ms = 500;
+        sensor_config.tof_configs[i].enabled = false;
     }
 
     sensor_config.ultrasonic_read_interval_ms = 100;
     sensor_config.tof_read_interval_ms = 200;
+
+    // Configure LYDSTO LiDAR over UART (RX on GPIO3)
+    sensor_config.lidar_config.enabled = true;
+    sensor_config.lidar_config.uart_port = UART_NUM_2;
+    sensor_config.lidar_config.uart_tx_pin = UART_PIN_NO_CHANGE;
+    sensor_config.lidar_config.uart_rx_pin = GPIO_NUM_3;
+    sensor_config.lidar_config.baud_rate = 115200;
 
     // Initialize the global sensor manager
     SensorManager::get_instance().initialize(sensor_config);

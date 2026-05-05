@@ -8,7 +8,7 @@ namespace SensorCommon {
 
   constexpr int NUM_ULTRASONIC_SENSORS = 4;
   constexpr int NUM_TOF_SENSORS = 1;
-  constexpr int NUM_SENSORS = NUM_ULTRASONIC_SENSORS + NUM_TOF_SENSORS;
+  constexpr int NUM_SENSORS = NUM_ULTRASONIC_SENSORS + NUM_TOF_SENSORS + 1; // +1 LiDAR
 
   // Ultrasonic sensor reading structure
   struct Reading {
@@ -45,9 +45,21 @@ namespace SensorCommon {
     int64_t timestamp_us;
     bool timeout_occurred;
     uint8_t health;       // 0=unknown, 1=ok, >1 degraded/error
+    float start_angle_deg;
+    float end_angle_deg;
+    float min_distance_angle_deg;
+    bool has_packet_points;
+    uint16_t packet_speed;
+    uint16_t packet_timestamp;
+    uint8_t packet_crc;
+    uint16_t packet_distances_mm[12];
+    uint8_t packet_confidences[12];
 
     LidarMeasurement() : distance_mm(0), active(false), valid(false), status(0),
-                         timestamp_us(0), timeout_occurred(false), health(0) {}
+                         timestamp_us(0), timeout_occurred(false), health(0),
+                         start_angle_deg(0.0f), end_angle_deg(0.0f), min_distance_angle_deg(0.0f),
+                         has_packet_points(false), packet_speed(0), packet_timestamp(0), packet_crc(0),
+                         packet_distances_mm{0}, packet_confidences{0} {}
 
     float distance_cm() const { return distance_mm / 10.0f; }
   };
