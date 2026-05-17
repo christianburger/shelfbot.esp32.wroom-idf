@@ -1,9 +1,4 @@
 #include "http_server.hpp"
-#include <esp_timer.h>
-#include <esp_task_wdt.h>
-#include <sstream>
-#include <iomanip>
-#include <algorithm>
 #include "firmware_version.hpp"
 #include "lidar_packet_parser.hpp"
 
