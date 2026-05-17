@@ -1,10 +1,4 @@
 #include "shelfbot.hpp"
-#include "sensor_control.hpp"
-#include "motor_control.hpp"
-#include "firmware_version.hpp"
-#include "ultrasonic_sensor.hpp"
-#include "idf_c_includes.hpp"
-
 // The ESP-IDF framework requires a C-style `app_main` entry point.
 // We use `extern "C"` to prevent C++ name mangling.
 extern "C" void app_main(void)

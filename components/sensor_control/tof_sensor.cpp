@@ -1,7 +1,5 @@
 #include "tof_sensor.hpp"
 
-// Driver already included via header - no additional includes needed
-
 const char* TofSensor::TAG = "TofSensor";
 
 TofSensor::TofSensor(const Config& config)

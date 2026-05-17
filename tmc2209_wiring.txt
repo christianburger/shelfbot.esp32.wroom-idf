@@ -1,0 +1,25 @@
+ESP32                                 TMC2209 Driver (x5)
+------                                ------------------
++-----------------+
+| GPIO27 (STEP0)  | --> STEP0
+| GPIO26 (DIR0)   | --> DIR0
+| GPIO14 (STEP1)  | --> STEP1
+| GPIO33 (DIR1)   | --> DIR1
+| GPIO13 (STEP2)  | --> STEP2
+| GPIO19 (DIR2)   | --> DIR2
+| GPIO4  (STEP3)  | --> STEP3
+| GPIO18 (DIR3)   | --> DIR3
+| GPIO12 (STEP4)  | --> STEP4
+| GPIO23 (DIR4)   | --> DIR4
+|                 |
+| 3.3V            | ---> VIO (all drivers parallel)
+| GND             | ---> GND (logic ground)
++-----------------+
+       |
+       | (common ground)
+       v
++-----------------+
+| Power Supply    |
+| 24V+  --> VM    |
+| GND   --> GND (power ground)
++-----------------+
