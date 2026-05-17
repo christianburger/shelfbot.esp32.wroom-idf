@@ -1,7 +1,4 @@
 #include "shelfbot.hpp"
-#include <rcl/allocator.h>
-#include <rmw_microros/init_options.h>
-#include "sensor_manager.hpp"
 
 static const char* TAG = "shelfbot";
 

@@ -1,4 +1,5 @@
 #pragma once
+
 // C headers (must be wrapped)
 extern "C" {
 // FreeRTOS
@@ -7,6 +8,7 @@ extern "C" {
 #include "freertos/queue.h"
 #include "freertos/semphr.h"
 #include "freertos/timers.h"
+#include "freertos/event_groups.h"
 
 // ESP-IDF core
 #include "esp_log.h"
@@ -18,6 +20,7 @@ extern "C" {
 #include "esp_netif.h"
 #include "esp_http_server.h"
 #include "esp_sntp.h"
+#include "esp_wifi.h"
 
 // NVS
 #include "nvs_flash.h"
@@ -29,7 +32,8 @@ extern "C" {
 #include "driver/uart.h"
 #include "soc/gpio_num.h"
 
-// mDNS
+// Protocols
+#include "cJSON.h"
 #include "mdns.h"
 }
 
@@ -41,11 +45,13 @@ extern "C" {
 #include <cmath>
 #include <ctime>
 #include <vector>
+#include <array>
 #include <memory>
 #include <algorithm>
 #include <string>
 #include <fstream>
 #include <sstream>
+#include <iomanip>
 
 // micro-ROS
 #include <rcl/rcl.h>

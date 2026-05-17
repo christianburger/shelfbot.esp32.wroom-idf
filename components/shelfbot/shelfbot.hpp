@@ -1,6 +1,13 @@
-// [file name]: shelfbot.hpp
+// shelfbot.hpp
 #pragma once
 #include <idf_c_includes.hpp>
+#include "sensor_common.hpp"
+#include "sensor_control.hpp"
+#include "motor_control.hpp"
+#include "led_control.hpp"
+#include "wifi_station.hpp"          // corrected: .hpp not .h
+#include "http_server.hpp"
+#include "firmware_version.hpp"
 
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){ESP_LOGE(TAG, "RCL error in %s: %d", #fn, (int)temp_rc);}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){ESP_LOGW(TAG, "RCL soft error in %s: %d", #fn, (int)temp_rc);}}
@@ -63,7 +70,6 @@ private:
     float motor_pos_data[2];
     float distance_sensors_data[SensorCommon::NUM_SENSORS];
 
-    // Sensor control instance
     std::unique_ptr<SensorControl> sensor_control_;
 
     void initialise_mdns();
