@@ -35,6 +35,17 @@ extern "C" {
 // Protocols
 #include "cJSON.h"
 #include "mdns.h"
+
+// micro-ROS
+#include "rcl/rcl.h"
+#include "rclc/rclc.h"
+#include "rclc/executor.h"
+#include "rmw_microros/rmw_microros.h"
+#include "rmw_microros/ping.h"
+#include "std_msgs/msg/int32.h"
+#include "std_msgs/msg/bool.h"
+#include "std_msgs/msg/float32.h"
+#include "std_msgs/msg/float32_multi_array.h"
 }
 
 // C++ standard library
@@ -52,14 +63,3 @@ extern "C" {
 #include <fstream>
 #include <sstream>
 #include <iomanip>
-
-// micro-ROS
-#include <rcl/rcl.h>
-#include <rclc/rclc.h>
-#include <rclc/executor.h>
-#include <rmw_microros/rmw_microros.h>
-#include <rmw_microros/ping.h>
-#include <std_msgs/msg/int32.h>
-#include <std_msgs/msg/bool.h>
-#include <std_msgs/msg/float32.h>
-#include <std_msgs/msg/float32_multi_array.h>

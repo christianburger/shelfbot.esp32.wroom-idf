@@ -1,7 +1,5 @@
 #pragma once
 #include <idf_c_includes.hpp>
-#include <array>
-#include <string>
 
 struct LidarParsedPacket {
     bool valid;

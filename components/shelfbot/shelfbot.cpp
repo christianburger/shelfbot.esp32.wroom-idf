@@ -213,41 +213,26 @@ void Shelfbot::destroy_entities() {
     rmw_context_t * rmw_context = rcl_context_get_rmw_context(&support.context);
     (void) rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
 
-    // Explicitly ignore return values with (void) cast
     rcl_ret_t ret;
 
-    ret = rcl_publisher_fini(&heartbeat_publisher, &node);
-    (void)ret;
-    ret = rcl_publisher_fini(&motor_position_publisher, &node);
-    (void)ret;
-    ret = rcl_publisher_fini(&distance_sensors_publisher, &node);
-    (void)ret;
-    ret = rcl_publisher_fini(&led_state_publisher, &node);
-    (void)ret;
-    ret = rcl_publisher_fini(&tof_distance_publisher, &node);
-    (void)ret;
+    ret = rcl_publisher_fini(&heartbeat_publisher, &node);       (void)ret;
+    ret = rcl_publisher_fini(&motor_position_publisher, &node);  (void)ret;
+    ret = rcl_publisher_fini(&distance_sensors_publisher, &node);(void)ret;
+    ret = rcl_publisher_fini(&led_state_publisher, &node);       (void)ret;
+    ret = rcl_publisher_fini(&tof_distance_publisher, &node);    (void)ret;
 
-    ret = rcl_subscription_fini(&motor_command_subscription, &node);
-    (void)ret;
-    ret = rcl_subscription_fini(&set_speed_subscription, &node);
-    (void)ret;
-    ret = rcl_subscription_fini(&led_subscription, &node);
-    (void)ret;
+    ret = rcl_subscription_fini(&motor_command_subscription, &node); (void)ret;
+    ret = rcl_subscription_fini(&set_speed_subscription, &node);     (void)ret;
+    ret = rcl_subscription_fini(&led_subscription, &node);           (void)ret;
 
-    ret = rcl_timer_fini(&heartbeat_timer);
-    (void)ret;
-    ret = rcl_timer_fini(&motor_position_timer);
-    (void)ret;
-    ret = rcl_timer_fini(&distance_sensors_timer);
-    (void)ret;
-    ret = rcl_timer_fini(&led_state_timer);
-    (void)ret;
-    ret = rcl_timer_fini(&tof_timer);
-    (void)ret;
+    ret = rcl_timer_fini(&heartbeat_timer);        (void)ret;
+    ret = rcl_timer_fini(&motor_position_timer);   (void)ret;
+    ret = rcl_timer_fini(&distance_sensors_timer); (void)ret;
+    ret = rcl_timer_fini(&led_state_timer);        (void)ret;
+    ret = rcl_timer_fini(&tof_timer);              (void)ret;
 
     rclc_executor_fini(&executor);
-    ret = rcl_node_fini(&node);
-    (void)ret;
+    ret = rcl_node_fini(&node); (void)ret;
     rclc_support_fini(&support);
 }
 
@@ -308,7 +293,6 @@ void Shelfbot::micro_ros_task_impl() {
 
 // --- Main Entry Point ---
 void Shelfbot::begin() {
-    // Get the singleton instance
     instance = this;
 
     ESP_LOGI(TAG, "========================================");
@@ -316,12 +300,12 @@ void Shelfbot::begin() {
     ESP_LOGI(TAG, "Firmware Version: %s", FirmwareVersion::get_version_string());
     ESP_LOGI(TAG, "========================================");
 
-    // 1. Initialize Subsystems (Hardware Abstraction)
+    // 1. Hardware subsystems
     ESP_LOGI(TAG, "1. Initializing hardware subsystems...");
     led_control_init();
     motor_control_begin();
 
-    // 2. Initialize Networking & System Services
+    // 2. Networking & system services
     ESP_LOGI(TAG, "2. Initializing network and system services...");
 
     esp_err_t ret = nvs_flash_init();
@@ -337,26 +321,35 @@ void Shelfbot::begin() {
     initialize_sntp();
     initialise_mdns();
 
-    // Start HTTP server
     esp_err_t err = HttpServer::get_instance().start();
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(err));
     }
 
-    // 3. Initialize Sensor Manager (shared by all components)
+    // 3. Sensor Manager
     ESP_LOGI(TAG, "3. Initializing sensors...");
 
     SensorControl::Config sensor_config;
 
-    // Configure 4 ultrasonic sensors
+    // ---------------------------------------------------------------------------
+    // Ultrasonic sensor GPIO assignment — conflict-free with all motor pins.
+    //
+    // TRIG pins: GPIO25, GPIO32, GPIO16, GPIO17  (output-capable, no conflicts)
+    // ECHO pins: GPIO34, GPIO35, GPIO36, GPIO39  (input-only GPIOs — correct for
+    //            echo reception; never need to drive these lines as outputs)
+    //
+    // Previous conflicting assignment (DO NOT restore):
+    //   {25,26}, {27,14}, {12,13}, {32,33}
+    //   — echoes on GPIO26/14/13/33 clashed with Motor DIR/STEP outputs.
+    // ---------------------------------------------------------------------------
     sensor_config.ultrasonic_configs = {
-        {.trig_pin = 25, .echo_pin = 26, .timeout_us = 30000, .max_distance_mm = 4000},
-        {.trig_pin = 27, .echo_pin = 14, .timeout_us = 30000, .max_distance_mm = 4000},
-        {.trig_pin = 12, .echo_pin = 13, .timeout_us = 30000, .max_distance_mm = 4000},
-        {.trig_pin = 32, .echo_pin = 33, .timeout_us = 30000, .max_distance_mm = 4000}
+        {.trig_pin = 25, .echo_pin = 34, .timeout_us = 30000, .max_distance_mm = 4000},  // Sensor 0
+        {.trig_pin = 32, .echo_pin = 35, .timeout_us = 30000, .max_distance_mm = 4000},  // Sensor 1
+        {.trig_pin = 16, .echo_pin = 36, .timeout_us = 30000, .max_distance_mm = 4000},  // Sensor 2
+        {.trig_pin = 17, .echo_pin = 39, .timeout_us = 30000, .max_distance_mm = 4000},  // Sensor 3
     };
 
-    // Configure ToF sensors (disabled: no ToF devices connected)
+    // ToF sensors disabled — no hardware connected
     for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
         sensor_config.tof_configs[i].timeout_ms = 500;
         sensor_config.tof_configs[i].enabled = false;
@@ -365,18 +358,17 @@ void Shelfbot::begin() {
     sensor_config.ultrasonic_read_interval_ms = 100;
     sensor_config.tof_read_interval_ms = 200;
 
-    // Configure LYDSTO LiDAR over UART (RX on GPIO3)
-    sensor_config.lidar_config.enabled = true;
-    sensor_config.lidar_config.uart_port = UART_NUM_2;
-    sensor_config.lidar_config.uart_tx_pin = UART_PIN_NO_CHANGE;
-    sensor_config.lidar_config.uart_rx_pin = GPIO_NUM_3;
-    sensor_config.lidar_config.baud_rate = 115200;
+    // LYDSTO LiDAR: UART2, RX on GPIO3 (receive-only, no TX needed)
+    sensor_config.lidar_config.enabled      = true;
+    sensor_config.lidar_config.uart_port    = UART_NUM_2;
+    sensor_config.lidar_config.uart_tx_pin  = UART_PIN_NO_CHANGE;
+    sensor_config.lidar_config.uart_rx_pin  = GPIO_NUM_3;
+    sensor_config.lidar_config.baud_rate    = 115200;
 
-    // Initialize the global sensor manager
     SensorManager::get_instance().initialize(sensor_config);
     SensorManager::get_instance().start();
 
-    // 4. Start Application Task (Micro-ROS)
+    // 4. Micro-ROS task
     ESP_LOGI(TAG, "4. Starting Micro-ROS task...");
     xTaskCreate(micro_ros_task_wrapper, "uros_task", 16000, this, 5, nullptr);
 
