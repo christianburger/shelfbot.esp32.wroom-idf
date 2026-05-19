@@ -5,7 +5,7 @@
 #include "sensor_control.hpp"
 #include "motor_control.hpp"
 #include "led_control.hpp"
-#include "wifi_station.hpp"          // corrected: .hpp not .h
+#include "wifi_manager.hpp"          // new Wi-Fi manager
 #include "http_server.hpp"
 #include "firmware_version.hpp"
 
@@ -19,6 +19,10 @@ public:
         if (!instance) instance = new Shelfbot();
         return *instance;
     }
+
+    // Network service helpers – made public for external task
+    void initialise_mdns(void);
+    void initialize_sntp(void);
 
     static bool time_synchronized;
     static bool led_state;
@@ -72,9 +76,7 @@ private:
 
     std::unique_ptr<SensorControl> sensor_control_;
 
-    void initialise_mdns();
     bool query_mdns_host(const char * host_name);
-    void initialize_sntp();
 
     void create_entities();
     void destroy_entities();

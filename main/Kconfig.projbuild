@@ -1,0 +1,79 @@
+menu "Wi-Fi Configuration"
+
+    config WIFI_SSID_1
+        string "Wi-Fi SSID 1"
+        default "dlink-30C0"
+        help
+            First Wi-Fi SSID.
+
+    config WIFI_PASS_1
+        string "Wi-Fi Password 1"
+        default "ypics98298"
+        help
+            Password for first SSID. Leave empty for open network.
+
+    config WIFI_SSID_2
+        string "Wi-Fi SSID 2"
+        default ""
+        help
+            Second Wi-Fi SSID (optional).
+
+    config WIFI_PASS_2
+        string "Wi-Fi Password 2"
+        default ""
+
+    config WIFI_SSID_3
+        string "Wi-Fi SSID 3"
+        default ""
+
+    config WIFI_PASS_3
+        string "Wi-Fi Password 3"
+        default ""
+
+    config WIFI_SSID_4
+        string "Wi-Fi SSID 4"
+        default ""
+
+    config WIFI_PASS_4
+        string "Wi-Fi Password 4"
+        default ""
+
+    config WIFI_RSSI_WARN_THRESHOLD
+        int "RSSI warning threshold (dBm)"
+        default -70
+        range -100 -30
+        help
+            Below this value, the connection is considered degraded.
+
+    config WIFI_RSSI_CRITICAL_THRESHOLD
+        int "RSSI critical threshold (dBm)"
+        default -80
+        range -100 -30
+        help
+            Below this value, an immediate background scan is triggered.
+
+    config WIFI_DEGRADED_CONFIRM_N
+        int "Degraded confirmation count"
+        default 3
+        help
+            Number of consecutive weak RSSI readings before scanning.
+
+    config WIFI_MONITOR_INTERVAL_MS
+        int "Monitor interval (ms)"
+        default 5000
+        help
+            How often to check RSSI while connected.
+
+    config WIFI_RETRIES_PER_NETWORK
+        int "Retries per network"
+        default 3
+        help
+            Number of connection attempts per AP before giving up.
+
+    config WIFI_INTER_CYCLE_DELAY_S
+        int "Delay between scan cycles (seconds)"
+        default 10
+        help
+            When no known AP is visible, wait this many seconds before rescanning.
+
+endmenu

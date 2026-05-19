@@ -1,13 +1,14 @@
+// shelfbot.cpp
 #include "shelfbot.hpp"
 
 static const char* TAG = "shelfbot";
 
-// --- Static Member Definitions ---
+// --- Static Member Definitions (unchanged) ---
 bool Shelfbot::time_synchronized = false;
 bool Shelfbot::led_state = false;
 Shelfbot* Shelfbot::instance = nullptr;
 
-// --- Helper Functions ---
+// --- Helper Functions (unchanged) ---
 void init_multi_array(std_msgs__msg__Float32MultiArray& msg, float* data_buffer, int capacity) {
     msg.data.data = data_buffer;
     msg.data.capacity = capacity;
@@ -18,7 +19,7 @@ void init_multi_array(std_msgs__msg__Float32MultiArray& msg, float* data_buffer,
     msg.layout.data_offset = 0;
 }
 
-// --- mDNS Implementation ---
+// --- mDNS (unchanged) ---
 void Shelfbot::initialise_mdns(void) {
     mdns_init();
     mdns_hostname_set("shelfbot");
@@ -43,7 +44,7 @@ bool Shelfbot::query_mdns_host(const char * host_name) {
     return true;
 }
 
-// --- SNTP Implementation ---
+// --- SNTP (unchanged) ---
 void Shelfbot::time_sync_notification_cb(struct timeval *tv) {
     ESP_LOGI(TAG, "Time synchronized");
     time_synchronized = true;
@@ -57,7 +58,7 @@ void Shelfbot::initialize_sntp(void) {
     esp_sntp_init();
 }
 
-// --- ROS Timer Callbacks ---
+// --- ROS Timer Callbacks (unchanged) ---
 void Shelfbot::heartbeat_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     (void) last_call_time;
     if (timer != NULL) {
@@ -81,16 +82,13 @@ void Shelfbot::distance_sensors_timer_callback(rcl_timer_t * timer, int64_t last
     if (timer != NULL) {
         SensorCommon::SensorDataPacket sensor_data;
         if (SensorManager::get_instance().get_latest_data(sensor_data)) {
-            // Publish ultrasonic distances
             size_t idx = 0;
             for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS && idx < SensorCommon::NUM_ULTRASONIC_SENSORS; i++, idx++) {
                 distance_sensors_data[idx] = sensor_data.ultrasonic_readings[i].distance_cm;
             }
-            // Publish ToF distances (convert mm to cm)
             for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS && idx < SensorCommon::NUM_SENSORS; i++, idx++) {
                 distance_sensors_data[idx] = sensor_data.tof_measurements[i].distance_mm / 10.0f;
             }
-            // Publish LiDAR min distance (convert mm to cm) as final slot
             if (idx < SensorCommon::NUM_SENSORS) {
                 distance_sensors_data[idx] = sensor_data.lidar_measurement.valid
                     ? (sensor_data.lidar_measurement.distance_mm / 10.0f)
@@ -116,7 +114,6 @@ void Shelfbot::tof_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     if (timer != NULL) {
         SensorCommon::SensorDataPacket sensor_data;
         if (SensorManager::get_instance().get_latest_data(sensor_data)) {
-            // Use the first ToF sensor for backward compatibility
             if (sensor_data.tof_measurements[0].valid) {
                 tof_distance_msg.data = sensor_data.tof_measurements[0].distance_mm / 10.0f;
             } else {
@@ -129,7 +126,7 @@ void Shelfbot::tof_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     }
 }
 
-// --- ROS Subscription Callbacks ---
+// --- ROS Subscription Callbacks (unchanged) ---
 void Shelfbot::motor_command_subscription_callback(const void * msin) {
     const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msin;
     if (msg->data.size >= 2) {
@@ -152,7 +149,7 @@ void Shelfbot::led_subscription_callback(const void * msin) {
     led_control_set(led_state);
 }
 
-// --- Static Callback Wrappers ---
+// --- Static Callback Wrappers (unchanged) ---
 void Shelfbot::heartbeat_timer_callback_wrapper(rcl_timer_t * t, int64_t l) { if(instance) instance->heartbeat_timer_callback(t, l); }
 void Shelfbot::motor_position_timer_callback_wrapper(rcl_timer_t * t, int64_t l) { if(instance) instance->motor_position_timer_callback(t, l); }
 void Shelfbot::distance_sensors_timer_callback_wrapper(rcl_timer_t * t, int64_t l) { if(instance) instance->distance_sensors_timer_callback(t, l); }
@@ -163,35 +160,29 @@ void Shelfbot::set_speed_subscription_callback_wrapper(const void * m) { if(inst
 void Shelfbot::led_subscription_callback_wrapper(const void * m) { if(instance) instance->led_subscription_callback(m); }
 void Shelfbot::micro_ros_task_wrapper(void * arg) { if(instance) instance->micro_ros_task_impl(); }
 
-// --- Entity Lifecycle ---
+// --- Entity Lifecycle (unchanged) ---
 void Shelfbot::create_entities() {
     allocator = rcl_get_default_allocator();
-
-    // Node Init
     RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
     RCCHECK(rclc_node_init_default(&node, "shelfbot_firmware", "", &support));
 
-    // Publishers
     RCCHECK(rclc_publisher_init_default(&heartbeat_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32), "shelfbot_firmware/heartbeat"));
     RCCHECK(rclc_publisher_init_default(&motor_position_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "shelfbot_firmware/motor_positions"));
     RCCHECK(rclc_publisher_init_default(&distance_sensors_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "shelfbot_firmware/distance_sensors"));
     RCCHECK(rclc_publisher_init_default(&led_state_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "shelfbot_firmware/led_state"));
     RCCHECK(rclc_publisher_init_default(&tof_distance_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), "shelfbot_firmware/tof_distance"));
 
-    // Subscribers
     RCCHECK(rclc_subscription_init_default(&motor_command_subscription, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "shelfbot_firmware/motor_command"));
     RCCHECK(rclc_subscription_init_default(&set_speed_subscription, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "shelfbot_firmware/set_speed"));
     RCCHECK(rclc_subscription_init_default(&led_subscription, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "shelfbot_firmware/led"));
 
-    // Timers
     RCCHECK(rclc_timer_init_default(&heartbeat_timer, &support, RCL_MS_TO_NS(1000), heartbeat_timer_callback_wrapper));
     RCCHECK(rclc_timer_init_default(&motor_position_timer, &support, RCL_MS_TO_NS(100), motor_position_timer_callback_wrapper));
     RCCHECK(rclc_timer_init_default(&distance_sensors_timer, &support, RCL_MS_TO_NS(200), distance_sensors_timer_callback_wrapper));
     RCCHECK(rclc_timer_init_default(&led_state_timer, &support, RCL_MS_TO_NS(2000), led_state_timer_callback_wrapper));
     RCCHECK(rclc_timer_init_default(&tof_timer, &support, RCL_MS_TO_NS(100), tof_timer_callback_wrapper));
 
-    // Executor
-    unsigned int num_handles = 5 + 3; // 5 timers + 3 subs
+    unsigned int num_handles = 5 + 3;
     RCCHECK(rclc_executor_init(&executor, &support.context, num_handles, &allocator));
 
     RCCHECK(rclc_executor_add_timer(&executor, &heartbeat_timer));
@@ -204,7 +195,6 @@ void Shelfbot::create_entities() {
     RCCHECK(rclc_executor_add_subscription(&executor, &set_speed_subscription, &set_speed_msg, &set_speed_subscription_callback_wrapper, ON_NEW_DATA));
     RCCHECK(rclc_executor_add_subscription(&executor, &led_subscription, &led_msg, &led_subscription_callback_wrapper, ON_NEW_DATA));
 
-    // Initialize msg memory
     init_multi_array(motor_position_msg, motor_pos_data, 2);
     init_multi_array(distance_sensors_msg, distance_sensors_data, SensorCommon::NUM_SENSORS);
 }
@@ -212,51 +202,73 @@ void Shelfbot::create_entities() {
 void Shelfbot::destroy_entities() {
     rmw_context_t * rmw_context = rcl_context_get_rmw_context(&support.context);
     (void) rmw_uros_set_context_entity_destroy_session_timeout(rmw_context, 0);
-
     rcl_ret_t ret;
-
     ret = rcl_publisher_fini(&heartbeat_publisher, &node);       (void)ret;
     ret = rcl_publisher_fini(&motor_position_publisher, &node);  (void)ret;
     ret = rcl_publisher_fini(&distance_sensors_publisher, &node);(void)ret;
     ret = rcl_publisher_fini(&led_state_publisher, &node);       (void)ret;
     ret = rcl_publisher_fini(&tof_distance_publisher, &node);    (void)ret;
-
     ret = rcl_subscription_fini(&motor_command_subscription, &node); (void)ret;
     ret = rcl_subscription_fini(&set_speed_subscription, &node);     (void)ret;
     ret = rcl_subscription_fini(&led_subscription, &node);           (void)ret;
-
     ret = rcl_timer_fini(&heartbeat_timer);        (void)ret;
     ret = rcl_timer_fini(&motor_position_timer);   (void)ret;
     ret = rcl_timer_fini(&distance_sensors_timer); (void)ret;
     ret = rcl_timer_fini(&led_state_timer);        (void)ret;
     ret = rcl_timer_fini(&tof_timer);              (void)ret;
-
     rclc_executor_fini(&executor);
     ret = rcl_node_fini(&node); (void)ret;
     rclc_support_fini(&support);
 }
 
+// --- New network services task (waits for Wi-Fi, then starts services) ---
+static void network_services_task(void *arg) {
+    Shelfbot* bot = (Shelfbot*)arg;
+    EventGroupHandle_t wifi_evt = wifi_manager_get_event_group();
+
+    ESP_LOGI(TAG, "Network services task: waiting for Wi-Fi connection...");
+    xEventGroupWaitBits(wifi_evt, WM_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+
+    ESP_LOGI(TAG, "Wi-Fi connected – starting mDNS, HTTP server, and SNTP");
+    bot->initialise_mdns();
+
+    esp_err_t err = HttpServer::get_instance().start();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(err));
+    }
+
+    bot->initialize_sntp();
+
+    // Keep task alive (can also suspend)
+    while (1) {
+        vTaskDelay(pdMS_TO_TICKS(60000));
+    }
+}
+
+// --- Micro-ROS task implementation (full, with Wi-Fi wait) ---
 void Shelfbot::micro_ros_task_impl() {
+    // Wait for Wi-Fi connection before any mDNS query
+    EventGroupHandle_t wifi_evt = wifi_manager_get_event_group();
+    ESP_LOGI(TAG, "Micro-ROS task waiting for Wi-Fi...");
+    xEventGroupWaitBits(wifi_evt, WM_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
+    ESP_LOGI(TAG, "Wi-Fi ready, starting Micro-ROS agent discovery");
+
     bool entities_created = false;
+    rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
 
     while(1) {
         switch(state) {
             case WAITING_AGENT:
                 if (query_mdns_host("gentoo-laptop")) {
-                    rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
-
                     rcl_ret_t ret = rcl_init_options_init(&init_options, allocator);
                     if (ret != RCL_RET_OK) {
                         ESP_LOGE(TAG, "Failed to initialize rcl init options: %ld", ret);
                         break;
                     }
-
                     rmw_uros_options_set_udp_address(agent_ip_str, "8888", rcl_init_options_get_rmw_init_options(&init_options));
-
-                    if (rclc_support_init_with_options(&support , 0, NULL, &init_options, &allocator) == RCL_RET_OK) {
+                    if (rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator) == RCL_RET_OK) {
                         state = AGENT_CONNECTED;
                     }
-
                     ret = rcl_init_options_fini(&init_options);
                     if (ret != RCL_RET_OK) {
                         ESP_LOGE(TAG, "Failed to finalize rcl init options: %ld", ret);
@@ -291,7 +303,7 @@ void Shelfbot::micro_ros_task_impl() {
     }
 }
 
-// --- Main Entry Point ---
+// --- Main Begin (refactored) ---
 void Shelfbot::begin() {
     instance = this;
 
@@ -305,60 +317,32 @@ void Shelfbot::begin() {
     led_control_init();
     motor_control_begin();
 
-    // 2. Networking & system services
-    ESP_LOGI(TAG, "2. Initializing network and system services...");
-
+    // 2. NVS (needed for Wi‑Fi)
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
         nvs_flash_init();
     }
 
-    esp_netif_init();
-    esp_event_loop_create_default();
+    // 3. Initialize Wi‑Fi manager (starts netif, event loop, and manager task)
+    ESP_LOGI(TAG, "2. Initializing Wi‑Fi manager...");
+    ESP_ERROR_CHECK(wifi_manager_init());
 
-    wifi_init_sta();
-    initialize_sntp();
-    initialise_mdns();
-
-    esp_err_t err = HttpServer::get_instance().start();
-    if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(err));
-    }
-
-    // 3. Sensor Manager
+    // 4. Sensor Manager (does not depend on network)
     ESP_LOGI(TAG, "3. Initializing sensors...");
-
     SensorControl::Config sensor_config;
-
-    // ---------------------------------------------------------------------------
-    // Ultrasonic sensor GPIO assignment — conflict-free with all motor pins.
-    //
-    // TRIG pins: GPIO25, GPIO32, GPIO16, GPIO17  (output-capable, no conflicts)
-    // ECHO pins: GPIO34, GPIO35, GPIO36, GPIO39  (input-only GPIOs — correct for
-    //            echo reception; never need to drive these lines as outputs)
-    //
-    // Previous conflicting assignment (DO NOT restore):
-    //   {25,26}, {27,14}, {12,13}, {32,33}
-    //   — echoes on GPIO26/14/13/33 clashed with Motor DIR/STEP outputs.
-    // ---------------------------------------------------------------------------
     sensor_config.ultrasonic_configs = {
-        {.trig_pin = 25, .echo_pin = 34, .timeout_us = 30000, .max_distance_mm = 4000},  // Sensor 0
-        {.trig_pin = 32, .echo_pin = 35, .timeout_us = 30000, .max_distance_mm = 4000},  // Sensor 1
-        {.trig_pin = 16, .echo_pin = 36, .timeout_us = 30000, .max_distance_mm = 4000},  // Sensor 2
-        {.trig_pin = 17, .echo_pin = 39, .timeout_us = 30000, .max_distance_mm = 4000},  // Sensor 3
+        {.trig_pin = 25, .echo_pin = 34, .timeout_us = 30000, .max_distance_mm = 4000},
+        {.trig_pin = 32, .echo_pin = 35, .timeout_us = 30000, .max_distance_mm = 4000},
+        {.trig_pin = 16, .echo_pin = 36, .timeout_us = 30000, .max_distance_mm = 4000},
+        {.trig_pin = 17, .echo_pin = 39, .timeout_us = 30000, .max_distance_mm = 4000},
     };
-
-    // ToF sensors disabled — no hardware connected
     for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
         sensor_config.tof_configs[i].timeout_ms = 500;
         sensor_config.tof_configs[i].enabled = false;
     }
-
     sensor_config.ultrasonic_read_interval_ms = 100;
     sensor_config.tof_read_interval_ms = 200;
-
-    // LYDSTO LiDAR: UART2, RX on GPIO3 (receive-only, no TX needed)
     sensor_config.lidar_config.enabled      = true;
     sensor_config.lidar_config.uart_port    = UART_NUM_2;
     sensor_config.lidar_config.uart_tx_pin  = UART_PIN_NO_CHANGE;
@@ -368,8 +352,12 @@ void Shelfbot::begin() {
     SensorManager::get_instance().initialize(sensor_config);
     SensorManager::get_instance().start();
 
-    // 4. Micro-ROS task
-    ESP_LOGI(TAG, "4. Starting Micro-ROS task...");
+    // 5. Start network services task (will wait for Wi-Fi)
+    ESP_LOGI(TAG, "4. Starting network services task...");
+    xTaskCreate(network_services_task, "net_services", 8192, this, 5, nullptr);
+
+    // 6. Start Micro‑ROS task (will wait for Wi-Fi)
+    ESP_LOGI(TAG, "5. Starting Micro‑ROS task...");
     xTaskCreate(micro_ros_task_wrapper, "uros_task", 16000, this, 5, nullptr);
 
     ESP_LOGI(TAG, "========================================");
