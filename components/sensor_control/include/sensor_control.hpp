@@ -1,23 +1,22 @@
-// [file name]: sensor_control.hpp
 #pragma once
+
+// ============================================================================
+// Compile‑time sensor configuration – set these before building
+// ============================================================================
+#define SHELFBOT_HAS_ULTRASONIC 1
+#define SHELFBOT_HAS_TOF        0
+#define SHELFBOT_HAS_LIDAR      1
+
+// ToF driver selection (exactly one should be 1 when HAS_TOF == 1)
+#define SHELFBOT_DRIVER_VL53L0X       0
+#define SHELFBOT_DRIVER_VL53L1        0
+#define SHELFBOT_DRIVER_VL53L1_MODBUS 1
+#define SHELFBOT_DRIVER_LYDSTO        0
+// ============================================================================
+
 #include <idf_c_includes.hpp>
 #include <sensor_common.hpp>
-#include <lidar_sensor.hpp>
-
-// Centralized compile-time sensor presence
-#define SHELFBOT_HAS_ULTRASONIC 1
-#define SHELFBOT_HAS_TOF 0
-#define SHELFBOT_HAS_LIDAR 1
-
-// Centralized ToF/LiDAR driver selection (choose exactly one)
-#define SHELFBOT_DRIVER_VL53L0X 0
-#define SHELFBOT_DRIVER_VL53L1 0
-#define SHELFBOT_DRIVER_VL53L1_MODBUS 1
-#define SHELFBOT_DRIVER_LYDSTO 0
-
-// Forward declarations
-class UltrasonicSensorArray;
-class TofSensor;
+#include <sensor_interfaces.hpp>
 
 class SensorControl {
 public:
@@ -37,16 +36,13 @@ public:
             VL53L1_MODBUS
         };
 
-        // Ultrasonic sensors configuration
         std::vector<UltrasonicConfig> ultrasonic_configs;
 
-        // ToF sensor configuration
         struct TofConfig {
-          uint8_t device_id = 0;
-          uint32_t timeout_ms = 500;
-          bool enabled = true;
+            uint8_t device_id = 0;
+            uint32_t timeout_ms = 500;
+            bool enabled = true;
         };
-
         TofConfig tof_configs[SensorCommon::NUM_TOF_SENSORS];
         SensorDriverType tof_driver = SensorDriverType::VL53L1;
 
@@ -58,83 +54,66 @@ public:
             uint32_t baud_rate = 115200;
         } lidar_config;
 
-        // Reading intervals
         uint32_t ultrasonic_read_interval_ms = 100;
         uint32_t tof_read_interval_ms = 200;
 
-        // Callbacks (can be nullptr if not needed)
         std::function<void(const std::vector<uint16_t>&)> ultrasonic_callback = nullptr;
         std::function<void(const SensorCommon::TofMeasurement*)> tof_callback = nullptr;
         std::function<void(const SensorCommon::LidarMeasurement&)> lidar_callback = nullptr;
     };
 
-    SensorControl(Config  config);
+    SensorControl(Config config);
     ~SensorControl();
 
-    // Initialization
     esp_err_t initialize();
-    [[nodiscard]] bool is_ready() const;
+    bool is_ready() const;
 
-    // Reading methods
     esp_err_t read_ultrasonic(std::vector<uint16_t>& distances);
     esp_err_t read_tof(SensorCommon::TofMeasurement results[SensorCommon::NUM_TOF_SENSORS]) const;
     esp_err_t read_lidar(SensorCommon::LidarMeasurement& result) const;
     esp_err_t read_tof_single(uint8_t sensor_index, SensorCommon::TofMeasurement& result) const;
-
     esp_err_t read_all(std::vector<uint16_t>& ultrasonic_distances,
-                      SensorCommon::TofMeasurement tof_results[SensorCommon::NUM_TOF_SENSORS]);
+                       SensorCommon::TofMeasurement tof_results[SensorCommon::NUM_TOF_SENSORS]);
 
-    // Continuous mode
     esp_err_t start_continuous();
     esp_err_t stop_continuous();
-    [[nodiscard]] bool is_continuous() const;
+    bool is_continuous() const;
 
-    // Sensor control
     esp_err_t set_tof_mode(uint8_t sensor_index, bool long_distance);
 
-    // Status
-    [[nodiscard]] size_t get_ultrasonic_count() const;
-    [[nodiscard]] bool is_tof_ready(uint8_t sensor_index = 0) const;
-    [[nodiscard]] bool is_lidar_ready() const;
-    [[nodiscard]] bool is_ultrasonic_ready() const;
+    size_t get_ultrasonic_count() const;
+    bool is_tof_ready(uint8_t sensor_index = 0) const;
+    bool is_lidar_ready() const;
+    bool is_ultrasonic_ready() const;
 
-    // Diagnostics
-    [[nodiscard]] esp_err_t self_test() const;
-    [[nodiscard]] bool tof_probe(uint8_t sensor_index = 0) const;
-    [[nodiscard]] uint8_t lidar_health() const;
+    esp_err_t self_test() const;
+    bool tof_probe(uint8_t sensor_index = 0) const;
+    uint8_t lidar_health() const;
     bool get_last_lidar_raw_packet(uint8_t* out, size_t len) const;
 
-    // Get latest data for ROS publishing
     bool get_latest_data(SensorCommon::SensorDataPacket* data) const;
-
 
     static const char* TAG;
 
-    // Disable copying
     SensorControl(const SensorControl&) = delete;
     SensorControl& operator=(const SensorControl&) = delete;
+
 private:
     Config config_;
-
-    // State
-    std::unique_ptr<UltrasonicSensorArray> ultrasonic_array_;
-    std::unique_ptr<TofSensor> tof_sensor_;
-    std::unique_ptr<LidarSensor> lidar_sensor_;
-    bool initialized_;
-    bool continuous_mode_;
-    TaskHandle_t continuous_task_handle_;
-
-    // Latest data storage
+    std::unique_ptr<IUltrasonicArray> ultrasonic_array_;
+    std::unique_ptr<IToFSensor>       tof_sensor_;
+    std::unique_ptr<ILidarSensor>     lidar_sensor_;
+    bool initialized_ = false;
+    bool continuous_mode_ = false;
+    TaskHandle_t continuous_task_handle_ = nullptr;
     SensorCommon::SensorDataPacket latest_data_;
-    SemaphoreHandle_t data_mutex_;
+    SemaphoreHandle_t data_mutex_ = nullptr;
 
-    // Continuous reading task
     static void continuous_read_task(void* arg);
     void continuous_read_loop();
-
-    // Internal helpers
-    esp_err_t initialize_ultrasonic();
-    esp_err_t initialize_tof();
-    esp_err_t initialize_lidar();
     esp_err_t update_lidar_measurement();
+
+    std::unique_ptr<IUltrasonicArray> createUltrasonicArray();
+    std::unique_ptr<IToFSensor>       createToFSensor();
+    std::unique_ptr<ILidarSensor>     createLidarSensor();
 };
