@@ -1,232 +1,169 @@
-# ENVIRONMENT_SETUP.md – Complete ESP32 micro-ROS & FastAccelStepper Environment
 
-This guide sets up a working ESP-IDF v5.3 project with:
-- **micro-ROS** (Humble branch) – for ROS 2 communication
-- **FastAccelStepper** – for stepper motor control
-- All necessary workarounds (empy version, partition table, flash size)
+# Shelfbot – ESP32 Robotic Platform with micro‑ROS
 
----
+Shelfbot is a firmware for ESP32‑based robotic platforms that integrates:
+- **5‑axis stepper motor control** (using TMC2209 drivers and FastAccelStepper)
+- **Multi‑sensor suite** (ultrasonic, LiDAR, optional ToF)
+- **micro‑ROS** (ROS 2 Humble) for low‑latency robot control
+- **Wi‑Fi manager** with multi‑AP roaming and RSSI monitoring
+- **Embedded web interface** for configuration and monitoring
 
-## 1. Install ESP-IDF v5.3
-
-```bash
-mkdir -p ~/esp
-cd ~/esp
-git clone -b v5.3 --recursive https://github.com/espressif/esp-idf.git
-cd esp-idf
-./install.sh esp32
-```
+This document gives an overview of the project and points to detailed setup guides.
 
 ---
 
-## 2. Load ESP-IDF Environment (do this every new terminal)
+## Repository Structure
 
-```bash
-. ~/esp/esp-idf/export.sh
-idf.py --version   # Must show v5.3
-```
-
----
-
-## 3. Install Required Python Packages (critical: pin empy)
-
-```bash
-pip3 install catkin_pkg lark-parser colcon-common-extensions empy==3.3.4 pyserial setuptools
-```
-
-> **Why empy==3.3.4?** Newer versions break the ROS 2 message generation (`rosidl_adapter` crashes with `AttributeError: 'NoneType' object has no attribute 'shutdown'`).
+| File / Directory       | Description                                                      |
+|------------------------|------------------------------------------------------------------|
+| `README.md`            | This file – project overview and quick start                    |
+| `ENVIRONMENT_SETUP.md` | Complete ESP‑IDF + micro‑ROS + FastAccelStepper environment guide |
+| `MOTOR_SETUP.md`       | Stepper motor wiring, TMC2209 configuration, GPIO mapping        |
+| `partitions.csv`       | Custom partition table (2 MB factory + 1.9 MB storage)           |
+| `main/`                | Application entry point (`app_main`)                             |
+| `components/`          | Custom components (shelfbot, wifi_manager, motor_control, etc.)  |
 
 ---
 
-## 4. Create the Project
+## Quick Start
 
-```bash
-mkdir -p ~/shelfbot
-cd ~/shelfbot
-idf.py create-project shelfbot.esp32.wroom-idf
-cd shelfbot.esp32.wroom-idf
-```
+1. **Follow the environment setup** – See [`ENVIRONMENT_SETUP.md`](ENVIRONMENT_SETUP.md) for installing ESP‑IDF v5.3, micro‑ROS (Humble), and FastAccelStepper.
 
----
+2. **Configure Wi‑Fi credentials** – Use menuconfig (see section below).
 
-## 5. Add micro-ROS Component (Humble branch)
+3. **Wire the hardware** – Refer to [`MOTOR_SETUP.md`](MOTOR_SETUP.md) for TMC2209 connections and GPIO mapping.
 
-```bash
-mkdir -p components
-cd components
-git clone https://github.com/micro-ROS/micro_ros_espidf_component.git
-cd micro_ros_espidf_component
-git checkout humble
-cd ../..
-```
+4. **Build & flash**:
+   ```bash
+   idf.py build
+   idf.py -p /dev/ttyUSB0 flash monitor
+   ```
+
+5. **Start the micro‑ROS agent** (on your PC):
+   ```bash
+   docker run -it --rm --net=host microros/micro-ros-agent:humble serial --dev /dev/ttyUSB0 -v6
+   ```
 
 ---
 
-## 6. Add FastAccelStepper Dependency
+## Wi‑Fi Configuration (Menuconfig)
 
-```bash
-idf.py add-dependency "gin66/fastaccelstepper^1.2.5"
-```
+The firmware supports up to **4 Wi‑Fi networks** (SSID/password pairs). At boot, it scans for visible networks and connects to the one with the strongest signal. It also monitors RSSI and switches to a better network when signal degrades.
 
-Verify:
-```bash
-ls managed_components   # Should show gin66__fastaccelstepper
-```
+### How to set credentials
 
----
+1. Run menuconfig:
+   ```bash
+   idf.py menuconfig
+   ```
 
-## 7. Set Target and Clean Old Builds
+2. Navigate to:
+   ```
+   Wi-Fi Configuration
+   ```
 
-```bash
-idf.py set-target esp32
-rm -rf components/micro_ros_espidf_component/micro_ros_src \
-       components/micro_ros_espidf_component/micro_ros_dev \
-       build
-```
+3. Fill in your SSID and password for each slot (up to 4). Leave a slot empty to disable it.
 
----
+4. Optionally adjust RSSI thresholds and retry parameters.
 
-## 8. Configure Flash Size (Critical for partition table)
+5. Save & exit.
 
-**The default flash size is 2 MB but your ESP32-WROOM module likely has 4 MB.**  
-Set it correctly:
+> **Note:** The credentials are stored in the firmware at compile time. To change them, re‑run menuconfig and rebuild.
 
-```bash
-idf.py menuconfig
-```
+### How the Wi‑Fi manager works
 
-Navigate to:
-```
-Serial flasher config → Flash size → 4 MB
-```
-Save & exit.
+- **Scanning** – Periodically scans for known SSIDs.
+- **Connection** – Tries each visible network (strongest first) with retries.
+- **Monitoring** – While connected, checks RSSI every 5 seconds.
+- **Roaming** – If RSSI falls below the warning threshold for N consecutive readings, it scans for a better network and switches without disconnecting the ROS interface.
+
+The Wi‑Fi manager exports a thread‑safe status structure (`wifi_manager_info_t`) and two event bits:
+- `WM_CONNECTED_BIT` – set when IP address is obtained
+- `WM_DISCONNECTED_BIT` – set when not connected
 
 ---
 
-## 9. Create Custom Partition Table (2 MB factory partition for micro-ROS)
+## Web Interface
 
-Create a file `partitions.csv` in the project root:
+The embedded HTTP server serves a real‑time dashboard for monitoring and control.
 
-```csv
-# Name,   Type, SubType, Offset,  Size, Flags
-nvs,      data, nvs,     ,        0x4000,
-otadata,  data, ota,     ,        0x2000,
-phy_init, data, phy,     ,        0x1000,
-factory,  app,  factory, ,        0x200000,   # 2 MB – fits micro‑ROS binary (~1.25 MB)
-storage,  data, spiffs,  ,        0x1E0000,   # remaining ~1.9 MB
-```
+### Accessing the web interface
 
-Now tell ESP-IDF to use this custom table:
+1. After the firmware connects to Wi‑Fi, the console will show the assigned IP address (e.g., `got IP: 192.168.1.100`).
+2. Open a web browser and enter:
+   ```
+   http://192.168.1.100
+   ```
+   (replace with your ESP32’s IP)
 
-```bash
-idf.py menuconfig
-```
+### Available pages / endpoints
 
-Set:
-- `Partition Table` → `Custom partition table CSV`
-- `Custom partition table CSV file` → `partitions.csv`
+| Endpoint          | Description                                                                 |
+|-------------------|-----------------------------------------------------------------------------|
+| `/`               | Main dashboard – shows sensor readings, motor positions, LED state         |
+| `/health`         | JSON endpoint with system status (Wi‑Fi, heap, uptime, RSSI)               |
+| `/wifi_status`    | JSON with current SSID, IP, RSSI, and connection uptime                    |
+| `/motor_control`  | Manual motor control (position and velocity sliders)                       |
+| `/led`            | Toggle the onboard LED (if configured)                                     |
 
-Save & exit.
+All pages auto‑refresh every 2 seconds. The web server uses a responsive design that works on desktops and mobile phones.
 
----
-
-## 10. Build the Firmware
-
-```bash
-idf.py build
-```
-
-If you see `app partition is too small`, double‑check that:
-- Flash size is **4 MB** (step 8)
-- `partitions.csv` has `0x200000` for factory partition
-- You ran `idf.py menuconfig` to select the custom table
+> **Note:** The web interface communicates with the firmware via HTTP REST calls. It does **not** use ROS; it is a separate monitoring/configuration tool.
 
 ---
 
-## 11. Flash and Monitor
+## Hardware Overview (GPIO Summary)
 
-```bash
-idf.py -p /dev/ttyUSB0 flash
-idf.py monitor
-```
+For full details, see [`MOTOR_SETUP.md`](MOTOR_SETUP.md). Here is a quick reference:
 
-Press `Ctrl+]` to exit monitor.
+| Function          | GPIO Pins                            |
+|-------------------|--------------------------------------|
+| Motors (STEP/DIR) | 27/26, 14/33, 13/19, 4/18, 12/23    |
+| Ultrasonic sensors| TRIG: 25,32,16,17 / ECHO: 34,35,36,39|
+| LiDAR (UART2 RX)  | GPIO3 (may conflict with console)    |
+| I2C (optional ToF)| SDA=21, SCL=22                       |
+| LED (if used)     | Depends on `led_control` component   |
 
----
-
-## 12. Run micro-ROS Agent (on your host PC)
-
-Use Docker (recommended):
-
-```bash
-docker run -it --rm --net=host microros/micro-ros-agent:humble serial --dev /dev/ttyUSB0 -v6
-```
-
-> The agent **must** be `humble` to match the firmware branch.
+**Important:** GPIO3 is also the default UART0 RX (console). If you need both the console and LiDAR, either move LiDAR to UART1 (pins 9/10) or disable the console on GPIO3 (change UART console to another UART in menuconfig).
 
 ---
 
-## 13. Full Clean Rebuild (if something breaks)
+## Building with Custom Wi‑Fi Credentials
 
-```bash
-cd ~/shelfbot/shelfbot.esp32.wroom-idf
-
-# Remove all generated micro-ROS sources and build artifacts
-rm -rf components/micro_ros_espidf_component/micro_ros_src \
-       components/micro_ros_espidf_component/micro_ros_dev \
-       build managed_components dependencies.lock
-
-idf.py fullclean
-idf.py reconfigure
-idf.py build
-```
-
----
-
-## 14. Example Code Snippet
-
-In `main/main.cpp`:
+If you prefer to hard‑code credentials (not recommended), edit `components/wifi_manager/wifi_manager.cpp` and modify the `s_creds` table:
 
 ```cpp
-#include "FastAccelStepper.h"
-#include "micro_ros_esp_idf.h"
-
-FastAccelStepperEngine engine;
-FastAccelStepper *stepper = nullptr;
-
-extern "C" void app_main() {
-    // Init micro-ROS
-    micro_ros_esp_idf_init(0, 0, "shelfbot", "esp32");
-
-    // Init stepper
-    engine.init();
-    stepper = engine.stepperConnectToPin(18);
-    if (stepper) {
-        stepper->setDirectionPin(19);
-        stepper->setEnablePin(21);
-        stepper->setAutoEnable(true);
-        stepper->setSpeedInHz(1000);
-        stepper->setAcceleration(1000);
-        stepper->move(2000);
-    }
-
-    while (1) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-    }
-}
+static const cred_t s_creds[] = {
+    { "MyHomeSSID",   "MyPassword" },
+    { "OfficeWiFi",   "OfficePass" },
+    // up to 4 networks
+};
 ```
 
----
-
-## Summary of Critical Fixes
-
-| Problem | Solution |
-|---------|----------|
-| `rosidl_adapter` crash (`AttributeError: shutdown`) | Pin `empy==3.3.4` |
-| `app partition is too small` | Custom `partitions.csv` with `0x200000` factory size |
-| `Partition table does not fit in flash` | Set flash size to **4 MB** in menuconfig (Serial flasher config) |
-| micro-ROS agent mismatch | Use `humble` branch everywhere |
+Then rebuild.
 
 ---
 
-**Your environment is now ready.** Follow the steps in order, and the build will succeed.
+## Troubleshooting
+
+| Symptom                           | Likely solution                                                      |
+|-----------------------------------|----------------------------------------------------------------------|
+| `app partition is too small`      | Flash size not set to 4 MB (see ENVIRONMENT_SETUP.md step 1.8)       |
+| micro‑ROS agent connection fails  | Check that the agent uses `humble` and the correct serial port       |
+| Wi‑Fi does not connect            | Verify SSID/password in menuconfig; check RSSI thresholds            |
+| Web interface not loading         | Check IP address; ensure HTTP server started (look for log message)  |
+| GPIO3 conflict (LiDAR + console)  | Move LiDAR to another UART or disable console on GPIO3               |
+
+---
+
+## Further Reading
+
+- [`ENVIRONMENT_SETUP.md`](ENVIRONMENT_SETUP.md) – Detailed environment setup and common pitfalls
+- [`MOTOR_SETUP.md`](MOTOR_SETUP.md) – TMC2209 wiring, microstep selection, and pinout diagrams
+- [micro‑ROS ESP32 documentation](https://micro.ros.org/docs/tutorials/core/overview/)
+- [FastAccelStepper library](https://github.com/gin66/FastAccelStepper)
+
+---
+
+## License
+This project is open‑source under the MIT license. See the `LICENSE` file for details.

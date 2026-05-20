@@ -1,7 +1,6 @@
-// [file name]: sensor_manager.hpp
 #pragma once
-#include "sensor_common.hpp"
-#include "sensor_control.hpp"
+#include <sensor_common.hpp>
+#include <sensor_control.hpp>
 #include <idf_c_includes.hpp>
 
 class SensorManager {

@@ -16,9 +16,10 @@ idf_component_register(
         esp_driver_gptimer
         esp_driver_uart
         esp_wifi
+        mdns
         nvs_flash
         lwip
         json
-        espressif__mdns
         micro_ros_espidf_component
+        gin66__fastaccelstepper   # <-- moved here
 )

@@ -1,5 +1,5 @@
 #pragma once
-#include <idf_c_includes.hpp>
+#include "idf_c_includes.hpp"
 
 // LYDSTO LDS02RR UART DRIVER CONFIGURATION (ESP32-WROOM DevKitC 38-pin)
 #define LYDSTO_UART_PORT      UART_NUM_2

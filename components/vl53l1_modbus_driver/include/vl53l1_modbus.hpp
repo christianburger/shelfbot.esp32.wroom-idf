@@ -1,6 +1,6 @@
 #pragma once
 #include <idf_c_includes.hpp>
-#include "duart_modbus.hpp"
+#include <duart_modbus.hpp>
 
 // ═══════════════════════════════════════════════════════════════
 // VL53L1_MODBUS DRIVER CONFIGURATION - EDIT ALL SETTINGS HERE
@@ -37,13 +37,13 @@ public:
     ~VL53L1_Modbus_Driver();
 
     // ── Standardized Interface Methods ──
-    const char* configure();
+    [[nodiscard]] const char* configure() const;
     const char* init();
-    const char* setup();
-    const char* calibrate();
-    const char* check();
+    [[nodiscard]] const char* setup() const;
+    [[nodiscard]] const char* calibrate() const;
+    [[nodiscard]] const char* check() const;
     bool read_sensor(MeasurementResult& result);
-    bool isReady() const;
+    [[nodiscard]] bool isReady() const;
 
     // ── Support operations ──
     void setTimeout(uint16_t timeout_ms);
@@ -87,14 +87,14 @@ private:
 
     // ── Initialization helpers ──
     const char* initModbus();
-    const char* testCommunication();
-    const char* readCurrentConfiguration();
-    const char* configureRangingMode();
-    const char* configureContinuousMode();
-    const char* verifyConfiguration();
+    [[nodiscard]] const char* testCommunication() const;
+    [[nodiscard]] const char* readCurrentConfiguration() const;
+    [[nodiscard]] const char* configureRangingMode() const;
+    [[nodiscard]] const char* configureContinuousMode() const;
+    [[nodiscard]] const char* verifyConfiguration() const;
 
     // ── Helper functions ──
-    void logModbusResponse(const char* operation, const DuartModbus::ModbusResponse& response);
+    static void logModbusResponse(const char* operation, const DuartModbus::ModbusResponse& response);
 };
 
 // ═══════════════════════════════════════════════════════════════

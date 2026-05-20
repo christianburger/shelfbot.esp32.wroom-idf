@@ -1,24 +1,27 @@
 // shelfbot.hpp
 #pragma once
 #include <idf_c_includes.hpp>
-#include "sensor_common.hpp"
-#include "sensor_control.hpp"
-#include "motor_control.hpp"
-#include "led_control.hpp"
-#include "wifi_station.hpp"          // corrected: .hpp not .h
-#include "http_server.hpp"
-#include "firmware_version.hpp"
+#include <sensor_common.hpp>
+#include <sensor_control.hpp>
+#include <motor_control.hpp>
+#include <led_control.hpp>
+#include <wifi_manager.hpp>
+#include <http_server.hpp>
+#include <firmware_version.hpp>
 
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){ESP_LOGE(TAG, "RCL error in %s: %d", #fn, (int)temp_rc);}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){ESP_LOGW(TAG, "RCL soft error in %s: %d", #fn, (int)temp_rc);}}
 
 class Shelfbot {
 public:
-    void begin();
+    esp_err_t begin();                                  // now returns error code
     static Shelfbot& get_instance() {
         if (!instance) instance = new Shelfbot();
         return *instance;
     }
+
+    void initialise_mdns();
+    void initialize_sntp();
 
     static bool time_synchronized;
     static bool led_state;
@@ -34,47 +37,46 @@ private:
     };
 
     MicroRosState state = WAITING_AGENT;
-    char agent_ip_str[16];
+    char agent_ip_str[16]{};
 
-    rcl_node_t node;
-    rcl_allocator_t allocator;
-    rclc_support_t support;
-    rclc_executor_t executor;
+    rcl_node_t node{};
+    rcl_allocator_t allocator{};
+    rclc_support_t support{};
+    rclc_executor_t executor{};
 
-    rcl_publisher_t heartbeat_publisher;
-    rcl_publisher_t motor_position_publisher;
-    rcl_publisher_t distance_sensors_publisher;
-    rcl_publisher_t led_state_publisher;
-    rcl_publisher_t tof_distance_publisher;
+    rcl_publisher_t heartbeat_publisher{};
+    rcl_publisher_t motor_position_publisher{};
+    rcl_publisher_t distance_sensors_publisher{};
+    rcl_publisher_t led_state_publisher{};
+    rcl_publisher_t tof_distance_publisher{};
 
-    rcl_subscription_t motor_command_subscription;
-    rcl_subscription_t set_speed_subscription;
-    rcl_subscription_t led_subscription;
+    rcl_subscription_t motor_command_subscription{};
+    rcl_subscription_t set_speed_subscription{};
+    rcl_subscription_t led_subscription{};
 
-    rcl_timer_t heartbeat_timer;
-    rcl_timer_t motor_position_timer;
-    rcl_timer_t distance_sensors_timer;
-    rcl_timer_t led_state_timer;
-    rcl_timer_t tof_timer;
+    rcl_timer_t heartbeat_timer{};
+    rcl_timer_t motor_position_timer{};
+    rcl_timer_t distance_sensors_timer{};
+    rcl_timer_t led_state_timer{};
+    rcl_timer_t tof_timer{};
 
-    std_msgs__msg__Int32 heartbeat_msg;
-    std_msgs__msg__Float32MultiArray motor_position_msg;
-    std_msgs__msg__Float32MultiArray distance_sensors_msg;
-    std_msgs__msg__Bool led_state_msg;
-    std_msgs__msg__Float32 tof_distance_msg;
+    std_msgs__msg__Int32 heartbeat_msg{};
+    std_msgs__msg__Float32MultiArray motor_position_msg{};
+    std_msgs__msg__Float32MultiArray distance_sensors_msg{};
+    std_msgs__msg__Bool led_state_msg{};
+    std_msgs__msg__Float32 tof_distance_msg{};
 
-    std_msgs__msg__Float32MultiArray motor_command_msg;
-    std_msgs__msg__Float32MultiArray set_speed_msg;
-    std_msgs__msg__Bool led_msg;
+    std_msgs__msg__Float32MultiArray motor_command_msg{};
+    std_msgs__msg__Float32MultiArray set_speed_msg{};
+    std_msgs__msg__Bool led_msg{};
 
-    float motor_pos_data[2];
-    float distance_sensors_data[SensorCommon::NUM_SENSORS];
+    float motor_pos_data[2]{};
+    float distance_sensors_data[SensorCommon::NUM_SENSORS]{};
 
-    std::unique_ptr<SensorControl> sensor_control_;
+    std::unique_ptr<SensorControl> sensor_control_ = {
 
-    void initialise_mdns();
+    };
     bool query_mdns_host(const char * host_name);
-    void initialize_sntp();
 
     void create_entities();
     void destroy_entities();

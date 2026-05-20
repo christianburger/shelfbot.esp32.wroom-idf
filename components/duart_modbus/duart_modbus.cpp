@@ -1,4 +1,4 @@
-#include "duart_modbus.hpp"
+#include <duart_modbus.hpp>
 
 const char* DuartModbus::TAG = "DUART_MODBUS";
 

@@ -4,7 +4,7 @@ idf_component_register(SRCS "shelfbot.cpp"
         idf_includes
         micro_ros_espidf_component
         motor_control
-        wifi_station
+        wifi_manager
         http_server
         led_control
         sensor_control
