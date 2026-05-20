@@ -1,6 +1,6 @@
-#include "vl53l1_modbus.hpp"
+#include <vl53l1_modbus.hpp>
 
-static const char* TAG = "TofDriver_VL53L1_Modbus";
+static auto TAG = "TofDriver_VL53L1_Modbus";
 
 // ═══════════════════════════════════════════════════════════════
 // Constructor / Destructor
@@ -86,7 +86,7 @@ const char* VL53L1_Modbus_Driver::initModbus() {
     return nullptr;
 }
 
-const char* VL53L1_Modbus_Driver::testCommunication() {
+const char* VL53L1_Modbus_Driver::testCommunication() const {
     ESP_LOGI(TAG, "  Testing communication with slave 0x%02X...", modbus_slave_address_);
 
     // Test: Read special register (0x0001)
@@ -114,7 +114,7 @@ const char* VL53L1_Modbus_Driver::testCommunication() {
     return nullptr;
 }
 
-const char* VL53L1_Modbus_Driver::readCurrentConfiguration() {
+const char* VL53L1_Modbus_Driver::readCurrentConfiguration() const {
     ESP_LOGI(TAG, "  Reading current configuration from device...");
 
     // Read IIC disable setting (0x0009)
@@ -137,7 +137,7 @@ const char* VL53L1_Modbus_Driver::readCurrentConfiguration() {
             ESP_LOGW(TAG, "  Device is currently in I2C mode");
             ESP_LOGI(TAG, "  Switching device to UART/Modbus mode...");
 
-            auto write_response = modbus_->writeSingleRegister(
+            const auto write_response = modbus_->writeSingleRegister (
                 modbus_slave_address_,
                 REG_DISABLE_IIC,
                 0x0000,
@@ -146,7 +146,6 @@ const char* VL53L1_Modbus_Driver::readCurrentConfiguration() {
             );
 
             logModbusResponse("Write DISABLE_IIC (enable UART)", write_response);
-
             if (!write_response.success) {
                 ESP_LOGE(TAG, "  FAILED: Could not switch to UART mode");
                 return "Failed to switch to UART mode";
@@ -176,10 +175,9 @@ const char* VL53L1_Modbus_Driver::readCurrentConfiguration() {
     return nullptr;
 }
 
-const char* VL53L1_Modbus_Driver::configureRangingMode() {
-    uint16_t desired_mode = ranging_mode_;
-    const char* mode_name = (ranging_mode_ == 0) ?
-                            "High Precision (30ms, 1.3m)" : "Long Distance (200ms, 4.0m)";
+const char* VL53L1_Modbus_Driver::configureRangingMode() const {
+    const uint16_t desired_mode = ranging_mode_;
+    const char* mode_name = (ranging_mode_ == 0) ? "High Precision (30ms, 1.3m)" : "Long Distance (200ms, 4.0m)";
 
     ESP_LOGI(TAG, "  Setting ranging mode to: %s (0x%04X)", mode_name, desired_mode);
 
@@ -191,17 +189,15 @@ const char* VL53L1_Modbus_Driver::configureRangingMode() {
         timeout_ms_
     );
 
-    uint16_t current_mode = 0xFFFF;
     if (read_response.success && read_response.data.size() >= 2) {
-        current_mode = (read_response.data[0] << 8) | read_response.data[1];
-        if (current_mode == desired_mode) {
+        if (const uint16_t current_mode = (read_response.data[0] << 8) | read_response.data[1]; current_mode == desired_mode) {
             ESP_LOGI(TAG, "  Mode already set correctly");
             return nullptr;
         }
     }
 
     // Write new mode
-    auto write_response = modbus_->writeSingleRegister(
+    const auto write_response = modbus_->writeSingleRegister(
         modbus_slave_address_,
         REG_RANGE_MODE,
         desired_mode,
@@ -238,16 +234,16 @@ const char* VL53L1_Modbus_Driver::configureRangingMode() {
     return nullptr;
 }
 
-const char* VL53L1_Modbus_Driver::configureContinuousMode() {
+const char* VL53L1_Modbus_Driver::configureContinuousMode() const {
     if (!enable_continuous_) {
         ESP_LOGI(TAG, "  Continuous mode disabled by configuration");
         return nullptr;
     }
 
-    uint16_t output_interval = (ranging_mode_ == 0) ? 30 : 200;
+    const uint16_t output_interval = (ranging_mode_ == 0) ? 30 : 200;
     ESP_LOGI(TAG, "  Setting continuous output interval to: %d ms", output_interval);
 
-    auto write_response = modbus_->writeSingleRegister(
+    const auto write_response = modbus_->writeSingleRegister(
         modbus_slave_address_,
         REG_CONTINUOUS_OUTPUT,
         output_interval,
@@ -273,8 +269,7 @@ const char* VL53L1_Modbus_Driver::configureContinuousMode() {
     );
 
     if (read_response.success && read_response.data.size() >= 2) {
-        uint16_t verified_interval = (read_response.data[0] << 8) | read_response.data[1];
-        if (verified_interval != output_interval) {
+        if (const uint16_t verified_interval = (read_response.data[0] << 8) | read_response.data[1]; verified_interval != output_interval) {
             ESP_LOGE(TAG, "  VERIFICATION FAILED");
             return "Continuous mode verification failed";
         }
@@ -284,10 +279,10 @@ const char* VL53L1_Modbus_Driver::configureContinuousMode() {
     return nullptr;
 }
 
-const char* VL53L1_Modbus_Driver::verifyConfiguration() {
+const char* VL53L1_Modbus_Driver::verifyConfiguration() const {
     ESP_LOGI(TAG, "  Performing final configuration verification...");
 
-    auto response = modbus_->readHoldingRegisters(
+    const auto response = modbus_->readHoldingRegisters(
         modbus_slave_address_,
         REG_RANGE_MODE,
         1,
@@ -298,8 +293,7 @@ const char* VL53L1_Modbus_Driver::verifyConfiguration() {
         return "Final verification failed";
     }
 
-    uint16_t mode = (response.data[0] << 8) | response.data[1];
-    if (mode != ranging_mode_) {
+    if (const uint16_t mode = (response.data[0] << 8) | response.data[1]; mode != ranging_mode_) {
         ESP_LOGE(TAG, "  Final check: Ranging mode mismatch");
         return "Final ranging mode mismatch";
     }
@@ -311,7 +305,8 @@ const char* VL53L1_Modbus_Driver::verifyConfiguration() {
 // ═══════════════════════════════════════════════════════════════
 // Public Interface Implementation
 // ═══════════════════════════════════════════════════════════════
-const char* VL53L1_Modbus_Driver::configure() {
+const char* VL53L1_Modbus_Driver::configure() const
+{
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "VL53L1_Modbus ToF Driver Configuration");
     ESP_LOGI(TAG, "========================================");
@@ -342,7 +337,7 @@ const char* VL53L1_Modbus_Driver::init() {
     return nullptr;
 }
 
-const char* VL53L1_Modbus_Driver::setup() {
+const char* VL53L1_Modbus_Driver::setup() const {
     if (!initialized_) {
         return "Not initialized";
     }
@@ -373,7 +368,7 @@ const char* VL53L1_Modbus_Driver::setup() {
     return nullptr;
 }
 
-const char* VL53L1_Modbus_Driver::calibrate() {
+const char* VL53L1_Modbus_Driver::calibrate() const {
     if (!initialized_) {
         return "Not initialized";
     }
@@ -385,14 +380,14 @@ const char* VL53L1_Modbus_Driver::calibrate() {
     return nullptr;
 }
 
-const char* VL53L1_Modbus_Driver::check() {
+const char* VL53L1_Modbus_Driver::check() const {
     if (!initialized_) {
         return "Not initialized";
     }
 
     ESP_LOGI(TAG, "Performing health check...");
 
-    auto response = modbus_->readHoldingRegisters(
+    const auto response = modbus_->readHoldingRegisters(
         modbus_slave_address_,
         REG_SPECIAL,
         1,
@@ -415,7 +410,7 @@ bool VL53L1_Modbus_Driver::read_sensor(MeasurementResult& result) {
 
     timeout_occurred_ = false;
 
-    auto response = modbus_->readHoldingRegisters(
+    const auto response = modbus_->readHoldingRegisters(
         modbus_slave_address_,
         REG_MEASUREMENT,
         1,
@@ -444,12 +439,12 @@ bool VL53L1_Modbus_Driver::isReady() const {
     return initialized_;
 }
 
-void VL53L1_Modbus_Driver::setTimeout(uint16_t timeout_ms) {
+void VL53L1_Modbus_Driver::setTimeout(const uint16_t timeout_ms) {
     timeout_ms_ = timeout_ms;
 }
 
 bool VL53L1_Modbus_Driver::timeoutOccurred() {
-    bool occurred = timeout_occurred_;
+    const bool occurred = timeout_occurred_;
     timeout_occurred_ = false;
     return occurred;
 }

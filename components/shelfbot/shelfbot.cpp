@@ -1,8 +1,7 @@
 // shelfbot.cpp
-#include "shelfbot.hpp"
-#include "freertos/event_groups.h"
+#include <shelfbot.hpp>
 
-static const char* TAG = "shelfbot";
+static auto TAG = "shelfbot";
 
 // --- Static Member Definitions ---
 bool Shelfbot::time_synchronized = false;
@@ -10,7 +9,7 @@ bool Shelfbot::led_state = false;
 Shelfbot* Shelfbot::instance = nullptr;
 
 // --- Helper Functions ---
-void init_multi_array(std_msgs__msg__Float32MultiArray& msg, float* data_buffer, int capacity) {
+void init_multi_array(std_msgs__msg__Float32MultiArray& msg, float* data_buffer, const int capacity) {
     msg.data.data = data_buffer;
     msg.data.capacity = capacity;
     msg.data.size = 0;

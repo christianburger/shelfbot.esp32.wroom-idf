@@ -1,25 +1,17 @@
 #include <idf_c_includes.hpp>
-#include "sensor_control.hpp"
-#include "ultrasonic_sensor.hpp"
-#include "tof_sensor.hpp"
-#include "lidar_sensor.hpp"
-#include "sensor_common.hpp"
-#include "lidar_packet_parser.hpp"
-#include "firmware_version.hpp"
+#include <utility>
+#include <sensor_control.hpp>
+#include <ultrasonic_sensor.hpp>
+#include <tof_sensor.hpp>
+#include <lidar_sensor.hpp>
+#include <sensor_common.hpp>
+#include <lidar_packet_parser.hpp>
+#include <firmware_version.hpp>
 
 const char* SensorControl::TAG = "SensorControl";
 
 // Constructor
-SensorControl::SensorControl(const Config& config)
-    : config_(config),
-      ultrasonic_array_(nullptr),
-      tof_sensor_(nullptr),
-      lidar_sensor_(nullptr),
-      initialized_(false),
-      continuous_mode_(false),
-      continuous_task_handle_(nullptr),
-      data_mutex_(nullptr) {
-
+SensorControl::SensorControl(Config  config) : config_(std::move(config)), ultrasonic_array_(nullptr), tof_sensor_(nullptr), lidar_sensor_(nullptr), initialized_(false), continuous_mode_(false), continuous_task_handle_(nullptr), data_mutex_(nullptr) {
     // Create mutex for thread-safe data access
     data_mutex_ = xSemaphoreCreateMutex();
     if (!data_mutex_) {
@@ -246,14 +238,14 @@ esp_err_t SensorControl::read_ultrasonic(std::vector<uint16_t>& distances) {
     }
 
     for (const auto& reading : readings) {
-        uint16_t distance_mm = static_cast<uint16_t>(reading.distance_cm * 10);
+        auto distance_mm = static_cast<uint16_t>(reading.distance_cm * 10);
         distances.push_back(distance_mm);
     }
 
     return ESP_OK;
 }
 
-esp_err_t SensorControl::read_tof(SensorCommon::TofMeasurement results[SensorCommon::NUM_TOF_SENSORS]) {
+esp_err_t SensorControl::read_tof(SensorCommon::TofMeasurement results[SensorCommon::NUM_TOF_SENSORS]) const {
     if (!tof_sensor_) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -261,14 +253,14 @@ esp_err_t SensorControl::read_tof(SensorCommon::TofMeasurement results[SensorCom
     return tof_sensor_->read_all(results);
 }
 
-esp_err_t SensorControl::read_lidar(SensorCommon::LidarMeasurement& result) {
+esp_err_t SensorControl::read_lidar(SensorCommon::LidarMeasurement& result) const {
     if (!config_.lidar_config.enabled || !lidar_sensor_) {
         return ESP_ERR_INVALID_STATE;
     }
     return lidar_sensor_->read(result);
 }
 
-esp_err_t SensorControl::read_tof_single(uint8_t sensor_index, SensorCommon::TofMeasurement& result) {
+esp_err_t SensorControl::read_tof_single(uint8_t sensor_index, SensorCommon::TofMeasurement& result) const {
     if (!tof_sensor_) {
         return ESP_ERR_INVALID_STATE;
     }
@@ -280,17 +272,14 @@ esp_err_t SensorControl::read_tof_single(uint8_t sensor_index, SensorCommon::Tof
     return tof_sensor_->read_sensor(sensor_index, result);
 }
 
-esp_err_t SensorControl::read_all(std::vector<uint16_t>& ultrasonic_distances,
-                                 SensorCommon::TofMeasurement tof_results[SensorCommon::NUM_TOF_SENSORS]) {
+esp_err_t SensorControl::read_all(std::vector<uint16_t>& ultrasonic_distances, SensorCommon::TofMeasurement tof_results[SensorCommon::NUM_TOF_SENSORS]) {
     esp_err_t err = ESP_OK;
 
-    esp_err_t ultrasonic_err = read_ultrasonic(ultrasonic_distances);
-    if (ultrasonic_err != ESP_OK && ultrasonic_array_) {
+    if (const esp_err_t ultrasonic_err = read_ultrasonic(ultrasonic_distances); ultrasonic_err != ESP_OK && ultrasonic_array_) {
         err = ultrasonic_err;
     }
 
-    esp_err_t tof_err = read_tof(tof_results);
-    if (tof_err != ESP_OK && tof_sensor_) {
+    if (esp_err_t tof_err = read_tof(tof_results); tof_err != ESP_OK && tof_sensor_) {
         err = tof_err;
     }
 
@@ -364,8 +353,7 @@ void SensorControl::continuous_read_loop() {
 }
 
 void SensorControl::continuous_read_task(void* arg) {
-    SensorControl* instance = static_cast<SensorControl*>(arg);
-    if (instance) {
+    if (auto* instance = static_cast<SensorControl*>(arg)) {
         instance->continuous_read_loop();
     }
     vTaskDelete(nullptr);
@@ -453,14 +441,14 @@ bool SensorControl::is_lidar_ready() const {
     return config_.lidar_config.enabled && lidar_sensor_ && lidar_sensor_->is_ready();
 }
 
-bool SensorControl::get_last_lidar_raw_packet(uint8_t* out, size_t len) const {
+bool SensorControl::get_last_lidar_raw_packet(uint8_t* out, const size_t len) const {
     if (!lidar_sensor_) {
         return false;
     }
     return lidar_sensor_->get_last_raw_packet(out, len);
 }
 
-esp_err_t SensorControl::self_test() {
+esp_err_t SensorControl::self_test() const {
     esp_err_t overall_result = ESP_OK;
 
     if (tof_sensor_) {
@@ -477,7 +465,7 @@ esp_err_t SensorControl::self_test() {
     return overall_result;
 }
 
-bool SensorControl::tof_probe(uint8_t sensor_index) {
+bool SensorControl::tof_probe(const uint8_t sensor_index) const {
     return tof_sensor_ && tof_sensor_->probe(sensor_index);
 }
 
@@ -485,7 +473,7 @@ uint8_t SensorControl::lidar_health() const {
     return latest_data_.lidar_measurement.health;
 }
 
-bool SensorControl::get_latest_data(SensorCommon::SensorDataPacket* data) {
+bool SensorControl::get_latest_data(SensorCommon::SensorDataPacket* data) const {
     if (!data || !data_mutex_) {
         return false;
     }

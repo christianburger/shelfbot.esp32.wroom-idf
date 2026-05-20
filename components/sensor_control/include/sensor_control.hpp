@@ -57,18 +57,18 @@ public:
         std::function<void(const SensorCommon::LidarMeasurement&)> lidar_callback = nullptr;
     };
 
-    SensorControl(const Config& config);
+    SensorControl(Config  config);
     ~SensorControl();
 
     // Initialization
     esp_err_t initialize();
-    bool is_ready() const;
+    [[nodiscard]] bool is_ready() const;
 
     // Reading methods
     esp_err_t read_ultrasonic(std::vector<uint16_t>& distances);
-    esp_err_t read_tof(SensorCommon::TofMeasurement results[SensorCommon::NUM_TOF_SENSORS]);
-    esp_err_t read_lidar(SensorCommon::LidarMeasurement& result);
-    esp_err_t read_tof_single(uint8_t sensor_index, SensorCommon::TofMeasurement& result);
+    esp_err_t read_tof(SensorCommon::TofMeasurement results[SensorCommon::NUM_TOF_SENSORS]) const;
+    esp_err_t read_lidar(SensorCommon::LidarMeasurement& result) const;
+    esp_err_t read_tof_single(uint8_t sensor_index, SensorCommon::TofMeasurement& result) const;
 
     esp_err_t read_all(std::vector<uint16_t>& ultrasonic_distances,
                       SensorCommon::TofMeasurement tof_results[SensorCommon::NUM_TOF_SENSORS]);
@@ -76,26 +76,32 @@ public:
     // Continuous mode
     esp_err_t start_continuous();
     esp_err_t stop_continuous();
-    bool is_continuous() const;
+    [[nodiscard]] bool is_continuous() const;
 
     // Sensor control
     esp_err_t set_tof_mode(uint8_t sensor_index, bool long_distance);
 
     // Status
-    size_t get_ultrasonic_count() const;
-    bool is_tof_ready(uint8_t sensor_index = 0) const;
-    bool is_lidar_ready() const;
-    bool is_ultrasonic_ready() const;
+    [[nodiscard]] size_t get_ultrasonic_count() const;
+    [[nodiscard]] bool is_tof_ready(uint8_t sensor_index = 0) const;
+    [[nodiscard]] bool is_lidar_ready() const;
+    [[nodiscard]] bool is_ultrasonic_ready() const;
 
     // Diagnostics
-    esp_err_t self_test();
-    bool tof_probe(uint8_t sensor_index = 0);
-    uint8_t lidar_health() const;
+    esp_err_t self_test() const;
+    bool tof_probe(uint8_t sensor_index = 0) const;
+    [[nodiscard]] uint8_t lidar_health() const;
     bool get_last_lidar_raw_packet(uint8_t* out, size_t len) const;
 
     // Get latest data for ROS publishing
-    bool get_latest_data(SensorCommon::SensorDataPacket* data);
+    bool get_latest_data(SensorCommon::SensorDataPacket* data) const;
 
+
+    static const char* TAG;
+
+    // Disable copying
+    SensorControl(const SensorControl&) = delete;
+    SensorControl& operator=(const SensorControl&) = delete;
 private:
     Config config_;
 
@@ -120,10 +126,4 @@ private:
     esp_err_t initialize_tof();
     esp_err_t initialize_lidar();
     esp_err_t update_lidar_measurement();
-
-    static const char* TAG;
-
-    // Disable copying
-    SensorControl(const SensorControl&) = delete;
-    SensorControl& operator=(const SensorControl&) = delete;
 };
