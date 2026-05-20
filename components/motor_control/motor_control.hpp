@@ -2,7 +2,6 @@
 #define MOTOR_CONTROL_H
 
 #include "idf_c_includes.hpp"
-#include "FastAccelStepper.h"
 
 // --- Hardware Configuration ---
 #define NUM_MOTORS 5

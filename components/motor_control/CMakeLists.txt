@@ -3,5 +3,4 @@ idf_component_register(SRCS "motor_control.cpp"
                     	REQUIRES
                     	freertos
                     	idf_includes
-						gin66__fastaccelstepper
                     )

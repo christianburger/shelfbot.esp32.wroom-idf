@@ -21,4 +21,5 @@ idf_component_register(
         lwip
         json
         micro_ros_espidf_component
+        gin66__fastaccelstepper   # <-- moved here
 )
