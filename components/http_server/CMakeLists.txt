@@ -1,12 +1,12 @@
 idf_component_register(SRCS "http_server.cpp"
-        INCLUDE_DIRS "." "include" "../sensor_control/include"
+        INCLUDE_DIRS "include"
         REQUIRES
         idf_includes
+        firmware_version
         motor_control
         sensor_control
         led_control
         json
-        firmware_version
 )
 
 target_add_binary_data(${COMPONENT_LIB} "index.html" BINARY)

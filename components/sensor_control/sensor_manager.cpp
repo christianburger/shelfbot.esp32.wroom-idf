@@ -1,6 +1,6 @@
 #include "include/sensor_manager.hpp"
 #include "include/sensor_control.hpp"
-#include "firmware_version.hpp"
+#include "../firmware_version/include/firmware_version.hpp"
 #include <sstream>
 
 static const char* TAG = "SensorManager";

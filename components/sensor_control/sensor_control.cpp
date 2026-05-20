@@ -4,7 +4,7 @@
 #include "tof_sensor.hpp"
 #include "lidar_sensor.hpp"
 #include "lidar_packet_parser.hpp"
-#include "firmware_version.hpp"
+#include "../firmware_version/include/firmware_version.hpp"
 
 // Include ONLY the adapter for the selected driver
 #if SHELFBOT_DRIVER_VL53L0X

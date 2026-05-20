@@ -1,12 +1,10 @@
-#include "http_server.hpp"
-#include "firmware_version.hpp"
-#include "lidar_packet_parser.hpp"
+#include <http_server.hpp>
 
 const char* HttpServer::TAG = "HttpServer";
-extern const uint8_t _binary_lidar_html_start[] asm("_binary_lidar_html_start");
-extern const uint8_t _binary_lidar_html_end[] asm("_binary_lidar_html_end");
-extern const uint8_t _binary_lidar_viz_js_start[] asm("_binary_lidar_viz_js_start");
-extern const uint8_t _binary_lidar_viz_js_end[] asm("_binary_lidar_viz_js_end");
+extern const uint8_t binary_lidar_html_start[] asm("_binary_lidar_html_start");
+extern const uint8_t binary_lidar_html_end[] asm("_binary_lidar_html_end");
+extern const uint8_t binary_lidar_viz_js_start[] asm("_binary_lidar_viz_js_start");
+extern const uint8_t binary_lidar_viz_js_end[] asm("_binary_lidar_viz_js_end");
 
 // Helper function to add CORS headers
 static void add_cors_headers(httpd_req_t* req) {
@@ -18,7 +16,7 @@ static void add_cors_headers(httpd_req_t* req) {
 // Handle OPTIONS requests for CORS
 static esp_err_t options_handler(httpd_req_t* req) {
     add_cors_headers(req);
-    httpd_resp_send(req, NULL, 0);
+    httpd_resp_send(req, nullptr, 0);
     return ESP_OK;
 }
 
@@ -221,14 +219,14 @@ load(); setInterval(load,500);
 
 esp_err_t HttpServer::lidar_page_handler(httpd_req_t* req) {
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    const size_t len = _binary_lidar_html_end - _binary_lidar_html_start;
-    return httpd_resp_send(req, reinterpret_cast<const char*>(_binary_lidar_html_start), len);
+    const size_t len = binary_lidar_html_end - binary_lidar_html_start;
+    return httpd_resp_send(req, reinterpret_cast<const char*>(binary_lidar_html_start), len);
 }
 
 esp_err_t HttpServer::lidar_js_handler(httpd_req_t* req) {
     httpd_resp_set_type(req, "application/javascript; charset=utf-8");
-    const size_t len = _binary_lidar_viz_js_end - _binary_lidar_viz_js_start;
-    return httpd_resp_send(req, reinterpret_cast<const char*>(_binary_lidar_viz_js_start), len);
+    const size_t len = binary_lidar_viz_js_end - binary_lidar_viz_js_start;
+    return httpd_resp_send(req, reinterpret_cast<const char*>(binary_lidar_viz_js_start), len);
 }
 
 esp_err_t HttpServer::motor_status_handler(httpd_req_t* req) {

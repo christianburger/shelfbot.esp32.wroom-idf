@@ -1,15 +1,15 @@
-// http_server.hpp
 #pragma once
 #ifndef SHELFBOT_HTTP_SERVER_H
 #define SHELFBOT_HTTP_SERVER_H
 
 #include <idf_c_includes.hpp>
-#include "sensor_manager.hpp"
-#include "sensor_common.hpp"
-#include "i2c_scanner.hpp"
-#include "motor_control.hpp"
-#include "firmware_version.hpp"
-#include "lidar_packet_parser.hpp"
+#include <sensor_manager.hpp>
+#include <sensor_common.hpp>
+#include <i2c_scanner.hpp>
+#include <motor_control.hpp>
+#include <firmware_version.hpp>
+#include <lidar_packet_parser.hpp>
+
 
 class HttpServer {
 public:
@@ -20,14 +20,14 @@ public:
 
     esp_err_t start();
     esp_err_t stop();
-    bool is_running() const { return server_ != nullptr; }
+    [[nodiscard]] bool is_running() const { return server_ != nullptr; }
 
-private:
     HttpServer() = default;
     ~HttpServer() = default;
     HttpServer(const HttpServer&) = delete;
     HttpServer& operator=(const HttpServer&) = delete;
 
+private:
     httpd_handle_t server_ = nullptr;
     static const char* TAG;
 

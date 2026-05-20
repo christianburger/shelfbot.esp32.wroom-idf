@@ -1,5 +1,5 @@
 idf_component_register(SRCS "shelfbot.cpp"
-        INCLUDE_DIRS "."
+        INCLUDE_DIRS "include"
         REQUIRES
         idf_includes
         micro_ros_espidf_component

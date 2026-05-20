@@ -1,10 +1,10 @@
-#include "firmware_version.hpp"
+#include <firmware_version.hpp>
 
 // Initialize static member
 const char* FirmwareVersion::firmware_version_string = FIRMWARE_VERSION_STRING;
 
 // Static TAG for logging
-static const char* TAG = "FirmwareVersion";
+static auto TAG = "FirmwareVersion";
 
 // Instance method to get version string
 const char* FirmwareVersion::get_firmware_version() const {

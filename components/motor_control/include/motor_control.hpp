@@ -1,7 +1,7 @@
 #ifndef MOTOR_CONTROL_H
 #define MOTOR_CONTROL_H
 
-#include "idf_c_includes.hpp"
+#include <idf_c_includes.hpp>
 
 // --- Hardware Configuration ---
 #define NUM_MOTORS 5

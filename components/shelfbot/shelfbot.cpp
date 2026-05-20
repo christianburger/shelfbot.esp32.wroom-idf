@@ -1,4 +1,3 @@
-// shelfbot.cpp
 #include <shelfbot.hpp>
 
 static auto TAG = "shelfbot";
