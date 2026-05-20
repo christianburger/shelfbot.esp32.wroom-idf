@@ -1,14 +1,15 @@
 // shelfbot.cpp
 #include "shelfbot.hpp"
+#include "freertos/event_groups.h"
 
 static const char* TAG = "shelfbot";
 
-// --- Static Member Definitions (unchanged) ---
+// --- Static Member Definitions ---
 bool Shelfbot::time_synchronized = false;
 bool Shelfbot::led_state = false;
 Shelfbot* Shelfbot::instance = nullptr;
 
-// --- Helper Functions (unchanged) ---
+// --- Helper Functions ---
 void init_multi_array(std_msgs__msg__Float32MultiArray& msg, float* data_buffer, int capacity) {
     msg.data.data = data_buffer;
     msg.data.capacity = capacity;
@@ -19,7 +20,7 @@ void init_multi_array(std_msgs__msg__Float32MultiArray& msg, float* data_buffer,
     msg.layout.data_offset = 0;
 }
 
-// --- mDNS (unchanged) ---
+// --- mDNS Implementation ---
 void Shelfbot::initialise_mdns(void) {
     mdns_init();
     mdns_hostname_set("shelfbot");
@@ -44,7 +45,7 @@ bool Shelfbot::query_mdns_host(const char * host_name) {
     return true;
 }
 
-// --- SNTP (unchanged) ---
+// --- SNTP Implementation ---
 void Shelfbot::time_sync_notification_cb(struct timeval *tv) {
     ESP_LOGI(TAG, "Time synchronized");
     time_synchronized = true;
@@ -126,7 +127,7 @@ void Shelfbot::tof_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     }
 }
 
-// --- ROS Subscription Callbacks (unchanged) ---
+// --- ROS Subscription Callbacks ---
 void Shelfbot::motor_command_subscription_callback(const void * msin) {
     const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msin;
     if (msg->data.size >= 2) {
@@ -149,7 +150,7 @@ void Shelfbot::led_subscription_callback(const void * msin) {
     led_control_set(led_state);
 }
 
-// --- Static Callback Wrappers (unchanged) ---
+// --- Static Callback Wrappers ---
 void Shelfbot::heartbeat_timer_callback_wrapper(rcl_timer_t * t, int64_t l) { if(instance) instance->heartbeat_timer_callback(t, l); }
 void Shelfbot::motor_position_timer_callback_wrapper(rcl_timer_t * t, int64_t l) { if(instance) instance->motor_position_timer_callback(t, l); }
 void Shelfbot::distance_sensors_timer_callback_wrapper(rcl_timer_t * t, int64_t l) { if(instance) instance->distance_sensors_timer_callback(t, l); }
@@ -160,7 +161,7 @@ void Shelfbot::set_speed_subscription_callback_wrapper(const void * m) { if(inst
 void Shelfbot::led_subscription_callback_wrapper(const void * m) { if(instance) instance->led_subscription_callback(m); }
 void Shelfbot::micro_ros_task_wrapper(void * arg) { if(instance) instance->micro_ros_task_impl(); }
 
-// --- Entity Lifecycle (unchanged) ---
+// --- Entity Lifecycle ---
 void Shelfbot::create_entities() {
     allocator = rcl_get_default_allocator();
     RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
@@ -221,7 +222,7 @@ void Shelfbot::destroy_entities() {
     rclc_support_fini(&support);
 }
 
-// --- New network services task (waits for Wi-Fi, then starts services) ---
+// --- Network services task (static function) ---
 static void network_services_task(void *arg) {
     Shelfbot* bot = (Shelfbot*)arg;
     EventGroupHandle_t wifi_evt = wifi_manager_get_event_group();
@@ -239,15 +240,13 @@ static void network_services_task(void *arg) {
 
     bot->initialize_sntp();
 
-    // Keep task alive (can also suspend)
     while (1) {
         vTaskDelay(pdMS_TO_TICKS(60000));
     }
 }
 
-// --- Micro-ROS task implementation (full, with Wi-Fi wait) ---
+// --- Micro-ROS task implementation ---
 void Shelfbot::micro_ros_task_impl() {
-    // Wait for Wi-Fi connection before any mDNS query
     EventGroupHandle_t wifi_evt = wifi_manager_get_event_group();
     ESP_LOGI(TAG, "Micro-ROS task waiting for Wi-Fi...");
     xEventGroupWaitBits(wifi_evt, WM_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
@@ -262,7 +261,7 @@ void Shelfbot::micro_ros_task_impl() {
                 if (query_mdns_host("gentoo-laptop")) {
                     rcl_ret_t ret = rcl_init_options_init(&init_options, allocator);
                     if (ret != RCL_RET_OK) {
-                        ESP_LOGE(TAG, "Failed to initialize rcl init options: %ld", ret);
+                        ESP_LOGE(TAG, "Failed to init rcl init options: %ld", ret);
                         break;
                     }
                     rmw_uros_options_set_udp_address(agent_ip_str, "8888", rcl_init_options_get_rmw_init_options(&init_options));
@@ -303,8 +302,8 @@ void Shelfbot::micro_ros_task_impl() {
     }
 }
 
-// --- Main Begin (refactored) ---
-void Shelfbot::begin() {
+// --- Main begin() with error returns ---
+esp_err_t Shelfbot::begin() {
     instance = this;
 
     ESP_LOGI(TAG, "========================================");
@@ -321,14 +320,22 @@ void Shelfbot::begin() {
     esp_err_t ret = nvs_flash_init();
     if (ret == ESP_ERR_NVS_NO_FREE_PAGES || ret == ESP_ERR_NVS_NEW_VERSION_FOUND) {
         ESP_ERROR_CHECK(nvs_flash_erase());
-        nvs_flash_init();
+        ret = nvs_flash_init();
+    }
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "NVS init failed: %s", esp_err_to_name(ret));
+        return ret;
     }
 
-    // 3. Initialize Wi‑Fi manager (starts netif, event loop, and manager task)
+    // 3. Initialize Wi‑Fi manager
     ESP_LOGI(TAG, "2. Initializing Wi‑Fi manager...");
-    ESP_ERROR_CHECK(wifi_manager_init());
+    ret = wifi_manager_init();
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "Wi-Fi manager init failed: %s", esp_err_to_name(ret));
+        return ret;
+    }
 
-    // 4. Sensor Manager (does not depend on network)
+    // 4. Sensor Manager
     ESP_LOGI(TAG, "3. Initializing sensors...");
     SensorControl::Config sensor_config;
     sensor_config.ultrasonic_configs = {
@@ -352,15 +359,24 @@ void Shelfbot::begin() {
     SensorManager::get_instance().initialize(sensor_config);
     SensorManager::get_instance().start();
 
-    // 5. Start network services task (will wait for Wi-Fi)
+    // 5. Start network services task
     ESP_LOGI(TAG, "4. Starting network services task...");
-    xTaskCreate(network_services_task, "net_services", 8192, this, 5, nullptr);
+    BaseType_t task_created = xTaskCreate(network_services_task, "net_services", 8192, this, 5, nullptr);
+    if (task_created != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create network services task");
+        return ESP_FAIL;
+    }
 
-    // 6. Start Micro‑ROS task (will wait for Wi-Fi)
+    // 6. Start Micro‑ROS task
     ESP_LOGI(TAG, "5. Starting Micro‑ROS task...");
-    xTaskCreate(micro_ros_task_wrapper, "uros_task", 16000, this, 5, nullptr);
+    task_created = xTaskCreate(micro_ros_task_wrapper, "uros_task", 16000, this, 5, nullptr);
+    if (task_created != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create Micro-ROS task");
+        return ESP_FAIL;
+    }
 
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "Shelfbot Firmware Initialization Complete");
     ESP_LOGI(TAG, "========================================");
+    return ESP_OK;
 }

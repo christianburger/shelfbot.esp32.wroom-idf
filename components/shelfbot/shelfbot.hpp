@@ -5,7 +5,7 @@
 #include "sensor_control.hpp"
 #include "motor_control.hpp"
 #include "led_control.hpp"
-#include "wifi_manager.hpp"          // new Wi-Fi manager
+#include "wifi_manager.hpp"
 #include "http_server.hpp"
 #include "firmware_version.hpp"
 
@@ -14,13 +14,12 @@
 
 class Shelfbot {
 public:
-    void begin();
+    esp_err_t begin();                                  // now returns error code
     static Shelfbot& get_instance() {
         if (!instance) instance = new Shelfbot();
         return *instance;
     }
 
-    // Network service helpers – made public for external task
     void initialise_mdns(void);
     void initialize_sntp(void);
 

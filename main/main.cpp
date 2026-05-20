@@ -1,19 +1,20 @@
 #include "shelfbot.hpp"
-// The ESP-IDF framework requires a C-style `app_main` entry point.
-// We use `extern "C"` to prevent C++ name mangling.
-extern "C" void app_main(void)
-{
-  ESP_LOGI("app_main", "App starting...");
 
-  // Use singleton instance instead of direct construction
-  Shelfbot& shelfbot = Shelfbot::get_instance();
+extern "C" [[noreturn]] void app_main(void) {
+    ESP_LOGI("app_main", "App starting...");
+    Shelfbot& shelfbot = Shelfbot::get_instance();
+    if (const esp_err_t err = shelfbot.begin(); err != ESP_OK) {
+        ESP_LOGE("app_main", "Shelfbot initialisation failed: %s", esp_err_to_name(err));
+        // Loop forever if init fails
+        for (;;) {
+            vTaskDelay(pdMS_TO_TICKS(1000));
+        }
+    }
+    ESP_LOGI("app_main", "Shelfbot initialisation complete. Deleting main task.");
+    vTaskDelete(nullptr);
 
-  ESP_LOGI("app_main", "Shelfbot instance obtained.");
-  shelfbot.begin();
-  ESP_LOGI("app_main", "Shelfbot begin() returned. Entering main loop.");
-
-  // Main loop - just delay to keep task alive
-  while (1) {
-    vTaskDelay(pdMS_TO_TICKS(1000));
-  }
+    // Explicit infinite loop so the compiler knows this never returns
+    for (;;) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
 }

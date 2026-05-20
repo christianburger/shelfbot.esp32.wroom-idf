@@ -9,7 +9,6 @@ extern "C" {
 #include "freertos/semphr.h"
 #include "freertos/timers.h"
 #include "freertos/event_groups.h"
-
 // ESP-IDF core
 #include "esp_log.h"
 #include "esp_system.h"

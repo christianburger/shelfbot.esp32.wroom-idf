@@ -1,11 +1,9 @@
 #pragma once
-
-#include <stdbool.h>
-
+#include "idf_c_includes.hpp"
 /**
  * @brief Initializes the GPIO for the built-in LED.
  */
-void led_control_init(void);
+void led_control_init();
 
 /**
  * @brief Sets the state of the built-in LED.
@@ -19,4 +17,4 @@ void led_control_set(bool state);
  *
  * @return true if the LED is on, false if it is off.
  */
-bool led_control_get_state(void);
+bool led_control_get_state();

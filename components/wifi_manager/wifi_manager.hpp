@@ -1,11 +1,6 @@
 // wifi_manager.hpp
 #pragma once
-
-#include "idf_c_includes.hpp"
-
-#ifdef __cplusplus
-extern "C" {
-#endif
+#include <idf_c_includes.hpp>
 
 // Public event group bits
 #define WM_CONNECTED_BIT    BIT0
@@ -30,11 +25,7 @@ typedef struct {
     uint32_t             reconnects;
 } wifi_manager_info_t;
 
-esp_err_t wifi_manager_init(void);
+esp_err_t wifi_manager_init();
 void wifi_manager_get_info(wifi_manager_info_t *out);
-EventGroupHandle_t wifi_manager_get_event_group(void);
+EventGroupHandle_t wifi_manager_get_event_group();
 const char *wifi_manager_state_str(wifi_manager_state_t s);
-
-#ifdef __cplusplus
-}
-#endif
