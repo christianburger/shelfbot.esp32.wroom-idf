@@ -1,8 +1,19 @@
 // [file name]: sensor_control.hpp
 #pragma once
 #include <idf_c_includes.hpp>
-#include "sensor_common.hpp"
-#include "lidar_sensor.hpp"
+#include <sensor_common.hpp>
+#include <lidar_sensor.hpp>
+
+// Centralized compile-time sensor presence
+#define SHELFBOT_HAS_ULTRASONIC 1
+#define SHELFBOT_HAS_TOF 0
+#define SHELFBOT_HAS_LIDAR 1
+
+// Centralized ToF/LiDAR driver selection (choose exactly one)
+#define SHELFBOT_DRIVER_VL53L0X 0
+#define SHELFBOT_DRIVER_VL53L1 0
+#define SHELFBOT_DRIVER_VL53L1_MODBUS 1
+#define SHELFBOT_DRIVER_LYDSTO 0
 
 // Forward declarations
 class UltrasonicSensorArray;
@@ -88,8 +99,8 @@ public:
     [[nodiscard]] bool is_ultrasonic_ready() const;
 
     // Diagnostics
-    esp_err_t self_test() const;
-    bool tof_probe(uint8_t sensor_index = 0) const;
+    [[nodiscard]] esp_err_t self_test() const;
+    [[nodiscard]] bool tof_probe(uint8_t sensor_index = 0) const;
     [[nodiscard]] uint8_t lidar_health() const;
     bool get_last_lidar_raw_packet(uint8_t* out, size_t len) const;
 
