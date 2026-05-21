@@ -37,11 +37,11 @@ public:
     ~VL53L0X_Driver();
 
     // ── Standardized Interface Methods ──
-    const char* configure();
+    const char* configure() const;
     const char* init();
     const char* setup();
     const char* calibrate();
-    const char* check();
+    const char* check() const;
     bool read_sensor(MeasurementResult& result);
     bool isReady() const;
 
@@ -86,14 +86,14 @@ private:
     bool     did_timeout_;
 
     // ── I2C Operations ──
-    esp_err_t writeReg8(uint8_t reg, uint8_t value);
-    esp_err_t writeReg16(uint8_t reg, uint16_t value);
-    esp_err_t writeReg32(uint8_t reg, uint32_t value);
-    esp_err_t readReg8(uint8_t reg, uint8_t* value);
-    esp_err_t readReg16(uint8_t reg, uint16_t* value);
-    esp_err_t readReg32(uint8_t reg, uint32_t* value);
-    esp_err_t writeMulti(uint8_t reg, const uint8_t* src, uint8_t count);
-    esp_err_t readMulti(uint8_t reg, uint8_t* dst, uint8_t count);
+    esp_err_t writeReg8(uint8_t reg, uint8_t value) const;
+    esp_err_t writeReg16(uint8_t reg, uint16_t value) const;
+    esp_err_t writeReg32(uint8_t reg, uint32_t value) const;
+    esp_err_t readReg8(uint8_t reg, uint8_t* value) const;
+    esp_err_t readReg16(uint8_t reg, uint16_t* value) const;
+    esp_err_t readReg32(uint8_t reg, uint32_t* value) const;
+    esp_err_t writeMulti(uint8_t reg, const uint8_t* src, uint8_t count) const;
+    esp_err_t readMulti(uint8_t reg, uint8_t* dst, uint8_t count) const;
 
     // ── Initialization helpers ──
     struct RegisterWrite {
@@ -103,12 +103,12 @@ private:
         std::string comment;
     };
 
-    bool      loadRegisterSequence(const char* csv_data, std::vector<RegisterWrite>& seq);
-    esp_err_t executeRegisterSequence(const std::vector<RegisterWrite>& seq);
-    esp_err_t loadInitSequence();
+    static bool loadRegisterSequence(const char* csv_data, std::vector<RegisterWrite>& seq);
+    esp_err_t executeRegisterSequence(const std::vector<RegisterWrite>& seq) const;
+    esp_err_t loadInitSequence() const;
 
     // ── Calibration ──
-    esp_err_t configureSPAD(uint8_t* count, bool* type_is_aperture);
+    esp_err_t configureSPAD(uint8_t* count, bool* type_is_aperture) const;
     esp_err_t performSingleRefCalibration(uint8_t vhv_init_byte);
 
     // ── Timing calculation ──
@@ -130,7 +130,7 @@ private:
     void getSequenceStepTimeouts(SequenceStepEnables* enables, SequenceStepTimeouts* timeouts);
 
     // ── Configuration (internal use) ──
-    const char* setSignalRateLimit(float limit_mcps);
+    const char* setSignalRateLimit(float limit_mcps) const;
     const char* setMeasurementTimingBudget(uint32_t budget_us);
     uint32_t    getMeasurementTimingBudget();
     const char* setVcselPulsePeriod(uint8_t type, uint8_t period_pclks);

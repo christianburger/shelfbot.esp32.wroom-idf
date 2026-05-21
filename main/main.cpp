@@ -1,4 +1,4 @@
-#include "shelfbot.hpp"
+#include <shelfbot.hpp>
 
 extern "C" [[noreturn]] void app_main(void) {
     ESP_LOGI("app_main", "App starting...");

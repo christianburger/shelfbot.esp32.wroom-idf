@@ -1,6 +1,5 @@
-// lidar_sensor.cpp
-#include "lidar_sensor.hpp"
-#include "lidar_packet_parser.hpp"
+#include <lidar_sensor.hpp>
+#include <lidar_packet_parser.hpp>
 
 LidarSensor::LidarSensor(uart_port_t uart_port, int tx_pin, int rx_pin, uint32_t baud_rate)
     : driver_(uart_port, tx_pin, rx_pin, baud_rate), initialized_(false),

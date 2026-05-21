@@ -1,4 +1,3 @@
-// vl53l1_adapter.hpp
 #pragma once
 
 #include <tof_driver_interface.hpp>

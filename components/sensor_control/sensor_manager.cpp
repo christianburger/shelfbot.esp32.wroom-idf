@@ -1,14 +1,11 @@
-#include "include/sensor_manager.hpp"
-#include "include/sensor_control.hpp"
-#include "firmware_version.hpp"
-#include <sstream>
+#include <sensor_manager.hpp>
+#include <sensor_control.hpp>
+#include <firmware_version.hpp>
 
-static const char* TAG = "SensorManager";
-
+static auto TAG = "SensorManager";
 
 void SensorManager::monitor_task(void* arg) {
-    SensorManager* instance = static_cast<SensorManager*>(arg);
-    if (instance) {
+    if (const auto instance = static_cast<SensorManager*>(arg)) {
         instance->monitor_loop();
     }
     vTaskDelete(nullptr);

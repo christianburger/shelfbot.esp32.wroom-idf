@@ -1,151 +1,219 @@
-#include "motor_control.hpp"
+#include <motor_control.hpp>
 
-static const char* TAG = "motor_control";
+static auto TAG = "motor_control";
 
-// Global stepper motor objects and configuration
-static FastAccelStepperEngine engine = FastAccelStepperEngine();
+static FastAccelStepperEngine engine;
 static FastAccelStepper* steppers[NUM_MOTORS] = {nullptr};
+static int8_t motor_direction_sign[NUM_MOTORS] = {0};
 
 static const int motorPins[NUM_MOTORS][2] = {
-  {27, 26},  // Motor 0: GPIO27, GPIO26
-  {14, 33},  // Motor 1: GPIO14, GPIO33
-  {13, 19},  // Motor 2: GPIO13, GPIO19 (changed)
-  {4, 18},   // Motor 3: GPIO4, GPIO18 (changed)
-  {12, 23}   // Motor 4: GPIO12, GPIO23 (changed)
+    {27, 26},  // Motor 0: PULSE=GPIO27, DIR=GPIO26
+    {14, 33},  // Motor 1: PULSE=GPIO14, DIR=GPIO33
+    {13, 19},  // Motor 2: PULSE=GPIO13, DIR=GPIO19
+    { 4, 18},  // Motor 3: PULSE=GPIO4,  DIR=GPIO18
+    {12, 23},  // Motor 4: PULSE=GPIO12, DIR=GPIO23
 };
 
-// Conversion factor from radians to steps. This is the core of the unit standardization.
-const double RADS_TO_STEPS = (double)(STEPS_PER_REVOLUTION * MICROSTEPPING * GEAR_RATIO) / (2.0 * M_PI);
+// Radians → steps conversion factor
+const double RADS_TO_STEPS =
+    (STEPS_PER_REVOLUTION * MICROSTEPPING * GEAR_RATIO) / (2.0 * M_PI);
 
+// Default speed used when a position command is issued with velocity == 0
+static constexpr long DEFAULT_SPEED_HZ   = 4000;
+static constexpr long DEFAULT_ACCEL_HZ_S = 2000;
+// Minimum velocity before we treat it as "zero"
+static constexpr double VEL_DEADBAND = 1e-4;
+
+// ---------------------------------------------------------------------------
+// Helpers
+// ---------------------------------------------------------------------------
+static inline long vel_to_hz(double velocity_rad_s) {
+    return static_cast<long>(fabs(velocity_rad_s) * RADS_TO_STEPS);
+}
+
+// ---------------------------------------------------------------------------
+// Lifecycle
+// ---------------------------------------------------------------------------
 void motor_control_begin() {
-    ESP_LOGI(TAG, "Initializing motor system");
+    ESP_LOGI(TAG, "Initializing motor system (RADS_TO_STEPS=%.4f)", RADS_TO_STEPS);
     engine.init();
-    
+
     for (int i = 0; i < NUM_MOTORS; i++) {
-        gpio_pad_select_gpio((gpio_num_t)motorPins[i][0]); // PULSE Pin
-        gpio_pad_select_gpio((gpio_num_t)motorPins[i][1]); // DIR Pin
+        gpio_pad_select_gpio(static_cast<gpio_num_t>(motorPins[i][0]));
+        gpio_pad_select_gpio(static_cast<gpio_num_t>(motorPins[i][1]));
 
         steppers[i] = engine.stepperConnectToPin(motorPins[i][0]);
         if (steppers[i]) {
             steppers[i]->setDirectionPin(motorPins[i][1], true);
-
             steppers[i]->setAutoEnable(true);
-            steppers[i]->setSpeedInHz(4000); // Default speed
-            steppers[i]->setAcceleration(2000); // Default acceleration
+            steppers[i]->setSpeedInHz(DEFAULT_SPEED_HZ);
+            steppers[i]->setAcceleration(DEFAULT_ACCEL_HZ_S);
             steppers[i]->setCurrentPosition(0);
+            motor_direction_sign[i] = 0;
+            ESP_LOGI(TAG, "  Motor %d OK (PULSE=%d DIR=%d)", i,
+                     motorPins[i][0], motorPins[i][1]);
+        } else {
+            ESP_LOGE(TAG, "  Motor %d FAILED to connect", i);
         }
     }
-    // NOTE: A background task is not needed. The FastAccelStepper library uses hardware interrupts
-    // on the ESP32 to generate steps in the background, so no polling `engine.run()` is required.
 }
 
-// --- ROS 2 Standard Interface Implementation ---
-
-void motor_control_set_position(uint8_t index, double position_rad) {
-    if (index >= NUM_MOTORS || !steppers[index]) return;
-    ESP_LOGI(TAG, "Conversion Info: STEPS_PER_REV=%.1f, MICROSTEPPING=%.1f, GEAR_RATIO=%.1f, RADS_TO_STEPS=%.4f", STEPS_PER_REVOLUTION, MICROSTEPPING, GEAR_RATIO, RADS_TO_STEPS);
-    long target_steps = (long)(position_rad * RADS_TO_STEPS);
-    ESP_LOGI(TAG, "Motor %d: Converting %.2f rad to %ld steps", index, position_rad, target_steps);
-    ESP_LOGI(TAG, "Executing: steppers[%d]->moveTo(%ld)", index, target_steps);
-    steppers[index]->moveTo(target_steps);
-}
-
-double motor_control_get_position(uint8_t index) {
-    if (index >= NUM_MOTORS || !steppers[index]) return 0.0;
-    return (double)steppers[index]->getCurrentPosition() / RADS_TO_STEPS;
-}
-
-double motor_control_get_velocity(uint8_t index) {
-    if (index >= NUM_MOTORS || !steppers[index]) return 0.0;
-    // Library returns speed in mHz (steps/1000s). Convert to steps/s, then to rad/s.
-    double steps_per_sec = (double)steppers[index]->getCurrentSpeedInMilliHz() / 1000.0;
-    return steps_per_sec / RADS_TO_STEPS;
-}
-
-// --- Add this new function ---
-void motor_control_set_velocity(uint8_t index, double velocity_rad_s) {
+// ---------------------------------------------------------------------------
+// Primary unified command
+//
+//  velocity == 0              → stop
+//  position == 0, vel != 0   → run continuously in velocity direction
+//  position != 0, vel != 0   → move to position at |velocity| speed
+//  position != 0, vel == 0   → move to position at default speed
+// ---------------------------------------------------------------------------
+void motor_control_apply(const uint8_t index,
+                         const double   position_rad,
+                         const double   velocity_rad_s) {
     if (index >= NUM_MOTORS || !steppers[index]) return;
 
-    // If velocity is very close to zero, stop the motor.
-    if (fabs(velocity_rad_s) < 1e-4) {
+    const bool has_velocity = fabs(velocity_rad_s) >= VEL_DEADBAND;
+    const bool has_position = fabs(position_rad)   >= VEL_DEADBAND;
+
+    // --- Stop ---
+    if (!has_velocity && !has_position) {
         steppers[index]->stopMove();
+        motor_direction_sign[index] = 0;
         return;
     }
 
-    // Convert velocity in rad/s to speed in Hz (steps/s)
-    long speed_hz = (long)fabs(velocity_rad_s * RADS_TO_STEPS);
-
-    // Set the motor speed and acceleration
-    steppers[index]->setSpeedInHz(speed_hz);
-    steppers[index]->setAcceleration(speed_hz / 2); // Use a reasonable acceleration
-
-    // Set the direction and command the motor to run continuously
-    if (velocity_rad_s > 0) {
-        steppers[index]->runForward();
-    } else {
-        steppers[index]->runBackward();
+    // Determine speed for this command
+    const long speed_hz = has_velocity ? vel_to_hz(velocity_rad_s) : DEFAULT_SPEED_HZ;
+    if (speed_hz < 1) {
+        steppers[index]->stopMove();
+        motor_direction_sign[index] = 0;
+        return;
     }
+
+    steppers[index]->setSpeedInHz(speed_hz);
+    steppers[index]->setAcceleration(std::max(1L, speed_hz / 2));
+
+    // --- Continuous velocity (no position target) ---
+    if (!has_position) {
+        if (velocity_rad_s > 0) {
+            steppers[index]->runForward();
+            motor_direction_sign[index] = 1;
+        } else {
+            steppers[index]->runBackward();
+            motor_direction_sign[index] = -1;
+        }
+        ESP_LOGI(TAG, "Motor %d: continuous %.4f rad/s (%ld Hz)",
+                 index, velocity_rad_s, speed_hz);
+        return;
+    }
+
+    // --- Move to position ---
+    const long target_steps = static_cast<long>(position_rad * RADS_TO_STEPS);
+    const long current_steps = steppers[index]->getCurrentPosition();
+    if (target_steps > current_steps) {
+        motor_direction_sign[index] = 1;
+    } else if (target_steps < current_steps) {
+        motor_direction_sign[index] = -1;
+    } else {
+        motor_direction_sign[index] = 0;
+    }
+    steppers[index]->moveTo(target_steps);
+    ESP_LOGI(TAG, "Motor %d: moveTo %.4f rad (%ld steps) at %ld Hz",
+             index, position_rad, target_steps, speed_hz);
 }
 
-// --- Utility Function Implementations ---
+// ---------------------------------------------------------------------------
+// Individual setters (thin wrappers around motor_control_apply)
+// ---------------------------------------------------------------------------
+void motor_control_set_velocity(const uint8_t index, const double velocity_rad_s) {
+    // Position stays unchanged: pass 0 to select continuous-velocity mode
+    motor_control_apply(index, 0.0, velocity_rad_s);
+}
 
-void motor_control_set_speed_hz(uint8_t index, long speed_hz) {
+void motor_control_set_position(const uint8_t index, const double position_rad) {
+    motor_control_apply(index, position_rad, 0.0);
+}
+
+// ---------------------------------------------------------------------------
+// Getters — both return signed values
+// ---------------------------------------------------------------------------
+double motor_control_get_position(const uint8_t index) {
+    if (index >= NUM_MOTORS || !steppers[index]) return 0.0;
+    return static_cast<double>(steppers[index]->getCurrentPosition()) / RADS_TO_STEPS;
+}
+
+double motor_control_get_velocity(const uint8_t index) {
+    if (index >= NUM_MOTORS || !steppers[index]) return 0.0;
+
+    // getCurrentSpeedInMilliHz() is always positive — derive sign from direction
+    const double steps_per_sec =
+        static_cast<double>(steppers[index]->getCurrentSpeedInMilliHz()) / 1000.0;
+
+    const int sign = (motor_direction_sign[index] != 0) ? motor_direction_sign[index] : 1;
+
+    return (steps_per_sec * sign) / RADS_TO_STEPS;
+}
+
+// ---------------------------------------------------------------------------
+// Utility
+// ---------------------------------------------------------------------------
+void motor_control_set_speed_hz(const uint8_t index, const long speed_hz) {
     if (index >= NUM_MOTORS || !steppers[index]) return;
     steppers[index]->setSpeedInHz(speed_hz);
-    steppers[index]->setAcceleration(speed_hz / 2); // Set a reasonable default acceleration
+    steppers[index]->setAcceleration(std::max(1L, speed_hz / 2));
 }
 
-void motor_control_set_all_speeds_hz(long speed_hz) {
+void motor_control_set_all_speeds_hz(const long speed_hz) {
     for (int i = 0; i < NUM_MOTORS; i++) {
         motor_control_set_speed_hz(i, speed_hz);
     }
 }
 
-bool motor_control_is_motor_running(uint8_t index) {
+bool motor_control_is_motor_running(const uint8_t index) {
     if (index >= NUM_MOTORS || !steppers[index]) return false;
     return steppers[index]->isRunning();
 }
 
-void motor_control_stop_motor(uint8_t index) {
+void motor_control_stop_motor(const uint8_t index) {
     if (index >= NUM_MOTORS || !steppers[index]) return;
-    ESP_LOGI(TAG, "Motor %d: Stopping motor", index);
-    int pulse_pin = motorPins[index][0];
-    int dir_pin = motorPins[index][1];
-    int dir_level = gpio_get_level((gpio_num_t)dir_pin);
-    ESP_LOGI(TAG, "Motor %d GPIOs: PULSE_PIN=%d, DIR_PIN=%d, DIR_LEVEL=%d", index, pulse_pin, dir_pin, dir_level);
+    ESP_LOGI(TAG, "Motor %d: forceStop (PULSE=%d DIR=%d level=%d)",
+             index, motorPins[index][0], motorPins[index][1],
+             gpio_get_level(static_cast<gpio_num_t>(motorPins[index][1])));
     steppers[index]->forceStop();
+    motor_direction_sign[index] = 0;
 }
 
 void motor_control_stop_all_motors() {
-    for (int i = 0; i < NUM_MOTORS; i++) {
-        if (steppers[i]) steppers[i]->forceStop();
+    for (auto& s : steppers) {
+        if (s) s->forceStop();
+    }
+    for (auto& dir : motor_direction_sign) {
+        dir = 0;
     }
 }
 
-// --- DEPRECATED Function Implementations (for REST API) ---
-// These now act as wrappers around the new radian-based API.
-
-void motor_control_set_motor_position_double(uint8_t index, double position_deg) {
-    // Use direct expression to avoid macro collision from Arduino.h
+// ---------------------------------------------------------------------------
+// DEPRECATED — degree-based wrappers for REST API
+// ---------------------------------------------------------------------------
+void motor_control_set_motor_position_double(const uint8_t index, const double position_deg) {
     motor_control_set_position(index, position_deg * (M_PI / 180.0));
 }
 
-double motor_control_get_motor_position_double(uint8_t index) {
-    // Use direct expression to avoid macro collision from Arduino.h
+double motor_control_get_motor_position_double(const uint8_t index) {
     return motor_control_get_position(index) * (180.0 / M_PI);
 }
 
-double motor_control_get_motor_velocity_double(uint8_t index) {
-    // Use direct expression to avoid macro collision from Arduino.h
+double motor_control_get_motor_velocity_double(const uint8_t index) {
     return motor_control_get_velocity(index) * (180.0 / M_PI);
 }
 
-bool motor_control_move_all_motors_vector(const double* positions_deg, size_t num_positions, long speed, bool non_blocking) {
-    if (!positions_deg || num_positions > NUM_MOTORS) return false;
+bool motor_control_move_all_motors_vector(const double* positions,
+                                          const size_t  num_positions,
+                                          const long    speed,
+                                          bool          non_blocking) {
+    if (!positions || num_positions > NUM_MOTORS) return false;
     motor_control_set_all_speeds_hz(speed);
     for (size_t i = 0; i < num_positions; i++) {
-        motor_control_set_motor_position_double(i, positions_deg[i]);
+        motor_control_set_motor_position_double(i, positions[i]);
     }
-    // Note: Non-blocking logic would need to be implemented if required for the REST API.
     return true;
 }

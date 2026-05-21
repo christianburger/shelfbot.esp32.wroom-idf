@@ -1,11 +1,10 @@
-// shelfbot.hpp
 #pragma once
 #include <idf_c_includes.hpp>
 #include <sensor_common.hpp>
 #include <sensor_control.hpp>
 #include <motor_control.hpp>
 #include <led_control.hpp>
-#include <wifi_manager.hpp>
+#include <../../wifi_manager/include/wifi_manager.hpp>
 #include <http_server.hpp>
 #include <firmware_version.hpp>
 

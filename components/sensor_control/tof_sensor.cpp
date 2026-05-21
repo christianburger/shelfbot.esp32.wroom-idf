@@ -1,5 +1,4 @@
-// tof_sensor.cpp
-#include "tof_sensor.hpp"
+#include <tof_sensor.hpp>
 
 const char* TofSensor::TAG = "TofSensor";
 
@@ -33,8 +32,7 @@ esp_err_t TofSensor::initialize() {
             sensor_enabled_[i] = false;
             continue;
         }
-        const char* err;
-        if ((err = drivers_[i]->configure())) {
+        if (const char* err; (err = drivers_[i]->configure())) {
             ESP_LOGE(TAG, "configure: %s", err);
         } else if ((err = drivers_[i]->init())) {
             ESP_LOGE(TAG, "init: %s", err);
