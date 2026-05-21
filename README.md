@@ -41,7 +41,7 @@ This document gives an overview of the project and points to detailed setup guid
 
 5. **Start the micro‑ROS agent** (on your PC):
    ```bash
-   docker run -it --rm --net=host microros/micro-ros-agent:humble serial --dev /dev/ttyUSB0 -v6
+   docker run -it --rm --net=host microros/micro-ros-agent:humble udp4 --port 8888 -v6
    ```
 
 ---
@@ -125,6 +125,28 @@ For full details, see [`MOTOR_SETUP.md`](MOTOR_SETUP.md). Here is a quick refere
 | LED (if used)     | Depends on `led_control` component   |
 
 **Important:** GPIO3 is also the default UART0 RX (console). If you need both the console and LiDAR, either move LiDAR to UART1 (pins 9/10) or disable the console on GPIO3 (change UART console to another UART in menuconfig).
+
+---
+
+## ROS 2 Topics (verified)
+
+### Published by firmware
+
+| Topic | Type | Notes |
+|---|---|---|
+| `shelfbot_firmware/heartbeat` | `std_msgs/msg/Int32` | 1 Hz heartbeat counter |
+| `shelfbot_firmware/motor_positions` | `std_msgs/msg/Float32MultiArray` | 5 motor positions in radians (indices 0..4) |
+| `shelfbot_firmware/distance_sensors` | `std_msgs/msg/Float32MultiArray` | Sensor distances in cm: 4 ultrasonic + 1 ToF + 1 LiDAR |
+| `shelfbot_firmware/led_state` | `std_msgs/msg/Bool` | Current LED state |
+| `shelfbot_firmware/tof_distance` | `std_msgs/msg/Float32` | ToF[0] in cm (`-1` when invalid) |
+
+### Subscribed by firmware
+
+| Topic | Type | Notes |
+|---|---|---|
+| `shelfbot_firmware/motor_command` | `std_msgs/msg/Float32MultiArray` | Position targets in radians; first 5 entries are used |
+| `shelfbot_firmware/set_speed` | `std_msgs/msg/Float32MultiArray` | Velocity targets in rad/s; first 5 entries are used |
+| `shelfbot_firmware/led` | `std_msgs/msg/Bool` | LED ON/OFF command |
 
 ---
 
