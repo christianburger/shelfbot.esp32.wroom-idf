@@ -128,7 +128,7 @@ void Shelfbot::tof_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
 
 // --- ROS Subscription Callbacks ---
 void Shelfbot::motor_command_subscription_callback(const void * msin) {
-    const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msin;
+    const auto * msg = static_cast<const std_msgs__msg__Float32MultiArray *>(msin);
     const size_t count = std::min(static_cast<size_t>(NUM_MOTORS), msg->data.size);
     for (size_t i = 0; i < count; i++) {
         motor_control_set_position(static_cast<uint8_t>(i), msg->data.data[i]);
@@ -136,7 +136,7 @@ void Shelfbot::motor_command_subscription_callback(const void * msin) {
 }
 
 void Shelfbot::set_speed_subscription_callback(const void * msin) {
-    const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msin;
+    const auto * msg = static_cast<const std_msgs__msg__Float32MultiArray *>(msin);
     const size_t count = std::min(static_cast<size_t>(NUM_MOTORS), msg->data.size);
     for (size_t i = 0; i < count; i++) {
         motor_control_set_velocity(static_cast<uint8_t>(i), msg->data.data[i]);
@@ -144,7 +144,7 @@ void Shelfbot::set_speed_subscription_callback(const void * msin) {
 }
 
 void Shelfbot::led_subscription_callback(const void * msin) {
-    const std_msgs__msg__Bool * msg = (const std_msgs__msg__Bool *)msin;
+    const auto * msg = static_cast<const std_msgs__msg__Bool *>(msin);
     led_state = msg->data;
     led_control_set(led_state);
 }
@@ -223,7 +223,7 @@ void Shelfbot::destroy_entities() {
 
 // --- Network services task (static function) ---
 static void network_services_task(void *arg) {
-    Shelfbot* bot = (Shelfbot*)arg;
+    auto* bot = static_cast<Shelfbot*>(arg);
     EventGroupHandle_t wifi_evt = wifi_manager_get_event_group();
 
     ESP_LOGI(TAG, "Network services task: waiting for Wi-Fi connection...");
