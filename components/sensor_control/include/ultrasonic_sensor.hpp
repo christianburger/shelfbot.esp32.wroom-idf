@@ -30,7 +30,7 @@ class UltrasonicSensorArray : public IUltrasonicArray {
 public:
     UltrasonicSensorConfig configs_[SensorCommon::NUM_ULTRASONIC_SENSORS];
     explicit UltrasonicSensorArray(uint8_t num_sensors = SensorCommon::NUM_ULTRASONIC_SENSORS);
-    ~UltrasonicSensorArray();
+    ~UltrasonicSensorArray() override;
 
     bool init() override;
     bool add_sensor(uint8_t index, const UltrasonicSensorConfig& sensor_config) override;

@@ -1,5 +1,4 @@
-// ultrasonic_sensor.cpp
-#include "ultrasonic_sensor.hpp"
+#include <ultrasonic_sensor.hpp>
 
 static auto TAG = "Ultrasonic_Sensor";
 

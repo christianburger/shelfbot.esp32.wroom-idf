@@ -1,5 +1,4 @@
-// tof_sensor.cpp
-#include "tof_sensor.hpp"
+#include <tof_sensor.hpp>
 
 const char* TofSensor::TAG = "TofSensor";
 
