@@ -53,7 +53,7 @@ namespace Reg {
 #define decodeVcselPeriod(reg_val)   (((reg_val) + 1) << 1)
 #define encodeVcselPeriod(period_pclks) (((period_pclks) >> 1) - 1)
 #define calcMacroPeriod(vcsel_period_pclks) \
-    ((((uint32_t)2304 * (vcsel_period_pclks) * 1655) + 500) / 1000)
+    ((((static_cast<uint32_t>(2304U)) * (vcsel_period_pclks) * 1655U) + 500U) / 1000U)
 
 // ═══════════════════════════════════════════════════════════════
 // Constructor / Destructor
@@ -406,17 +406,17 @@ esp_err_t VL53L0X_Driver::performSingleRefCalibration(uint8_t vhv_init_byte) {
 // Timing Calculations (identical to VL53L1)
 // ═══════════════════════════════════════════════════════════════
 uint32_t VL53L0X_Driver::timeoutMclksToMicroseconds(uint16_t timeout_period_mclks, uint8_t vcsel_period_pclks) {
-    uint64_t macro_period_ns = calcMacroPeriod(vcsel_period_pclks);
-    return (uint32_t)(((timeout_period_mclks * macro_period_ns) + (macro_period_ns / 2)) / 1000);
+    const uint64_t macro_period_ns = calcMacroPeriod(vcsel_period_pclks);
+    return static_cast<uint32_t>(((timeout_period_mclks * macro_period_ns) + (macro_period_ns / 2U)) / 1000U);
 }
 
 uint32_t VL53L0X_Driver::timeoutMicrosecondsToMclks(uint32_t timeout_period_us, uint8_t vcsel_period_pclks) {
-    uint64_t macro_period_ns = calcMacroPeriod(vcsel_period_pclks);
-    return (uint32_t)((((uint64_t)timeout_period_us * 1000) + (macro_period_ns / 2)) / macro_period_ns);
+    const uint64_t macro_period_ns = calcMacroPeriod(vcsel_period_pclks);
+    return static_cast<uint32_t>(((static_cast<uint64_t>(timeout_period_us) * 1000U) + (macro_period_ns / 2U)) / macro_period_ns);
 }
 
 uint16_t VL53L0X_Driver::decodeTimeout(uint16_t reg_val) {
-    return (uint16_t)((reg_val & 0x00FF) << (uint16_t)((reg_val & 0xFF00) >> 8)) + 1;
+    return static_cast<uint16_t>((reg_val & 0x00FFU) << static_cast<uint16_t>((reg_val & 0xFF00U) >> 8U)) + 1U;
 }
 
 uint16_t VL53L0X_Driver::encodeTimeout(uint16_t timeout_mclks) {
@@ -432,7 +432,7 @@ uint16_t VL53L0X_Driver::encodeTimeout(uint16_t timeout_mclks) {
     return 0;
 }
 
-void VL53L0X_Driver::getSequenceStepEnables(SequenceStepEnables* enables) {
+void VL53L0X_Driver::getSequenceStepEnables(SequenceStepEnables* enables) const {
     uint8_t seq_cfg;
     readReg8(Reg::SYSTEM_SEQUENCE_CONFIG, &seq_cfg);
     enables->tcc        = (seq_cfg >> 4) & 0x1;
@@ -442,7 +442,7 @@ void VL53L0X_Driver::getSequenceStepEnables(SequenceStepEnables* enables) {
     enables->final_range= (seq_cfg >> 7) & 0x1;
 }
 
-void VL53L0X_Driver::getSequenceStepTimeouts(const SequenceStepEnables* enables, SequenceStepTimeouts* timeouts) {
+void VL53L0X_Driver::getSequenceStepTimeouts(const SequenceStepEnables* enables, SequenceStepTimeouts* timeouts) const {
     uint8_t vcsel_reg;
     readReg8(Reg::PRE_RANGE_CONFIG_VCSEL_PERIOD, &vcsel_reg);
     timeouts->pre_range_vcsel_period_pclks = decodeVcselPeriod(vcsel_reg);

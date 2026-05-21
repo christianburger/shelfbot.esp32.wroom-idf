@@ -131,6 +131,12 @@ void motor_control_set_velocity(const uint8_t index, const double velocity_rad_s
 
 void motor_control_set_position(const uint8_t index, const double position_rad) {
     if (index >= NUM_MOTORS || !steppers[index]) return;
+    if (!std::isfinite(position_rad)) {
+        ESP_LOGW(TAG, "Motor %d: ignoring non-finite position command", index);
+        steppers[index]->stopMove();
+        motor_direction_sign[index] = 0;
+        return;
+    }
 
     const long target_steps = static_cast<long>(position_rad * RADS_TO_STEPS);
     const long current_steps = steppers[index]->getCurrentPosition();

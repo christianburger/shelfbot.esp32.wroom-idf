@@ -126,8 +126,8 @@ private:
     static uint32_t timeoutMicrosecondsToMclks(uint32_t timeout_period_us, uint8_t vcsel_period_pclks);
     static uint16_t decodeTimeout(uint16_t reg_val);
     static uint16_t encodeTimeout(uint16_t timeout_mclks);
-    void getSequenceStepEnables(SequenceStepEnables* enables);
-    void getSequenceStepTimeouts(const SequenceStepEnables* enables, SequenceStepTimeouts* timeouts);
+    void getSequenceStepEnables(SequenceStepEnables* enables) const;
+    void getSequenceStepTimeouts(const SequenceStepEnables* enables, SequenceStepTimeouts* timeouts) const;
 
     // ── Configuration (internal use) ──
     const char* setSignalRateLimit(float limit_mcps) const;
