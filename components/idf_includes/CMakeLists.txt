@@ -1,7 +1,7 @@
 idf_component_register(
-        SRCS "."
-        INCLUDE_DIRS "include"
-        REQUIRES
+    SRCS ""
+    INCLUDE_DIRS "include"
+    REQUIRES
         freertos
         log
         esp_system
@@ -21,5 +21,5 @@ idf_component_register(
         lwip
         json
         micro_ros_espidf_component
-        gin66__fastaccelstepper   # <-- moved here
+        gin66__fastaccelstepper
 )

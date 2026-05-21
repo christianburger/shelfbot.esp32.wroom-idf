@@ -1,13 +1,13 @@
 #include <lydsto.hpp>
 
-static const char* TAG = "LidarDriver_LYDSTO";
+static auto TAG = "LidarDriver_LYDSTO";
 
-static void log_hex_preview(const char* prefix, const uint8_t* data, size_t len) {
+static void log_hex_preview(const char* prefix, const uint8_t* data, const size_t len) {
     char line[3 * 24 + 1] = {0};
     size_t n = (len < 24) ? len : 24;
     size_t off = 0;
     for (size_t i = 0; i < n && off + 4 < sizeof(line); ++i) {
-        int wrote = snprintf(line + off, sizeof(line) - off, "%02X ", data[i]);
+        const int wrote = snprintf(line + off, sizeof(line) - off, "%02X ", data[i]);
         if (wrote <= 0) break;
         off += static_cast<size_t>(wrote);
     }
@@ -25,7 +25,7 @@ static uint8_t crc8_poly4d(const uint8_t* data, size_t len) {
     return crc;
 }
 
-LYDSTO_Driver::LYDSTO_Driver(uart_port_t uart_port, int uart_tx_pin, int uart_rx_pin, uint32_t baud_rate)
+LYDSTO_Driver::LYDSTO_Driver(const uart_port_t uart_port, const int uart_tx_pin, int uart_rx_pin, uint32_t baud_rate)
     : uart_port_(uart_port), uart_tx_pin_(uart_tx_pin), uart_rx_pin_(uart_rx_pin),
       baud_rate_(baud_rate), timeout_ms_(LYDSTO_TIMEOUT_MS),
       initialized_(false), timeout_occurred_(false), parser_len_(0),
@@ -38,10 +38,9 @@ LYDSTO_Driver::~LYDSTO_Driver() {
 const char* LYDSTO_Driver::configure() { return nullptr; }
 
 const char* LYDSTO_Driver::init() {
-    ESP_LOGI(TAG, "UART init start (UART=%d RX=%d TX=%d BAUD=%lu)",
-             static_cast<int>(uart_port_), uart_rx_pin_, uart_tx_pin_, static_cast<unsigned long>(baud_rate_));
+    ESP_LOGI(TAG, "UART init start (UART=%d RX=%d TX=%d BAUD=%lu)", static_cast<int>(uart_port_), uart_rx_pin_, uart_tx_pin_, static_cast<unsigned long>(baud_rate_));
     uart_config_t cfg{};
-    cfg.baud_rate = baud_rate_;
+    cfg.baud_rate = static_cast<int>(baud_rate_);
     cfg.data_bits = UART_DATA_8_BITS;
     cfg.parity = UART_PARITY_DISABLE;
     cfg.stop_bits = UART_STOP_BITS_1;
@@ -57,36 +56,33 @@ const char* LYDSTO_Driver::init() {
 
 const char* LYDSTO_Driver::setup() { return nullptr; }
 const char* LYDSTO_Driver::calibrate() { return nullptr; }
-const char* LYDSTO_Driver::check() { return initialized_ ? nullptr : "Not initialized"; }
+const char* LYDSTO_Driver::check() const { return initialized_ ? nullptr : "Not initialized"; }
 bool LYDSTO_Driver::isReady() const { return initialized_; }
 void LYDSTO_Driver::setTimeout(uint16_t timeout_ms) { timeout_ms_ = timeout_ms; }
-bool LYDSTO_Driver::timeoutOccurred() { return timeout_occurred_; }
-bool LYDSTO_Driver::get_last_packet(uint8_t* out, size_t len) const {
+bool LYDSTO_Driver::timeoutOccurred() const { return timeout_occurred_; }
+bool LYDSTO_Driver::get_last_packet(uint8_t* out, const size_t len) const {
     if (!has_last_packet_ || !out || len < PACKET_LEN) return false;
     memcpy(out, last_packet_, PACKET_LEN);
     return true;
 }
 
-bool LYDSTO_Driver::validPacket(const uint8_t* p) const {
+bool LYDSTO_Driver::validPacket(const uint8_t* p) {
     if (p[0] != COMMAND || p[1] != LENGTH_BYTE) return false;
-    uint16_t start_angle = p[4] | (static_cast<uint16_t>(p[5]) << 8);
-    uint16_t end_angle = p[42] | (static_cast<uint16_t>(p[43]) << 8);
-    if (start_angle > 36000 || end_angle > 36000) return false;
-    uint8_t expected_crc = crc8_poly4d(p, PACKET_LEN - 1);
-    uint8_t frame_crc = p[PACKET_LEN - 1];
-    if (expected_crc != frame_crc) {
+    const uint16_t start_angle = p[4] | (static_cast<uint16_t>(p[5]) << 8);
+    if (const uint16_t end_angle = p[42] | (static_cast<uint16_t>(p[43]) << 8); start_angle > 36000 || end_angle > 36000) return false;
+    const uint8_t expected_crc = crc8_poly4d(p, PACKET_LEN - 1);
+    if (const uint8_t frame_crc = p[PACKET_LEN - 1]; expected_crc != frame_crc) {
         return false;
     }
     return true;
 }
 
-bool LYDSTO_Driver::extractMinDistance(const uint8_t* p, uint16_t& min_mm, int& min_idx) const {
+bool LYDSTO_Driver::extractMinDistance(const uint8_t* p, uint16_t& min_mm, int& min_idx) {
     min_mm = 0xFFFF;
     min_idx = -1;
     for (int i = 0; i < 12; ++i) {
-        int off = 6 + i * 3;
-        uint16_t mm = p[off] | (static_cast<uint16_t>(p[off + 1]) << 8);
-        if (mm > 0 && mm < min_mm) {
+        const int off = 6 + i * 3;
+        if (const uint16_t mm = p[off] | (static_cast<uint16_t>(p[off + 1]) << 8); mm > 0 && mm < min_mm) {
             min_mm = mm;
             min_idx = i;
         }
@@ -96,7 +92,7 @@ bool LYDSTO_Driver::extractMinDistance(const uint8_t* p, uint16_t& min_mm, int& 
 
 bool LYDSTO_Driver::readPacket(uint8_t* packet) {
     timeout_occurred_ = false;
-    int64_t deadline = esp_timer_get_time() + static_cast<int64_t>(timeout_ms_) * 1000;
+    const int64_t deadline = esp_timer_get_time() + static_cast<int64_t>(timeout_ms_) * 1000;
     uint8_t rx_tmp[128];
     static int sample_log_budget = 8;
     while (esp_timer_get_time() < deadline) {
@@ -110,8 +106,8 @@ bool LYDSTO_Driver::readPacket(uint8_t* packet) {
                 log_hex_preview("RX chunk", rx_tmp, static_cast<size_t>(n));
                 sample_log_budget--;
             }
-            size_t space = sizeof(parser_buf_) - parser_len_;
-            size_t copy_n = (static_cast<size_t>(n) < space) ? static_cast<size_t>(n) : space;
+            const size_t space = sizeof(parser_buf_) - parser_len_;
+            const size_t copy_n = (static_cast<size_t>(n) < space) ? static_cast<size_t>(n) : space;
             memcpy(parser_buf_ + parser_len_, rx_tmp, copy_n);
             parser_len_ += copy_n;
 
@@ -131,7 +127,7 @@ bool LYDSTO_Driver::readPacket(uint8_t* packet) {
             }
 
             if (parser_len_ > PACKET_LEN) {
-                size_t keep = PACKET_LEN - 1;
+                constexpr size_t keep = PACKET_LEN - 1;
                 memmove(parser_buf_, parser_buf_ + (parser_len_ - keep), keep);
                 parser_len_ = keep;
             }
@@ -177,10 +173,10 @@ bool LYDSTO_Driver::read_sensor(MeasurementResult& result) {
     }
     uint16_t mm;
     int min_idx = -1;
-    uint16_t sa = p[4] | (static_cast<uint16_t>(p[5]) << 8);
-    uint16_t ea = p[42] | (static_cast<uint16_t>(p[43]) << 8);
-    float start_deg = sa / 100.0f;
-    float end_deg = ea / 100.0f;
+    const uint16_t sa = p[4] | (static_cast<uint16_t>(p[5]) << 8);
+    const uint16_t ea = p[42] | (static_cast<uint16_t>(p[43]) << 8);
+    const float start_deg = static_cast<float>(sa) / 100.0f;
+    const float end_deg = static_cast<float>(ea) / 100.0f;
     float span = end_deg - start_deg;
     if (span < 0.0f) span += 360.0f;
     result.start_angle_deg = start_deg;

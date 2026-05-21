@@ -21,24 +21,24 @@ public:
         float    min_distance_angle_deg;
     };
 
-    LYDSTO_Driver(uart_port_t uart_port = LYDSTO_UART_PORT,
-                  int uart_tx_pin = LYDSTO_TX_PIN,
-                  int uart_rx_pin = LYDSTO_RX_PIN,
-                  uint32_t baud_rate = LYDSTO_BAUD_RATE);
+    explicit LYDSTO_Driver(uart_port_t uart_port = LYDSTO_UART_PORT,
+                           int uart_tx_pin = LYDSTO_TX_PIN,
+                           int uart_rx_pin = LYDSTO_RX_PIN,
+                           uint32_t baud_rate = LYDSTO_BAUD_RATE);
     ~LYDSTO_Driver();
 
-    const char* configure();
+    static const char* configure();
     const char* init();
-    const char* setup();
-    const char* calibrate();
-    const char* check();
+    static const char* setup();
+    static const char* calibrate();
+    [[nodiscard]] const char* check() const;
     bool read_sensor(MeasurementResult& result);
-    bool isReady() const;
+    [[nodiscard]] bool isReady() const;
 
     void setTimeout(uint16_t timeout_ms);
-    bool timeoutOccurred();
+    [[nodiscard]] bool timeoutOccurred() const;
     bool get_last_packet(uint8_t* out, size_t len) const;
-    uint32_t get_packet_count() const { return valid_packets_; }
+    [[nodiscard]] uint32_t get_packet_count() const { return valid_packets_; }
 
     LYDSTO_Driver(const LYDSTO_Driver&) = delete;
     LYDSTO_Driver& operator=(const LYDSTO_Driver&) = delete;
@@ -56,16 +56,16 @@ private:
 
     bool initialized_;
     bool timeout_occurred_;
-    uint8_t parser_buf_[512];
+    uint8_t parser_buf_[512]{};
     size_t parser_len_;
     uint32_t total_rx_bytes_;
     uint32_t header_fa_hits_;
     uint32_t valid_packets_;
     uint32_t failed_reads_;
-    uint8_t last_packet_[47];
+    uint8_t last_packet_[47]{};
     bool has_last_packet_;
 
     bool readPacket(uint8_t* packet);
-    bool validPacket(const uint8_t* packet) const;
-    bool extractMinDistance(const uint8_t* packet, uint16_t& min_mm, int& min_idx) const;
+    static bool validPacket(const uint8_t* packet) ;
+    static bool extractMinDistance(const uint8_t* packet, uint16_t& min_mm, int& min_idx) ;
 };
