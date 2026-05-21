@@ -13,9 +13,8 @@ static UltrasonicSensorArray* g_array = nullptr;
 // ============================================================================
 // ISR Handlers
 // ============================================================================
-
 static void IRAM_ATTR echo_isr_handler(void* arg) {
-    const int sensor_idx = (int)reinterpret_cast<intptr_t>(arg);
+    const int sensor_idx = reinterpret_cast<intptr_t>(arg);
     if (sensor_idx < 0 || sensor_idx >= SensorCommon::NUM_ULTRASONIC_SENSORS || !g_array) return;
 
     UltrasonicSensorConfig& cfg = g_array->configs_[sensor_idx];

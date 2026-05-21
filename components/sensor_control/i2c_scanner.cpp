@@ -1,5 +1,5 @@
-#include "include/i2c_scanner.hpp"
-#include "vl53l0x.hpp" // Ensure defines are visible if not in header
+#include <i2c_scanner.hpp>
+#include <vl53l0x.hpp>
 
 const char* I2CScanner::TAG = "I2C_SCANNER";
 

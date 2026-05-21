@@ -1,5 +1,4 @@
-#include "include/lidar_packet_parser.hpp"
-#include <sstream>
+#include <lidar_packet_parser.hpp>
 static uint8_t crc8_poly4d(const uint8_t* data, size_t len) {
     uint8_t crc = 0x00;
     for (size_t i = 0; i < len; ++i) {

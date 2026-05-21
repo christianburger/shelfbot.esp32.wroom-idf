@@ -3,10 +3,10 @@
 #include <sensor_common.hpp>
 #include <sensor_control.hpp>
 #include <motor_control.hpp>
-#include <../../led_control/include/led_control.hpp>
-#include <wifi_manager.hpp>
+#include <led_control.hpp>
+#include <../../wifi_manager/include/wifi_manager.hpp>
 #include <http_server.hpp>
-#include <../../firmware_version/include/firmware_version.hpp>
+#include <firmware_version.hpp>
 
 #define RCCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){ESP_LOGE(TAG, "RCL error in %s: %d", #fn, (int)temp_rc);}}
 #define RCSOFTCHECK(fn) { rcl_ret_t temp_rc = fn; if((temp_rc != RCL_RET_OK)){ESP_LOGW(TAG, "RCL soft error in %s: %d", #fn, (int)temp_rc);}}
