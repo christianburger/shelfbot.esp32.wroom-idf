@@ -858,7 +858,7 @@ const char* VL53L0X_Driver::calibrate() {
     }
     ESP_LOGI(TAG, "Running calibrations...");
     if (ESP_OK != writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0x01)) {
-       return nullptr;
+       return "Failed to write SYSTEM_SEQUENCE_CONFIG (VHV)";
     }
     esp_err_t err = performSingleRefCalibration(0x40);
     if (err != ESP_OK) {
@@ -868,7 +868,7 @@ const char* VL53L0X_Driver::calibrate() {
     ESP_LOGI(TAG, "VHV calibration OK");
 
     if (ESP_OK != writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0x02)) {
-        return nullptr;
+        return "Failed to write SYSTEM_SEQUENCE_CONFIG (phase)";
     }
     err = performSingleRefCalibration(0x00);
     if (err != ESP_OK) {
@@ -878,7 +878,7 @@ const char* VL53L0X_Driver::calibrate() {
     ESP_LOGI(TAG, "Phase calibration OK");
 
     if (ESP_OK != writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0xE8)) {
-        return nullptr;
+        return "Failed to restore SYSTEM_SEQUENCE_CONFIG";
     }
 
     ESP_LOGI(TAG, "Calibration complete");
@@ -914,28 +914,36 @@ bool VL53L0X_Driver::read_sensor(MeasurementResult& result) {
 
     // Prepare for measurement
     if (ESP_OK != writeReg8(0x80, 0x01)) {
+       unlockI2C();
        return false;
     }
     if (ESP_OK != writeReg8(0xFF, 0x01)) {
+        unlockI2C();
         return false;
     }
     if (ESP_OK != writeReg8(0x00, 0x00)) {
+        unlockI2C();
         return false;
     }
     if (ESP_OK != writeReg8(0x91, stop_variable_)) {
+        unlockI2C();
         return false;
     }
     if (ESP_OK != writeReg8(0x00, 0x01)) {
+        unlockI2C();
         return false;
     }
     if (ESP_OK != writeReg8(0xFF, 0x00)) {
+        unlockI2C();
         return false;
     }
     if (ESP_OK != writeReg8(0x80, 0x00)) {
+        unlockI2C();
         return false;
     }
     // Start measurement
     if (ESP_OK != writeReg8(Reg::SYSRANGE_START, 0x01)) {
+        unlockI2C();
         return false;
     }
 

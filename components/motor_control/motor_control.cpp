@@ -130,7 +130,21 @@ void motor_control_set_velocity(const uint8_t index, const double velocity_rad_s
 }
 
 void motor_control_set_position(const uint8_t index, const double position_rad) {
-    motor_control_apply(index, position_rad, 0.0);
+    if (index >= NUM_MOTORS || !steppers[index]) return;
+
+    const long target_steps = static_cast<long>(position_rad * RADS_TO_STEPS);
+    const long current_steps = steppers[index]->getCurrentPosition();
+    if (target_steps > current_steps) {
+        motor_direction_sign[index] = 1;
+    } else if (target_steps < current_steps) {
+        motor_direction_sign[index] = -1;
+    } else {
+        motor_direction_sign[index] = 0;
+    }
+
+    steppers[index]->setSpeedInHz(DEFAULT_SPEED_HZ);
+    steppers[index]->setAcceleration(DEFAULT_ACCEL_HZ_S);
+    steppers[index]->moveTo(target_steps);
 }
 
 // ---------------------------------------------------------------------------
