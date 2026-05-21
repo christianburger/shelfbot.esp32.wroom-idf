@@ -69,7 +69,7 @@ private:
     std_msgs__msg__Float32MultiArray set_speed_msg{};
     std_msgs__msg__Bool led_msg{};
 
-    float motor_pos_data[2]{};
+    float motor_pos_data[NUM_MOTORS]{};
     float distance_sensors_data[SensorCommon::NUM_SENSORS]{};
 
     std::unique_ptr<SensorControl> sensor_control_ = {

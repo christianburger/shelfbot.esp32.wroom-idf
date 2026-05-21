@@ -53,7 +53,7 @@ namespace Reg {
 #define decodeVcselPeriod(reg_val)   (((reg_val) + 1) << 1)
 #define encodeVcselPeriod(period_pclks) (((period_pclks) >> 1) - 1)
 #define calcMacroPeriod(vcsel_period_pclks) \
-    ((((uint32_t)2304 * (vcsel_period_pclks) * 1655) + 500) / 1000)
+    ((((static_cast<uint32_t>(2304U)) * (vcsel_period_pclks) * 1655U) + 500U) / 1000U)
 
 // ═══════════════════════════════════════════════════════════════
 // Constructor / Destructor
@@ -406,35 +406,33 @@ esp_err_t VL53L0X_Driver::performSingleRefCalibration(uint8_t vhv_init_byte) {
 // Timing Calculations (identical to VL53L1)
 // ═══════════════════════════════════════════════════════════════
 uint32_t VL53L0X_Driver::timeoutMclksToMicroseconds(uint16_t timeout_period_mclks, uint8_t vcsel_period_pclks) {
-    uint64_t macro_period_ns = calcMacroPeriod(vcsel_period_pclks);
-    return (uint32_t)(((timeout_period_mclks * macro_period_ns) + (macro_period_ns / 2)) / 1000);
+    const uint64_t macro_period_ns = calcMacroPeriod(vcsel_period_pclks);
+    return static_cast<uint32_t>(((timeout_period_mclks * macro_period_ns) + (macro_period_ns / 2U)) / 1000U);
 }
 
 uint32_t VL53L0X_Driver::timeoutMicrosecondsToMclks(uint32_t timeout_period_us, uint8_t vcsel_period_pclks) {
-    uint64_t macro_period_ns = calcMacroPeriod(vcsel_period_pclks);
-    return (uint32_t)((((uint64_t)timeout_period_us * 1000) + (macro_period_ns / 2)) / macro_period_ns);
+    const uint64_t macro_period_ns = calcMacroPeriod(vcsel_period_pclks);
+    return static_cast<uint32_t>(((static_cast<uint64_t>(timeout_period_us) * 1000U) + (macro_period_ns / 2U)) / macro_period_ns);
 }
 
 uint16_t VL53L0X_Driver::decodeTimeout(uint16_t reg_val) {
-    return (uint16_t)((reg_val & 0x00FF) << (uint16_t)((reg_val & 0xFF00) >> 8)) + 1;
+    return static_cast<uint16_t>((reg_val & 0x00FFU) << static_cast<uint16_t>((reg_val & 0xFF00U) >> 8U)) + 1U;
 }
 
 uint16_t VL53L0X_Driver::encodeTimeout(uint16_t timeout_mclks) {
-    uint32_t ls_byte = 0;
-    uint16_t ms_byte = 0;
-
     if (timeout_mclks > 0) {
-        ls_byte = timeout_mclks - 1;
+        uint32_t ls_byte = timeout_mclks - 1;
+        uint16_t ms_byte = 0;
         while ((ls_byte & 0xFFFFFF00) > 0) {
             ls_byte >>= 1;
             ms_byte++;
         }
-        return (ms_byte << 8) | (uint16_t)(ls_byte & 0xFF);
+        return static_cast<uint16_t>((ms_byte << 8) | static_cast<uint16_t>(ls_byte & 0xFF));
     }
     return 0;
 }
 
-void VL53L0X_Driver::getSequenceStepEnables(SequenceStepEnables* enables) {
+void VL53L0X_Driver::getSequenceStepEnables(SequenceStepEnables* enables) const {
     uint8_t seq_cfg;
     readReg8(Reg::SYSTEM_SEQUENCE_CONFIG, &seq_cfg);
     enables->tcc        = (seq_cfg >> 4) & 0x1;
@@ -444,7 +442,7 @@ void VL53L0X_Driver::getSequenceStepEnables(SequenceStepEnables* enables) {
     enables->final_range= (seq_cfg >> 7) & 0x1;
 }
 
-void VL53L0X_Driver::getSequenceStepTimeouts(SequenceStepEnables* enables, SequenceStepTimeouts* timeouts) {
+void VL53L0X_Driver::getSequenceStepTimeouts(const SequenceStepEnables* enables, SequenceStepTimeouts* timeouts) const {
     uint8_t vcsel_reg;
     readReg8(Reg::PRE_RANGE_CONFIG_VCSEL_PERIOD, &vcsel_reg);
     timeouts->pre_range_vcsel_period_pclks = decodeVcselPeriod(vcsel_reg);
@@ -497,13 +495,13 @@ const char* VL53L0X_Driver::setMeasurementTimingBudget(uint32_t budget_us) {
     getSequenceStepEnables(&enables);
     getSequenceStepTimeouts(&enables, &timeouts);
 
-    const uint32_t StartOverhead = 1910;
-    const uint32_t EndOverhead = 960;
-    const uint32_t MsrcOverhead = 660;
-    const uint32_t TccOverhead = 590;
-    const uint32_t DssOverhead = 690;
-    const uint32_t PreRangeOverhead = 660;
-    const uint32_t FinalRangeOverhead = 550;
+    constexpr uint32_t StartOverhead = 1910;
+    constexpr uint32_t EndOverhead = 960;
+    constexpr uint32_t MsrcOverhead = 660;
+    constexpr uint32_t TccOverhead = 590;
+    constexpr uint32_t DssOverhead = 690;
+    constexpr uint32_t PreRangeOverhead = 660;
+    constexpr uint32_t FinalRangeOverhead = 550;
 
     uint32_t used_budget_us = StartOverhead + EndOverhead;
 
@@ -598,25 +596,25 @@ const char* VL53L0X_Driver::setVcselPulsePeriod(uint8_t type, uint8_t period_pcl
     getSequenceStepTimeouts(&enables, &timeouts);
 
     if (type == 0) {  // Pre-range
-        writeReg8(Reg::PRE_RANGE_CONFIG_VCSEL_PERIOD, vcsel_period_reg);
+        (void)writeReg8(Reg::PRE_RANGE_CONFIG_VCSEL_PERIOD, vcsel_period_reg);
 
         const uint16_t new_pre_range_timeout_mclks = timeoutMicrosecondsToMclks(timeouts.pre_range_us, period_pclks);
-        writeReg16(Reg::PRE_RANGE_CONFIG_TIMEOUT_MACROP_HI, encodeTimeout(new_pre_range_timeout_mclks));
+        (void)writeReg16(Reg::PRE_RANGE_CONFIG_TIMEOUT_MACROP_HI, encodeTimeout(new_pre_range_timeout_mclks));
 
         const uint16_t new_msrc_timeout_mclks = timeoutMicrosecondsToMclks(timeouts.msrc_dss_tcc_us, period_pclks);
-        writeReg8(Reg::MSRC_CONFIG_TIMEOUT_MACROP, (new_msrc_timeout_mclks > 256) ? 255 : (uint8_t)(new_msrc_timeout_mclks - 1));
+        (void)writeReg8(Reg::MSRC_CONFIG_TIMEOUT_MACROP, (new_msrc_timeout_mclks > 256) ? 255 : static_cast<uint8_t>(new_msrc_timeout_mclks - 1));
     } else {  // Final range
-        writeReg8(Reg::FINAL_RANGE_CONFIG_VCSEL_PERIOD, vcsel_period_reg);
+        (void)writeReg8(Reg::FINAL_RANGE_CONFIG_VCSEL_PERIOD, vcsel_period_reg);
 
         uint16_t new_final_range_timeout_mclks = timeoutMicrosecondsToMclks(timeouts.final_range_us, period_pclks);
 
         if (enables.pre_range) {
             new_final_range_timeout_mclks += timeouts.pre_range_mclks;
         }
-        writeReg16(Reg::FINAL_RANGE_CONFIG_TIMEOUT_MACROP_HI, encodeTimeout(new_final_range_timeout_mclks));
+        (void)writeReg16(Reg::FINAL_RANGE_CONFIG_TIMEOUT_MACROP_HI, encodeTimeout(new_final_range_timeout_mclks));
     }
 
-    setMeasurementTimingBudget(measurement_timing_budget_us_);
+    (void)setMeasurementTimingBudget(measurement_timing_budget_us_);
     return nullptr;
 }
 
@@ -746,7 +744,7 @@ const char* VL53L0X_Driver::setup() {
     }
 
     // Ensure register page 0 and allow FW boot completion (datasheet tBOOT <= 1.2ms)
-    writeReg8(0xFF, 0x00);
+    (void)writeReg8(0xFF, 0x00);
     vTaskDelay(pdMS_TO_TICKS(5));
 
     // Validate sensor identity using reference registers from datasheet/API examples
@@ -758,17 +756,17 @@ const char* VL53L0X_Driver::setup() {
     esp_err_t err = ESP_FAIL;
 
     for (int attempt = 0; attempt < 5; ++attempt) {
-        writeReg8(0xFF, 0x00);
+        (void)writeReg8(0xFF, 0x00);
         err = readReg8(Reg::IDENTIFICATION_MODEL_ID, &model_id);
         if (err != ESP_OK) {
             vTaskDelay(pdMS_TO_TICKS(5));
             continue;
         }
 
-        readReg8(0xC1, &module_type);
-        readReg8(Reg::IDENTIFICATION_REVISION_ID, &revision_id);
-        readReg8(0x51, &reg_0x51);
-        readReg8(0x61, &reg_0x61);
+        (void)readReg8(0xC1, &module_type);
+        (void)readReg8(Reg::IDENTIFICATION_REVISION_ID, &revision_id);
+        (void)readReg8(0x51, &reg_0x51);
+        (void)readReg8(0x61, &reg_0x61);
 
         if (model_id == 0xEE) {
             break;
@@ -797,18 +795,18 @@ const char* VL53L0X_Driver::setup() {
     if (io_2v8_) {
         uint8_t ext_sup_hv = 0;
         if (readReg8(Reg::VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV, &ext_sup_hv) == ESP_OK) {
-            writeReg8(Reg::VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV, ext_sup_hv | 0x01);
+            (void)writeReg8(Reg::VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV, ext_sup_hv | 0x01);
         }
     }
 
     // Access stop variable using hidden register page sequence
-    writeReg8(0x80, 0x01);
-    writeReg8(0xFF, 0x01);
-    writeReg8(0x00, 0x00);
+    (void)writeReg8(0x80, 0x01);
+    (void)writeReg8(0xFF, 0x01);
+    (void)writeReg8(0x00, 0x00);
     err = readReg8(0x91, &stop_variable_);
-    writeReg8(0x00, 0x01);
-    writeReg8(0xFF, 0x00);
-    writeReg8(0x80, 0x00);
+    (void)writeReg8(0x00, 0x01);
+    (void)writeReg8(0xFF, 0x00);
+    (void)writeReg8(0x80, 0x00);
     if (err != ESP_OK) {
         unlockI2C();
         return "Failed to read stop variable";
@@ -824,10 +822,10 @@ const char* VL53L0X_Driver::setup() {
     uint8_t msrc_config;
     err = readReg8(Reg::MSRC_CONFIG_CONTROL, &msrc_config);
     if (err == ESP_OK) {
-        writeReg8(Reg::MSRC_CONFIG_CONTROL, msrc_config | 0x12);
+        (void)writeReg8(Reg::MSRC_CONFIG_CONTROL, msrc_config | 0x12);
     }
 
-    setSignalRateLimit(signal_rate_limit_mcps_);
+    (void)setSignalRateLimit(signal_rate_limit_mcps_);
 
     uint8_t spad_count;
     bool spad_type_is_aperture;
@@ -836,15 +834,15 @@ const char* VL53L0X_Driver::setup() {
         ESP_LOGW(TAG, "SPAD configuration warning (continuing)");
     }
 
-    writeReg8(Reg::SYSTEM_INTERRUPT_CONFIG_GPIO, 0x04);
+    (void)writeReg8(Reg::SYSTEM_INTERRUPT_CONFIG_GPIO, 0x04);
     uint8_t gpio_mux;
-    readReg8(Reg::GPIO_HV_MUX_ACTIVE_HIGH, &gpio_mux);
-    writeReg8(Reg::GPIO_HV_MUX_ACTIVE_HIGH, gpio_mux & ~0x10);
-    writeReg8(Reg::SYSTEM_INTERRUPT_CLEAR, 0x01);
+    (void)readReg8(Reg::GPIO_HV_MUX_ACTIVE_HIGH, &gpio_mux);
+    (void)writeReg8(Reg::GPIO_HV_MUX_ACTIVE_HIGH, gpio_mux & ~0x10);
+    (void)writeReg8(Reg::SYSTEM_INTERRUPT_CLEAR, 0x01);
 
     measurement_timing_budget_us_ = getMeasurementTimingBudget();
-    writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0xE8);
-    setMeasurementTimingBudget(timing_budget_us_);
+    (void)writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0xE8);
+    (void)setMeasurementTimingBudget(timing_budget_us_);
     ESP_LOGI(TAG, "Timing budget set: %lu us", timing_budget_us_);
 
     unlockI2C();
@@ -858,7 +856,7 @@ const char* VL53L0X_Driver::calibrate() {
     }
     ESP_LOGI(TAG, "Running calibrations...");
     if (ESP_OK != writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0x01)) {
-       return nullptr;
+       return "Failed to write SYSTEM_SEQUENCE_CONFIG (VHV)";
     }
     esp_err_t err = performSingleRefCalibration(0x40);
     if (err != ESP_OK) {
@@ -868,7 +866,7 @@ const char* VL53L0X_Driver::calibrate() {
     ESP_LOGI(TAG, "VHV calibration OK");
 
     if (ESP_OK != writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0x02)) {
-        return nullptr;
+        return "Failed to write SYSTEM_SEQUENCE_CONFIG (phase)";
     }
     err = performSingleRefCalibration(0x00);
     if (err != ESP_OK) {
@@ -878,7 +876,7 @@ const char* VL53L0X_Driver::calibrate() {
     ESP_LOGI(TAG, "Phase calibration OK");
 
     if (ESP_OK != writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0xE8)) {
-        return nullptr;
+        return "Failed to restore SYSTEM_SEQUENCE_CONFIG";
     }
 
     ESP_LOGI(TAG, "Calibration complete");
@@ -914,28 +912,36 @@ bool VL53L0X_Driver::read_sensor(MeasurementResult& result) {
 
     // Prepare for measurement
     if (ESP_OK != writeReg8(0x80, 0x01)) {
+       unlockI2C();
        return false;
     }
     if (ESP_OK != writeReg8(0xFF, 0x01)) {
+        unlockI2C();
         return false;
     }
     if (ESP_OK != writeReg8(0x00, 0x00)) {
+        unlockI2C();
         return false;
     }
     if (ESP_OK != writeReg8(0x91, stop_variable_)) {
+        unlockI2C();
         return false;
     }
     if (ESP_OK != writeReg8(0x00, 0x01)) {
+        unlockI2C();
         return false;
     }
     if (ESP_OK != writeReg8(0xFF, 0x00)) {
+        unlockI2C();
         return false;
     }
     if (ESP_OK != writeReg8(0x80, 0x00)) {
+        unlockI2C();
         return false;
     }
     // Start measurement
     if (ESP_OK != writeReg8(Reg::SYSRANGE_START, 0x01)) {
+        unlockI2C();
         return false;
     }
 
