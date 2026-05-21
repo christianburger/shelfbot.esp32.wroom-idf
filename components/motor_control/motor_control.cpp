@@ -1,6 +1,6 @@
 #include <motor_control.hpp>
 
-static const char* TAG = "motor_control";
+static auto TAG = "motor_control";
 
 static FastAccelStepperEngine engine;
 static FastAccelStepper* steppers[NUM_MOTORS] = {nullptr};
@@ -27,7 +27,6 @@ static constexpr double VEL_DEADBAND = 1e-4;
 // ---------------------------------------------------------------------------
 // Helpers
 // ---------------------------------------------------------------------------
-
 static inline long vel_to_hz(double velocity_rad_s) {
     return static_cast<long>(fabs(velocity_rad_s) * RADS_TO_STEPS);
 }
@@ -35,7 +34,6 @@ static inline long vel_to_hz(double velocity_rad_s) {
 // ---------------------------------------------------------------------------
 // Lifecycle
 // ---------------------------------------------------------------------------
-
 void motor_control_begin() {
     ESP_LOGI(TAG, "Initializing motor system (RADS_TO_STEPS=%.4f)", RADS_TO_STEPS);
     engine.init();
@@ -68,7 +66,6 @@ void motor_control_begin() {
 //  position != 0, vel != 0   → move to position at |velocity| speed
 //  position != 0, vel == 0   → move to position at default speed
 // ---------------------------------------------------------------------------
-
 void motor_control_apply(const uint8_t index,
                          const double   position_rad,
                          const double   velocity_rad_s) {
@@ -127,7 +124,6 @@ void motor_control_apply(const uint8_t index,
 // ---------------------------------------------------------------------------
 // Individual setters (thin wrappers around motor_control_apply)
 // ---------------------------------------------------------------------------
-
 void motor_control_set_velocity(const uint8_t index, const double velocity_rad_s) {
     // Position stays unchanged: pass 0 to select continuous-velocity mode
     motor_control_apply(index, 0.0, velocity_rad_s);
@@ -140,7 +136,6 @@ void motor_control_set_position(const uint8_t index, const double position_rad) 
 // ---------------------------------------------------------------------------
 // Getters — both return signed values
 // ---------------------------------------------------------------------------
-
 double motor_control_get_position(const uint8_t index) {
     if (index >= NUM_MOTORS || !steppers[index]) return 0.0;
     return static_cast<double>(steppers[index]->getCurrentPosition()) / RADS_TO_STEPS;
@@ -161,7 +156,6 @@ double motor_control_get_velocity(const uint8_t index) {
 // ---------------------------------------------------------------------------
 // Utility
 // ---------------------------------------------------------------------------
-
 void motor_control_set_speed_hz(const uint8_t index, const long speed_hz) {
     if (index >= NUM_MOTORS || !steppers[index]) return;
     steppers[index]->setSpeedInHz(speed_hz);
@@ -200,7 +194,6 @@ void motor_control_stop_all_motors() {
 // ---------------------------------------------------------------------------
 // DEPRECATED — degree-based wrappers for REST API
 // ---------------------------------------------------------------------------
-
 void motor_control_set_motor_position_double(const uint8_t index, const double position_deg) {
     motor_control_set_position(index, position_deg * (M_PI / 180.0));
 }

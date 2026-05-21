@@ -124,7 +124,7 @@ VL53L0X_Driver::~VL53L0X_Driver() {
 // ═══════════════════════════════════════════════════════════════
 bool VL53L0X_Driver::lockI2C() {
   if (!shared_i2c_mutex_) return false;
-  bool locked = xSemaphoreTake(shared_i2c_mutex_, pdMS_TO_TICKS(1000)) == pdTRUE;
+  const bool locked = xSemaphoreTake(shared_i2c_mutex_, pdMS_TO_TICKS(1000)) == pdTRUE;
   if (!locked) {
     ESP_LOGE(TAG, "I2C lock acquire failed");
   }
@@ -140,57 +140,57 @@ void VL53L0X_Driver::unlockI2C() {
 // ═══════════════════════════════════════════════════════════════
 // I2C Operations
 // ═══════════════════════════════════════════════════════════════
-esp_err_t VL53L0X_Driver::writeReg8(uint8_t reg, uint8_t value) {
+esp_err_t VL53L0X_Driver::writeReg8(const uint8_t reg, const uint8_t value) const {
     uint8_t buf[2] = {reg, value};
     return i2c_master_transmit(dev_handle_, buf, 2, timeout_ms_);
 }
 
-esp_err_t VL53L0X_Driver::writeReg16(uint8_t reg, uint16_t value) {
-    uint8_t buf[3] = {reg, (uint8_t)(value >> 8), (uint8_t)(value & 0xFF)};
+esp_err_t VL53L0X_Driver::writeReg16(const uint8_t reg, const uint16_t value) const {
+    const uint8_t buf[3] = {reg, static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value & 0xFF)};
     return i2c_master_transmit(dev_handle_, buf, 3, timeout_ms_);
 }
 
-esp_err_t VL53L0X_Driver::writeReg32(uint8_t reg, uint32_t value) {
-    uint8_t buf[5] = {
+esp_err_t VL53L0X_Driver::writeReg32(const uint8_t reg, const uint32_t value) const {
+    const uint8_t buf[5] = {
         reg,
-        (uint8_t)(value >> 24),
-        (uint8_t)(value >> 16),
-        (uint8_t)(value >> 8),
-        (uint8_t)(value)
+        static_cast<uint8_t>(value >> 24),
+        static_cast<uint8_t>(value >> 16),
+        static_cast<uint8_t>(value >> 8),
+        static_cast<uint8_t>(value)
     };
     return i2c_master_transmit(dev_handle_, buf, 5, timeout_ms_);
 }
 
-esp_err_t VL53L0X_Driver::readReg8(uint8_t reg, uint8_t* value) {
+esp_err_t VL53L0X_Driver::readReg8(const uint8_t reg, uint8_t* value) const {
     return i2c_master_transmit_receive(dev_handle_, &reg, 1, value, 1, timeout_ms_);
 }
 
-esp_err_t VL53L0X_Driver::readReg16(uint8_t reg, uint16_t* value) {
+esp_err_t VL53L0X_Driver::readReg16(const uint8_t reg, uint16_t* value) const {
     uint8_t buf[2];
-    esp_err_t err = i2c_master_transmit_receive(dev_handle_, &reg, 1, buf, 2, timeout_ms_);
+    const esp_err_t err = i2c_master_transmit_receive(dev_handle_, &reg, 1, buf, 2, timeout_ms_);
     if (err == ESP_OK) {
         *value = (buf[0] << 8) | buf[1];
     }
     return err;
 }
 
-esp_err_t VL53L0X_Driver::readReg32(uint8_t reg, uint32_t* value) {
+esp_err_t VL53L0X_Driver::readReg32(const uint8_t reg, uint32_t* value) const {
     uint8_t buf[4];
-    esp_err_t err = i2c_master_transmit_receive(dev_handle_, &reg, 1, buf, 4, timeout_ms_);
+    const esp_err_t err = i2c_master_transmit_receive(dev_handle_, &reg, 1, buf, 4, timeout_ms_);
     if (err == ESP_OK) {
         *value = (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3];
     }
     return err;
 }
 
-esp_err_t VL53L0X_Driver::writeMulti(uint8_t reg, const uint8_t* src, uint8_t count) {
+esp_err_t VL53L0X_Driver::writeMulti(const uint8_t reg, const uint8_t* src, const uint8_t count) const {
     std::vector<uint8_t> buf(count + 1);
     buf[0] = reg;
     std::memcpy(&buf[1], src, count);
     return i2c_master_transmit(dev_handle_, buf.data(), buf.size(), timeout_ms_);
 }
 
-esp_err_t VL53L0X_Driver::readMulti(uint8_t reg, uint8_t* dst, uint8_t count) {
+esp_err_t VL53L0X_Driver::readMulti(const uint8_t reg, uint8_t* dst, const uint8_t count) const {
     return i2c_master_transmit_receive(dev_handle_, &reg, 1, dst, count, timeout_ms_);
 }
 
@@ -214,21 +214,20 @@ bool VL53L0X_Driver::loadRegisterSequence(const char* csv_data, std::vector<Regi
         std::getline(ls, comment);
 
         RegisterWrite w;
-        w.reg      = (uint8_t)std::stoul(reg_str, nullptr, 16);
-        w.value    = (uint8_t)std::stoul(val_str, nullptr, 16);
-        w.delay_ms = (uint16_t)std::stoul(delay_str);
+        w.reg      = static_cast<uint8_t>(std::stoul(reg_str, nullptr, 16));
+        w.value    = static_cast<uint8_t>(std::stoul(val_str, nullptr, 16));
+        w.delay_ms = static_cast<uint16_t>(std::stoul(delay_str));
         w.comment  = comment;
         sequence.push_back(w);
     }
     return !sequence.empty();
 }
 
-esp_err_t VL53L0X_Driver::executeRegisterSequence(const std::vector<RegisterWrite>& sequence) {
-    for (const auto& w : sequence) {
-        esp_err_t err = writeReg8(w.reg, w.value);
-        if (err != ESP_OK) {
+esp_err_t VL53L0X_Driver::executeRegisterSequence(const std::vector<RegisterWrite>& seq) const {
+    for (const auto& w : seq) {
+        if (const esp_err_t err = writeReg8(w.reg, w.value); err != ESP_OK) {
             ESP_LOGE(TAG, "Failed to write 0x%02X=0x%02X: %s", w.reg, w.value, esp_err_to_name(err));
-            return err;
+            return ESP_FAIL;
         }
         if (w.delay_ms > 0) {
             vTaskDelay(pdMS_TO_TICKS(w.delay_ms));
@@ -237,7 +236,7 @@ esp_err_t VL53L0X_Driver::executeRegisterSequence(const std::vector<RegisterWrit
     return ESP_OK;
 }
 
-static const char* INIT_SEQUENCE_CSV = R"(
+static auto INIT_SEQUENCE_CSV = R"(
 0x88,0x00,0,Set I2C standard mode
 0x80,0x01,0,Enable power
 0xFF,0x01,0,Access hidden registers
@@ -330,7 +329,7 @@ static const char* INIT_SEQUENCE_CSV = R"(
 0x0B,0x01,0,Set SYSTEM_INTERRUPT_CLEAR
 )";
 
-esp_err_t VL53L0X_Driver::loadInitSequence() {
+esp_err_t VL53L0X_Driver::loadInitSequence() const {
     std::vector<RegisterWrite> sequence;
     if (!loadRegisterSequence(INIT_SEQUENCE_CSV, sequence)) {
         ESP_LOGE(TAG, "Failed to parse initialization sequence");
@@ -342,7 +341,7 @@ esp_err_t VL53L0X_Driver::loadInitSequence() {
 // ═══════════════════════════════════════════════════════════════
 // Calibration
 // ═══════════════════════════════════════════════════════════════
-esp_err_t VL53L0X_Driver::configureSPAD(uint8_t* count, bool* type_is_aperture) {
+esp_err_t VL53L0X_Driver::configureSPAD(uint8_t* count, bool* type_is_aperture) const {
     *count = 32;
     *type_is_aperture = true;
 
@@ -480,13 +479,13 @@ void VL53L0X_Driver::getSequenceStepTimeouts(SequenceStepEnables* enables, Seque
 // ═══════════════════════════════════════════════════════════════
 // Configuration Methods
 // ═══════════════════════════════════════════════════════════════
-const char* VL53L0X_Driver::setSignalRateLimit(float limit_mcps) {
+const char* VL53L0X_Driver::setSignalRateLimit(const float limit_mcps) const {
     if (limit_mcps < 0 || limit_mcps > 511.99f) {
         return "Rate limit out of range";
     }
 
-    uint16_t reg_val = (uint16_t)(limit_mcps * (1 << 7));
-    esp_err_t err = writeReg16(Reg::FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT, reg_val);
+    const uint16_t reg_val = static_cast<uint16_t>(limit_mcps * (1 << 7));
+    const esp_err_t err = writeReg16(Reg::FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT, reg_val);
 
     return (err == ESP_OK) ? nullptr : "I2C write failed";
 }
@@ -552,31 +551,36 @@ uint32_t VL53L0X_Driver::getMeasurementTimingBudget() {
     getSequenceStepEnables(&enables);
     getSequenceStepTimeouts(&enables, &timeouts);
 
-    const uint32_t StartOverhead = 1910;
-    const uint32_t EndOverhead = 960;
-    const uint32_t MsrcOverhead = 660;
-    const uint32_t TccOverhead = 590;
-    const uint32_t DssOverhead = 690;
-    const uint32_t PreRangeOverhead = 660;
-    const uint32_t FinalRangeOverhead = 550;
+    constexpr uint32_t StartOverhead = 1910;
+    constexpr uint32_t EndOverhead = 960;
 
     uint32_t budget_us = StartOverhead + EndOverhead;
 
-    if (enables.tcc) {
+    if (enables.tcc)
+    {
+        constexpr uint32_t TccOverhead = 590;
         budget_us += (timeouts.msrc_dss_tcc_us + TccOverhead);
     }
 
-    if (enables.dss) {
+    if (enables.dss)
+    {
+        constexpr uint32_t DssOverhead = 690;
         budget_us += 2 * (timeouts.msrc_dss_tcc_us + DssOverhead);
-    } else if (enables.msrc) {
+    } else if (enables.msrc)
+    {
+        constexpr uint32_t MsrcOverhead = 660;
         budget_us += (timeouts.msrc_dss_tcc_us + MsrcOverhead);
     }
 
-    if (enables.pre_range) {
+    if (enables.pre_range)
+    {
+        constexpr uint32_t PreRangeOverhead = 660;
         budget_us += (timeouts.pre_range_us + PreRangeOverhead);
     }
 
-    if (enables.final_range) {
+    if (enables.final_range)
+    {
+        constexpr uint32_t FinalRangeOverhead = 550;
         budget_us += (timeouts.final_range_us + FinalRangeOverhead);
     }
 
@@ -596,27 +600,20 @@ const char* VL53L0X_Driver::setVcselPulsePeriod(uint8_t type, uint8_t period_pcl
     if (type == 0) {  // Pre-range
         writeReg8(Reg::PRE_RANGE_CONFIG_VCSEL_PERIOD, vcsel_period_reg);
 
-        uint16_t new_pre_range_timeout_mclks = timeoutMicrosecondsToMclks(
-            timeouts.pre_range_us, period_pclks);
-        writeReg16(Reg::PRE_RANGE_CONFIG_TIMEOUT_MACROP_HI,
-                  encodeTimeout(new_pre_range_timeout_mclks));
+        const uint16_t new_pre_range_timeout_mclks = timeoutMicrosecondsToMclks(timeouts.pre_range_us, period_pclks);
+        writeReg16(Reg::PRE_RANGE_CONFIG_TIMEOUT_MACROP_HI, encodeTimeout(new_pre_range_timeout_mclks));
 
-        uint16_t new_msrc_timeout_mclks = timeoutMicrosecondsToMclks(
-            timeouts.msrc_dss_tcc_us, period_pclks);
-        writeReg8(Reg::MSRC_CONFIG_TIMEOUT_MACROP,
-                 (new_msrc_timeout_mclks > 256) ? 255 : (uint8_t)(new_msrc_timeout_mclks - 1));
+        const uint16_t new_msrc_timeout_mclks = timeoutMicrosecondsToMclks(timeouts.msrc_dss_tcc_us, period_pclks);
+        writeReg8(Reg::MSRC_CONFIG_TIMEOUT_MACROP, (new_msrc_timeout_mclks > 256) ? 255 : (uint8_t)(new_msrc_timeout_mclks - 1));
     } else {  // Final range
         writeReg8(Reg::FINAL_RANGE_CONFIG_VCSEL_PERIOD, vcsel_period_reg);
 
-        uint16_t new_final_range_timeout_mclks = timeoutMicrosecondsToMclks(
-            timeouts.final_range_us, period_pclks);
+        uint16_t new_final_range_timeout_mclks = timeoutMicrosecondsToMclks(timeouts.final_range_us, period_pclks);
 
         if (enables.pre_range) {
             new_final_range_timeout_mclks += timeouts.pre_range_mclks;
         }
-
-        writeReg16(Reg::FINAL_RANGE_CONFIG_TIMEOUT_MACROP_HI,
-                  encodeTimeout(new_final_range_timeout_mclks));
+        writeReg16(Reg::FINAL_RANGE_CONFIG_TIMEOUT_MACROP_HI, encodeTimeout(new_final_range_timeout_mclks));
     }
 
     setMeasurementTimingBudget(measurement_timing_budget_us_);
@@ -626,7 +623,7 @@ const char* VL53L0X_Driver::setVcselPulsePeriod(uint8_t type, uint8_t period_pcl
 // ═══════════════════════════════════════════════════════════════
 // Public Interface Implementation
 // ═══════════════════════════════════════════════════════════════
-const char* VL53L0X_Driver::configure() {
+const char* VL53L0X_Driver::configure() const {
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "VL53L0X ToF Driver Configuration");
     ESP_LOGI(TAG, "========================================");
@@ -859,10 +856,10 @@ const char* VL53L0X_Driver::calibrate() {
     if (!initialized_) {
         return "Not initialized";
     }
-
     ESP_LOGI(TAG, "Running calibrations...");
-
-    writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0x01);
+    if (ESP_OK != writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0x01)) {
+       return nullptr;
+    }
     esp_err_t err = performSingleRefCalibration(0x40);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "VHV calibration FAILED");
@@ -870,7 +867,9 @@ const char* VL53L0X_Driver::calibrate() {
     }
     ESP_LOGI(TAG, "VHV calibration OK");
 
-    writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0x02);
+    if (ESP_OK != writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0x02)) {
+        return nullptr;
+    }
     err = performSingleRefCalibration(0x00);
     if (err != ESP_OK) {
         ESP_LOGE(TAG, "Phase calibration FAILED");
@@ -878,13 +877,15 @@ const char* VL53L0X_Driver::calibrate() {
     }
     ESP_LOGI(TAG, "Phase calibration OK");
 
-    writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0xE8);
+    if (ESP_OK != writeReg8(Reg::SYSTEM_SEQUENCE_CONFIG, 0xE8)) {
+        return nullptr;
+    }
 
     ESP_LOGI(TAG, "Calibration complete");
     return nullptr;
 }
 
-const char* VL53L0X_Driver::check() {
+const char* VL53L0X_Driver::check() const {
     if (!initialized_) {
         return "Not initialized";
     }
@@ -892,8 +893,7 @@ const char* VL53L0X_Driver::check() {
     ESP_LOGI(TAG, "Performing health check...");
 
     uint8_t model_id;
-    esp_err_t err = readReg8(Reg::IDENTIFICATION_MODEL_ID, &model_id);
-    if (err != ESP_OK || model_id != 0xEE) {
+    if (const esp_err_t err = readReg8(Reg::IDENTIFICATION_MODEL_ID, &model_id); err != ESP_OK || model_id != 0xEE) {
         ESP_LOGE(TAG, "Health check FAILED: sensor not responding or wrong model");
         return "Health check failed";
     }
@@ -913,24 +913,38 @@ bool VL53L0X_Driver::read_sensor(MeasurementResult& result) {
     }
 
     // Prepare for measurement
-    writeReg8(0x80, 0x01);
-    writeReg8(0xFF, 0x01);
-    writeReg8(0x00, 0x00);
-    writeReg8(0x91, stop_variable_);
-    writeReg8(0x00, 0x01);
-    writeReg8(0xFF, 0x00);
-    writeReg8(0x80, 0x00);
-
+    if (ESP_OK != writeReg8(0x80, 0x01)) {
+       return false;
+    }
+    if (ESP_OK != writeReg8(0xFF, 0x01)) {
+        return false;
+    }
+    if (ESP_OK != writeReg8(0x00, 0x00)) {
+        return false;
+    }
+    if (ESP_OK != writeReg8(0x91, stop_variable_)) {
+        return false;
+    }
+    if (ESP_OK != writeReg8(0x00, 0x01)) {
+        return false;
+    }
+    if (ESP_OK != writeReg8(0xFF, 0x00)) {
+        return false;
+    }
+    if (ESP_OK != writeReg8(0x80, 0x00)) {
+        return false;
+    }
     // Start measurement
-    writeReg8(Reg::SYSRANGE_START, 0x01);
+    if (ESP_OK != writeReg8(Reg::SYSRANGE_START, 0x01)) {
+        return false;
+    }
 
     // Wait for start
     int64_t start = esp_timer_get_time();
     uint8_t sysrange_start_val;
 
     do {
-        esp_err_t err = readReg8(Reg::SYSRANGE_START, &sysrange_start_val);
-        if (err != ESP_OK) {
+        if (esp_err_t err = readReg8(Reg::SYSRANGE_START, &sysrange_start_val); err != ESP_OK) {
             ESP_LOGI(TAG, "[READ] Releasing I2C lock (read start failed)");
             unlockI2C();
             return false;
@@ -957,8 +971,7 @@ bool VL53L0X_Driver::read_sensor(MeasurementResult& result) {
     uint8_t interrupt_status;
 
     do {
-        esp_err_t err = readReg8(Reg::RESULT_INTERRUPT_STATUS, &interrupt_status);
-        if (err != ESP_OK) {
+        if (const esp_err_t err = readReg8(Reg::RESULT_INTERRUPT_STATUS, &interrupt_status); err != ESP_OK) {
             result.valid = false;
             ESP_LOGI(TAG, "[READ] Releasing I2C lock (interrupt status read failed)");
             unlockI2C();
@@ -980,8 +993,7 @@ bool VL53L0X_Driver::read_sensor(MeasurementResult& result) {
 
     // Read distance
     uint16_t range_mm;
-    esp_err_t err = readReg16(Reg::RESULT_RANGE_STATUS + 10, &range_mm);
-    if (err != ESP_OK) {
+    if (const esp_err_t err = readReg16(Reg::RESULT_RANGE_STATUS + 10, &range_mm); err != ESP_OK) {
         result.valid = false;
         ESP_LOGI(TAG, "[READ] Releasing I2C lock (range read failed)");
         unlockI2C();
@@ -989,7 +1001,9 @@ bool VL53L0X_Driver::read_sensor(MeasurementResult& result) {
     }
 
     // Clear interrupt
-    writeReg8(Reg::SYSTEM_INTERRUPT_CLEAR, 0x01);
+    if (ESP_OK !=  writeReg8(Reg::SYSTEM_INTERRUPT_CLEAR, 0x01)) {
+       return false;
+    }
 
     result.distance_mm = range_mm;
     result.valid = (range_mm < 8190);
@@ -1006,12 +1020,12 @@ bool VL53L0X_Driver::isReady() const {
     return initialized_;
 }
 
-void VL53L0X_Driver::setTimeout(uint16_t timeout_ms) {
+void VL53L0X_Driver::setTimeout(const uint16_t timeout_ms) {
     timeout_ms_ = timeout_ms;
 }
 
 bool VL53L0X_Driver::timeoutOccurred() {
-    bool occurred = did_timeout_;
+    const bool occurred = did_timeout_;
     did_timeout_ = false;
     return occurred;
 }

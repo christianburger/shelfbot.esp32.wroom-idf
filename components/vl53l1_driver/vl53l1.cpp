@@ -1,6 +1,6 @@
 #include "vl53l1.hpp"
 
-static const char* TAG = "TofDriver_VL53L1";
+static auto TAG = "TofDriver_VL53L1";
 
 // ═══════════════════════════════════════════════════════════════
 // Register addresses
@@ -95,12 +95,12 @@ VL53L1_Driver::~VL53L1_Driver() {
 // ═══════════════════════════════════════════════════════════════
 // I2C Locking (for external scanner)
 // ═══════════════════════════════════════════════════════════════
-bool VL53L1_Driver::lockI2C() {
+bool VL53L1_Driver::lockI2C() const {
     if (!i2c_mutex_) return false;
     return xSemaphoreTake(i2c_mutex_, pdMS_TO_TICKS(1000)) == pdTRUE;
 }
 
-void VL53L1_Driver::unlockI2C() {
+void VL53L1_Driver::unlockI2C() const {
     if (i2c_mutex_) {
         xSemaphoreGive(i2c_mutex_);
     }
@@ -109,57 +109,57 @@ void VL53L1_Driver::unlockI2C() {
 // ═══════════════════════════════════════════════════════════════
 // I2C Operations
 // ═══════════════════════════════════════════════════════════════
-esp_err_t VL53L1_Driver::writeReg8(uint8_t reg, uint8_t value) {
-    uint8_t buf[2] = {reg, value};
+esp_err_t VL53L1_Driver::writeReg8(const uint8_t reg, const uint8_t value) const {
+    const uint8_t buf[2] = {reg, value};
     return i2c_master_transmit(dev_handle_, buf, 2, timeout_ms_);
 }
 
-esp_err_t VL53L1_Driver::writeReg16(uint8_t reg, uint16_t value) {
-    uint8_t buf[3] = {reg, (uint8_t)(value >> 8), (uint8_t)(value & 0xFF)};
+esp_err_t VL53L1_Driver::writeReg16(const uint8_t reg, const uint16_t value) const {
+    const uint8_t buf[3] = {reg, static_cast<uint8_t>(value >> 8), static_cast<uint8_t>(value & 0xFF)};
     return i2c_master_transmit(dev_handle_, buf, 3, timeout_ms_);
 }
 
-esp_err_t VL53L1_Driver::writeReg32(uint8_t reg, uint32_t value) {
-    uint8_t buf[5] = {
+esp_err_t VL53L1_Driver::writeReg32(const uint8_t reg, const uint32_t value) const {
+    const uint8_t buf[5] = {
         reg,
-        (uint8_t)(value >> 24),
-        (uint8_t)(value >> 16),
-        (uint8_t)(value >> 8),
-        (uint8_t)(value)
+        static_cast<uint8_t>(value >> 24),
+        static_cast<uint8_t>(value >> 16),
+        static_cast<uint8_t>(value >> 8),
+        static_cast<uint8_t>(value)
     };
     return i2c_master_transmit(dev_handle_, buf, 5, timeout_ms_);
 }
 
-esp_err_t VL53L1_Driver::readReg8(uint8_t reg, uint8_t* value) {
+esp_err_t VL53L1_Driver::readReg8(const uint8_t reg, uint8_t* value) const {
     return i2c_master_transmit_receive(dev_handle_, &reg, 1, value, 1, timeout_ms_);
 }
 
-esp_err_t VL53L1_Driver::readReg16(uint8_t reg, uint16_t* value) {
+esp_err_t VL53L1_Driver::readReg16(const uint8_t reg, uint16_t* value) const {
     uint8_t buf[2];
-    esp_err_t err = i2c_master_transmit_receive(dev_handle_, &reg, 1, buf, 2, timeout_ms_);
+    const esp_err_t err = i2c_master_transmit_receive(dev_handle_, &reg, 1, buf, 2, timeout_ms_);
     if (err == ESP_OK) {
         *value = (buf[0] << 8) | buf[1];
     }
     return err;
 }
 
-esp_err_t VL53L1_Driver::readReg32(uint8_t reg, uint32_t* value) {
+esp_err_t VL53L1_Driver::readReg32(uint8_t reg, uint32_t* value) const {
     uint8_t buf[4];
-    esp_err_t err = i2c_master_transmit_receive(dev_handle_, &reg, 1, buf, 4, timeout_ms_);
+    const esp_err_t err = i2c_master_transmit_receive(dev_handle_, &reg, 1, buf, 4, timeout_ms_);
     if (err == ESP_OK) {
         *value = (buf[0] << 24) | (buf[1] << 16) | (buf[2] << 8) | buf[3];
     }
     return err;
 }
 
-esp_err_t VL53L1_Driver::writeMulti(uint8_t reg, const uint8_t* src, uint8_t count) {
+esp_err_t VL53L1_Driver::writeMulti(const uint8_t reg, const uint8_t* src, const uint8_t count) const {
     std::vector<uint8_t> buf(count + 1);
     buf[0] = reg;
     std::memcpy(&buf[1], src, count);
     return i2c_master_transmit(dev_handle_, buf.data(), buf.size(), timeout_ms_);
 }
 
-esp_err_t VL53L1_Driver::readMulti(uint8_t reg, uint8_t* dst, uint8_t count) {
+esp_err_t VL53L1_Driver::readMulti(const uint8_t reg, uint8_t* dst, const uint8_t count) const {
     return i2c_master_transmit_receive(dev_handle_, &reg, 1, dst, count, timeout_ms_);
 }
 
@@ -192,8 +192,8 @@ bool VL53L1_Driver::loadRegisterSequence(const char* csv_data, std::vector<Regis
     return !sequence.empty();
 }
 
-esp_err_t VL53L1_Driver::executeRegisterSequence(const std::vector<RegisterWrite>& sequence) {
-    for (const auto& w : sequence) {
+esp_err_t VL53L1_Driver::executeRegisterSequence(const std::vector<RegisterWrite>& seq) const {
+    for (const auto& w : seq) {
         esp_err_t err = writeReg8(w.reg, w.value);
         if (err != ESP_OK) {
             ESP_LOGE(TAG, "Failed to write 0x%02X=0x%02X: %s", w.reg, w.value, esp_err_to_name(err));
@@ -206,7 +206,7 @@ esp_err_t VL53L1_Driver::executeRegisterSequence(const std::vector<RegisterWrite
     return ESP_OK;
 }
 
-static const char* INIT_SEQUENCE_CSV = R"(
+static auto INIT_SEQUENCE_CSV = R"(
 0x88,0x00,0,Set I2C standard mode
 0x80,0x01,0,Enable power
 0xFF,0x01,0,Access hidden registers
@@ -595,7 +595,7 @@ const char* VL53L1_Driver::setVcselPulsePeriod(uint8_t type, uint8_t period_pclk
 // ═══════════════════════════════════════════════════════════════
 // Public Interface Implementation
 // ═══════════════════════════════════════════════════════════════
-const char* VL53L1_Driver::configure() {
+const char* VL53L1_Driver::configure() const {
     ESP_LOGI(TAG, "========================================");
     ESP_LOGI(TAG, "VL53L1 ToF Driver Configuration");
     ESP_LOGI(TAG, "========================================");
@@ -621,7 +621,7 @@ const char* VL53L1_Driver::init() {
 
     ESP_LOGI(TAG, "Initializing I2C bus and device...");
 
-    i2c_master_bus_config_t bus_config = {
+    const i2c_master_bus_config_t bus_config = {
         .i2c_port          = i2c_port_,
         .sda_io_num        = sda_pin_,
         .scl_io_num        = scl_pin_,

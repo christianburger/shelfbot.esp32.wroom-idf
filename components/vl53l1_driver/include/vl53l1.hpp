@@ -36,7 +36,7 @@ public:
     ~VL53L1_Driver();
 
     // ── Standardized Interface Methods ──
-    const char* configure();
+    const char* configure() const;
     const char* init();
     const char* setup();
     const char* calibrate();
@@ -49,9 +49,9 @@ public:
     bool timeoutOccurred();
 
     // ── I2C Handle Access (for external scanning) ──
-    i2c_master_bus_handle_t getBusHandle() { return bus_handle_; }
-    bool lockI2C();
-    void unlockI2C();
+    i2c_master_bus_handle_t getBusHandle() const { return bus_handle_; }
+    bool lockI2C() const;
+    void unlockI2C() const;
 
     // Non-copyable
     VL53L1_Driver(const VL53L1_Driver&) = delete;
@@ -80,14 +80,14 @@ private:
     bool     did_timeout_;
 
     // ── I2C Operations ──
-    esp_err_t writeReg8(uint8_t reg, uint8_t value);
-    esp_err_t writeReg16(uint8_t reg, uint16_t value);
-    esp_err_t writeReg32(uint8_t reg, uint32_t value);
-    esp_err_t readReg8(uint8_t reg, uint8_t* value);
-    esp_err_t readReg16(uint8_t reg, uint16_t* value);
-    esp_err_t readReg32(uint8_t reg, uint32_t* value);
-    esp_err_t writeMulti(uint8_t reg, const uint8_t* src, uint8_t count);
-    esp_err_t readMulti(uint8_t reg, uint8_t* dst, uint8_t count);
+    esp_err_t writeReg8(uint8_t reg, uint8_t value) const;
+    esp_err_t writeReg16(uint8_t reg, uint16_t value) const;
+    esp_err_t writeReg32(uint8_t reg, uint32_t value) const;
+    esp_err_t readReg8(uint8_t reg, uint8_t* value) const;
+    esp_err_t readReg16(uint8_t reg, uint16_t* value) const;
+    esp_err_t readReg32(uint8_t reg, uint32_t* value) const;
+    esp_err_t writeMulti(uint8_t reg, const uint8_t* src, uint8_t count) const;
+    esp_err_t readMulti(uint8_t reg, uint8_t* dst, uint8_t count) const;
 
     // ── Initialization helpers ──
     struct RegisterWrite {
@@ -97,8 +97,8 @@ private:
         std::string comment;
     };
 
-    bool      loadRegisterSequence(const char* csv_data, std::vector<RegisterWrite>& seq);
-    esp_err_t executeRegisterSequence(const std::vector<RegisterWrite>& seq);
+    static bool      loadRegisterSequence(const char* csv_data, std::vector<RegisterWrite>& seq);
+    esp_err_t executeRegisterSequence(const std::vector<RegisterWrite>& seq) const;
     esp_err_t loadInitSequence();
 
     // ── Calibration ──

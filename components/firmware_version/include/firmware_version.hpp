@@ -5,8 +5,8 @@
 // Firmware Version Information
 #define FIRMWARE_VERSION_MAJOR 1
 #define FIRMWARE_VERSION_MINOR 14
-#define FIRMWARE_VERSION_PATCH 4
-#define FIRMWARE_VERSION_BUILD 20260520
+#define FIRMWARE_VERSION_PATCH 5
+#define FIRMWARE_VERSION_BUILD 20260521
 
 // Stringify macros
 #define STRINGIFY(x) #x
@@ -28,16 +28,16 @@ public:
     FirmwareVersion() = default;
 
     // Instance methods
-    const char* get_firmware_version() const;
-    void print_firmware_version(const char* module_name) const;
+    static const char* get_firmware_version();
+    static void print_firmware_version(const char* module_name);
 
     // Static methods for accessing version without instantiation
     static const char* get_version_string();
     static void print_version(const char* module_name);
 
     // Get individual version components
-    static uint8_t  get_major() { return FIRMWARE_VERSION_MAJOR; }
-    static uint8_t  get_minor() { return FIRMWARE_VERSION_MINOR; }
-    static uint8_t  get_patch() { return FIRMWARE_VERSION_PATCH; }
-    static uint32_t get_build() { return FIRMWARE_VERSION_BUILD; }
+    static unsigned char get_major() { return FIRMWARE_VERSION_MAJOR; }
+    static unsigned char get_minor() { return FIRMWARE_VERSION_MINOR; }
+    static unsigned char get_patch() { return FIRMWARE_VERSION_PATCH; }
+    static long unsigned int get_build() { return FIRMWARE_VERSION_BUILD; }
 };

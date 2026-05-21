@@ -31,9 +31,7 @@ esp_err_t HttpServer::start() {
         ESP_LOGW(TAG, "HTTP server already running");
         return ESP_OK;
     }
-
     ESP_LOGI(TAG, "Starting HTTP server...");
-
     httpd_config_t config = HTTPD_DEFAULT_CONFIG();
     config.uri_match_fn   = httpd_uri_match_wildcard;
     config.max_uri_handlers = 20;
@@ -70,7 +68,9 @@ esp_err_t HttpServer::stop() {
     return err;
 }
 
-esp_err_t HttpServer::register_uri_handlers(httpd_handle_t server) {
+esp_err_t HttpServer::register_uri_handlers(const httpd_handle_t server) {
+    esp_err_t httpd_register_result = 0;
+
     // --- Regular handlers ---
     const httpd_uri_t routes[] = {
         { .uri = "/",                .method = HTTP_GET,  .handler = root_handler,         .user_ctx = nullptr },
@@ -106,10 +106,10 @@ esp_err_t HttpServer::register_uri_handlers(httpd_handle_t server) {
             .handler  = options_handler,
             .user_ctx = nullptr
         };
-        httpd_register_uri_handler(server, &opt);
+        httpd_register_result = httpd_register_uri_handler(server, &opt);
     }
 
-    return ESP_OK;
+    return httpd_register_result;
 }
 
 // ---------------------------------------------------------------------------
@@ -136,18 +136,17 @@ std::string HttpServer::sensor_status_to_string(bool valid, int status) {
     }
 }
 
-std::string HttpServer::get_sensor_status_text(const SensorCommon::TofMeasurement& m) {
-    return sensor_status_to_string(m.valid, m.status);
+std::string HttpServer::get_sensor_status_text(const SensorCommon::TofMeasurement& measurement) {
+    return sensor_status_to_string(measurement.valid, measurement.status);
 }
 
-std::string HttpServer::get_sensor_status_text(const SensorCommon::LidarMeasurement& m) {
-    return sensor_status_to_string(m.valid, m.status);
+std::string HttpServer::get_sensor_status_text(const SensorCommon::LidarMeasurement& measurement) {
+    return sensor_status_to_string(measurement.valid, measurement.status);
 }
 
 // ---------------------------------------------------------------------------
 // JSON builders
 // ---------------------------------------------------------------------------
-
 cJSON* HttpServer::create_tof_json(const SensorCommon::SensorDataPacket& sensor_data) {
     cJSON* tof_array = cJSON_CreateArray();
 
@@ -218,7 +217,6 @@ cJSON* HttpServer::create_sensor_json(const SensorCommon::SensorDataPacket& sens
 // ---------------------------------------------------------------------------
 // Page handlers
 // ---------------------------------------------------------------------------
-
 esp_err_t HttpServer::motor_page_handler(httpd_req_t* req) {
     std::string page = std::string(R"HTML(
 <!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
@@ -358,7 +356,7 @@ esp_err_t HttpServer::motor_set_handler(httpd_req_t* req) {
 }
 
 esp_err_t HttpServer::root_handler(httpd_req_t* req) {
-    std::string html_response = std::string(R"(
+    const std::string html_response = std::string(R"(
         <!DOCTYPE html>
         <html>
         <head>
@@ -433,8 +431,7 @@ esp_err_t HttpServer::tof_handler(httpd_req_t* req) {
         cJSON* root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "error", "No sensor data available");
         cJSON_AddBoolToObject  (root, "available", false);
-        char* json_str = cJSON_PrintUnformatted(root);
-        if (json_str) {
+        if (char* json_str = cJSON_PrintUnformatted(root)) {
             httpd_resp_set_type(req, "application/json");
             httpd_resp_sendstr(req, json_str);
             cJSON_free(json_str);
@@ -446,8 +443,7 @@ esp_err_t HttpServer::tof_handler(httpd_req_t* req) {
     }
 
     cJSON* root = create_tof_json(sensor_data);
-    char* json_str = cJSON_PrintUnformatted(root);
-    if (json_str) {
+    if (char* json_str = cJSON_PrintUnformatted(root)) {
         httpd_resp_set_type(req, "application/json");
         esp_err_t ret = httpd_resp_sendstr(req, json_str);
         cJSON_free(json_str);
@@ -466,8 +462,7 @@ esp_err_t HttpServer::lidar_handler(httpd_req_t* req) {
         cJSON* root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "error", "No sensor data available");
         cJSON_AddBoolToObject  (root, "available", false);
-        char* json_str = cJSON_PrintUnformatted(root);
-        if (json_str) {
+        if (char* json_str = cJSON_PrintUnformatted(root)) {
             httpd_resp_set_type(req, "application/json");
             httpd_resp_sendstr(req, json_str);
             cJSON_free(json_str);
@@ -504,10 +499,9 @@ esp_err_t HttpServer::lidar_handler(httpd_req_t* req) {
         cJSON_AddItemToObject(root, "points", points);
     }
 
-    char* json_str = cJSON_PrintUnformatted(root);
-    if (json_str) {
+    if (char* json_str = cJSON_PrintUnformatted(root)) {
         httpd_resp_set_type(req, "application/json");
-        esp_err_t ret = httpd_resp_sendstr(req, json_str);
+        const esp_err_t ret = httpd_resp_sendstr(req, json_str);
         cJSON_free(json_str);
         cJSON_Delete(root);
         return ret;
@@ -526,8 +520,7 @@ esp_err_t HttpServer::ultrasonic_handler(httpd_req_t* req) {
         cJSON* root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "error", "No sensor data available");
         cJSON_AddBoolToObject  (root, "available", false);
-        char* json_str = cJSON_PrintUnformatted(root);
-        if (json_str) {
+        if (char* json_str = cJSON_PrintUnformatted(root)) {
             httpd_resp_set_type(req, "application/json");
             httpd_resp_sendstr(req, json_str);
             cJSON_free(json_str);
@@ -539,8 +532,7 @@ esp_err_t HttpServer::ultrasonic_handler(httpd_req_t* req) {
     }
 
     cJSON* root = create_ultrasonic_json(sensor_data);
-    char* json_str = cJSON_PrintUnformatted(root);
-    if (json_str) {
+    if (char* json_str = cJSON_PrintUnformatted(root)) {
         httpd_resp_set_type(req, "application/json");
         esp_err_t ret = httpd_resp_sendstr(req, json_str);
         cJSON_free(json_str);
@@ -561,8 +553,7 @@ esp_err_t HttpServer::sensors_handler(httpd_req_t* req) {
         cJSON* root = cJSON_CreateObject();
         cJSON_AddStringToObject(root, "error", "No sensor data available");
         cJSON_AddBoolToObject  (root, "available", false);
-        char* json_str = cJSON_PrintUnformatted(root);
-        if (json_str) {
+        if (char* json_str = cJSON_PrintUnformatted(root)) {
             httpd_resp_set_type(req, "application/json");
             httpd_resp_sendstr(req, json_str);
             cJSON_free(json_str);
@@ -574,8 +565,7 @@ esp_err_t HttpServer::sensors_handler(httpd_req_t* req) {
     }
 
     cJSON* root = create_sensor_json(sensor_data);
-    char* json_str = cJSON_PrintUnformatted(root);
-    if (json_str) {
+    if (char* json_str = cJSON_PrintUnformatted(root)) {
         httpd_resp_set_type(req, "application/json");
         esp_err_t ret = httpd_resp_sendstr(req, json_str);
         cJSON_free(json_str);
@@ -597,7 +587,7 @@ esp_err_t HttpServer::health_handler(httpd_req_t* req) {
     cJSON_AddNumberToObject(root, "uptime_ms",     esp_timer_get_time() / 1000);
 
     SensorCommon::SensorDataPacket sensor_data;
-    bool has_sensor_data = SensorManager::get_instance().get_latest_data(sensor_data);
+    const bool has_sensor_data = SensorManager::get_instance().get_latest_data(sensor_data);
     cJSON_AddBoolToObject(root, "sensors_available", has_sensor_data);
 
     if (has_sensor_data) {
@@ -627,10 +617,9 @@ esp_err_t HttpServer::health_handler(httpd_req_t* req) {
         cJSON_AddItemToObject(root, "sensors", sensors);
     }
 
-    char* json_str = cJSON_PrintUnformatted(root);
-    if (json_str) {
+    if (char* json_str = cJSON_PrintUnformatted(root)) {
         httpd_resp_set_type(req, "application/json");
-        esp_err_t ret = httpd_resp_sendstr(req, json_str);
+        const esp_err_t ret = httpd_resp_sendstr(req, json_str);
         cJSON_free(json_str);
         cJSON_Delete(root);
         return ret;
