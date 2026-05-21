@@ -4,6 +4,7 @@ static const char* TAG = "motor_control";
 
 static FastAccelStepperEngine engine;
 static FastAccelStepper* steppers[NUM_MOTORS] = {nullptr};
+static int8_t motor_direction_sign[NUM_MOTORS] = {0};
 
 static const int motorPins[NUM_MOTORS][2] = {
     {27, 26},  // Motor 0: PULSE=GPIO27, DIR=GPIO26
@@ -50,6 +51,7 @@ void motor_control_begin() {
             steppers[i]->setSpeedInHz(DEFAULT_SPEED_HZ);
             steppers[i]->setAcceleration(DEFAULT_ACCEL_HZ_S);
             steppers[i]->setCurrentPosition(0);
+            motor_direction_sign[i] = 0;
             ESP_LOGI(TAG, "  Motor %d OK (PULSE=%d DIR=%d)", i,
                      motorPins[i][0], motorPins[i][1]);
         } else {
@@ -78,6 +80,7 @@ void motor_control_apply(const uint8_t index,
     // --- Stop ---
     if (!has_velocity && !has_position) {
         steppers[index]->stopMove();
+        motor_direction_sign[index] = 0;
         return;
     }
 
@@ -85,6 +88,7 @@ void motor_control_apply(const uint8_t index,
     const long speed_hz = has_velocity ? vel_to_hz(velocity_rad_s) : DEFAULT_SPEED_HZ;
     if (speed_hz < 1) {
         steppers[index]->stopMove();
+        motor_direction_sign[index] = 0;
         return;
     }
 
@@ -95,8 +99,10 @@ void motor_control_apply(const uint8_t index,
     if (!has_position) {
         if (velocity_rad_s > 0) {
             steppers[index]->runForward();
+            motor_direction_sign[index] = 1;
         } else {
             steppers[index]->runBackward();
+            motor_direction_sign[index] = -1;
         }
         ESP_LOGI(TAG, "Motor %d: continuous %.4f rad/s (%ld Hz)",
                  index, velocity_rad_s, speed_hz);
@@ -105,6 +111,14 @@ void motor_control_apply(const uint8_t index,
 
     // --- Move to position ---
     const long target_steps = static_cast<long>(position_rad * RADS_TO_STEPS);
+    const long current_steps = steppers[index]->getCurrentPosition();
+    if (target_steps > current_steps) {
+        motor_direction_sign[index] = 1;
+    } else if (target_steps < current_steps) {
+        motor_direction_sign[index] = -1;
+    } else {
+        motor_direction_sign[index] = 0;
+    }
     steppers[index]->moveTo(target_steps);
     ESP_LOGI(TAG, "Motor %d: moveTo %.4f rad (%ld steps) at %ld Hz",
              index, position_rad, target_steps, speed_hz);
@@ -139,10 +153,7 @@ double motor_control_get_velocity(const uint8_t index) {
     const double steps_per_sec =
         static_cast<double>(steppers[index]->getCurrentSpeedInMilliHz()) / 1000.0;
 
-    // directionToTarget() returns +1 (forward) or -1 (backward); 0 if stopped.
-    // Use it to restore the sign.
-    const int dir = steppers[index]->directionToTarget();
-    const int sign = (dir != 0) ? dir : 1;
+    const int sign = (motor_direction_sign[index] != 0) ? motor_direction_sign[index] : 1;
 
     return (steps_per_sec * sign) / RADS_TO_STEPS;
 }
@@ -174,11 +185,15 @@ void motor_control_stop_motor(const uint8_t index) {
              index, motorPins[index][0], motorPins[index][1],
              gpio_get_level(static_cast<gpio_num_t>(motorPins[index][1])));
     steppers[index]->forceStop();
+    motor_direction_sign[index] = 0;
 }
 
 void motor_control_stop_all_motors() {
     for (auto& s : steppers) {
         if (s) s->forceStop();
+    }
+    for (auto& dir : motor_direction_sign) {
+        dir = 0;
     }
 }
 
