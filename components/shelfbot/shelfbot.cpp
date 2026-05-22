@@ -171,8 +171,6 @@ void Shelfbot::micro_ros_task_wrapper(void * arg) { if(instance) instance->micro
 // --- Entity Lifecycle ---
 void Shelfbot::create_entities() {
     ESP_LOGI(TAG, "Micro-ROS create_entities: begin");
-    allocator = rcl_get_default_allocator();
-    RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
     RCCHECK(rclc_node_init_default(&node, "shelfbot_firmware", "", &support));
     ESP_LOGI(TAG, "Created node: shelfbot_firmware");
 
@@ -273,6 +271,7 @@ void Shelfbot::micro_ros_task_impl() {
         switch(state) {
             case WAITING_AGENT:
                 if (query_mdns_host(CONFIG_MICROROS_AGENT_MDNS_HOST)) {
+                    init_options = rcl_get_zero_initialized_init_options();
                     rcl_ret_t ret = rcl_init_options_init(&init_options, allocator);
                     if (ret != RCL_RET_OK) {
                         ESP_LOGE(TAG, "Failed to init rcl init options: %ld (agent_ip=%s)", ret, agent_ip_str);
@@ -307,7 +306,6 @@ void Shelfbot::micro_ros_task_impl() {
                     destroy_entities();
                     entities_created = false;
                 }
-                rclc_support_fini(&support);
                 state = WAITING_AGENT;
                 break;
 
