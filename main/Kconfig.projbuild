@@ -77,3 +77,12 @@ menu "Wi-Fi Configuration"
             When no known AP is visible, wait this many seconds before rescanning.
 
 endmenu
+
+menu "micro-ROS Configuration"
+    config MICROROS_AGENT_MDNS_HOST
+        string "micro-ROS agent mDNS hostname"
+        default "gentoo-laptop"
+        help
+            mDNS hostname (without .local) used by firmware to discover the micro-ROS agent.
+            Example: set to "burger-desktop" for burger-desktop.local.
+endmenu
