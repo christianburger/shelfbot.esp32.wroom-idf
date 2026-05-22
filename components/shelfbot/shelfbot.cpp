@@ -261,6 +261,7 @@ static void network_services_task(void *arg) {
 // --- Micro-ROS task implementation ---
 void Shelfbot::micro_ros_task_impl() {
     EventGroupHandle_t wifi_evt = wifi_manager_get_event_group();
+    allocator = rcl_get_default_allocator();
     ESP_LOGI(TAG, "Micro-ROS task waiting for Wi-Fi...");
     xEventGroupWaitBits(wifi_evt, WM_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
     ESP_LOGI(TAG, "Wi-Fi ready, starting Micro-ROS agent discovery");
@@ -274,7 +275,7 @@ void Shelfbot::micro_ros_task_impl() {
                 if (query_mdns_host(CONFIG_MICROROS_AGENT_MDNS_HOST)) {
                     rcl_ret_t ret = rcl_init_options_init(&init_options, allocator);
                     if (ret != RCL_RET_OK) {
-                        ESP_LOGE(TAG, "Failed to init rcl init options: %ld", ret);
+                        ESP_LOGE(TAG, "Failed to init rcl init options: %ld (agent_ip=%s)", ret, agent_ip_str);
                         break;
                     }
                     rmw_uros_options_set_udp_address(agent_ip_str, "8888", rcl_init_options_get_rmw_init_options(&init_options));
