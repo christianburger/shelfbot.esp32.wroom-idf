@@ -69,9 +69,10 @@ void Shelfbot::heartbeat_timer_callback(rcl_timer_t * timer, int64_t last_call_t
 void Shelfbot::motor_position_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
     (void) last_call_time;
     if (timer != NULL) {
-        motor_pos_data[0] = motor_control_get_position(0);
-        motor_pos_data[1] = motor_control_get_position(1);
-        motor_position_msg.data.size = 2;
+        for (uint8_t i = 0; i < NUM_MOTORS; i++) {
+            motor_pos_data[i] = static_cast<float>(motor_control_get_position(i));
+        }
+        motor_position_msg.data.size = NUM_MOTORS;
         RCSOFTCHECK(rcl_publish(&motor_position_publisher, &motor_position_msg, NULL));
     }
 }
@@ -127,23 +128,23 @@ void Shelfbot::tof_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
 
 // --- ROS Subscription Callbacks ---
 void Shelfbot::motor_command_subscription_callback(const void * msin) {
-    const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msin;
-    if (msg->data.size >= 2) {
-        motor_control_set_position(0, msg->data.data[0]);
-        motor_control_set_position(1, msg->data.data[1]);
+    const auto * msg = static_cast<const std_msgs__msg__Float32MultiArray *>(msin);
+    const size_t count = std::min(static_cast<size_t>(NUM_MOTORS), msg->data.size);
+    for (size_t i = 0; i < count; i++) {
+        motor_control_set_position(static_cast<uint8_t>(i), msg->data.data[i]);
     }
 }
 
 void Shelfbot::set_speed_subscription_callback(const void * msin) {
-    const std_msgs__msg__Float32MultiArray * msg = (const std_msgs__msg__Float32MultiArray *)msin;
-    if (msg->data.size >= 2) {
-         motor_control_set_velocity(0, msg->data.data[0]);
-         motor_control_set_velocity(1, msg->data.data[1]);
+    const auto * msg = static_cast<const std_msgs__msg__Float32MultiArray *>(msin);
+    const size_t count = std::min(static_cast<size_t>(NUM_MOTORS), msg->data.size);
+    for (size_t i = 0; i < count; i++) {
+        motor_control_set_velocity(static_cast<uint8_t>(i), msg->data.data[i]);
     }
 }
 
 void Shelfbot::led_subscription_callback(const void * msin) {
-    const std_msgs__msg__Bool * msg = (const std_msgs__msg__Bool *)msin;
+    const auto * msg = static_cast<const std_msgs__msg__Bool *>(msin);
     led_state = msg->data;
     led_control_set(led_state);
 }
@@ -194,7 +195,7 @@ void Shelfbot::create_entities() {
     RCCHECK(rclc_executor_add_subscription(&executor, &set_speed_subscription, &set_speed_msg, &set_speed_subscription_callback_wrapper, ON_NEW_DATA));
     RCCHECK(rclc_executor_add_subscription(&executor, &led_subscription, &led_msg, &led_subscription_callback_wrapper, ON_NEW_DATA));
 
-    init_multi_array(motor_position_msg, motor_pos_data, 2);
+    init_multi_array(motor_position_msg, motor_pos_data, NUM_MOTORS);
     init_multi_array(distance_sensors_msg, distance_sensors_data, SensorCommon::NUM_SENSORS);
 }
 
@@ -222,7 +223,7 @@ void Shelfbot::destroy_entities() {
 
 // --- Network services task (static function) ---
 static void network_services_task(void *arg) {
-    Shelfbot* bot = (Shelfbot*)arg;
+    auto* bot = static_cast<Shelfbot*>(arg);
     EventGroupHandle_t wifi_evt = wifi_manager_get_event_group();
 
     ESP_LOGI(TAG, "Network services task: waiting for Wi-Fi connection...");

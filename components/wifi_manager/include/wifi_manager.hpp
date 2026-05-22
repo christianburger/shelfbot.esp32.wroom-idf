@@ -1,4 +1,3 @@
-// wifi_manager.hpp
 #pragma once
 #include <idf_c_includes.hpp>
 

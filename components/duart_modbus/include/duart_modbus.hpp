@@ -52,7 +52,7 @@ public:
     ~DuartModbus();
 
     const char* init();
-    bool isReady() const { return initialized_; }
+    [[nodiscard]] bool isReady() const { return initialized_; }
 
     // Main Modbus operations
     ModbusResponse readHoldingRegisters(uint8_t slave_address,
@@ -78,7 +78,7 @@ public:
                             uint16_t expected_value,
                             uint32_t timeout_ms = 500);
 
-    uart_port_t getUartPort() const { return config_.uart_port; }
+    [[nodiscard]] uart_port_t getUartPort() const { return config_.uart_port; }
     void flushBuffers();
 
     // NEW: Comprehensive health check method

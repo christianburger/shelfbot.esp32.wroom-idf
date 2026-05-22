@@ -92,11 +92,13 @@ idf.py -p /dev/ttyUSB0 flash
 idf.py monitor
 ```
 
-### 1.11 Run micro‑ROS Agent (on host PC)
+### 1.11 Run micro‑ROS Agent (on host PC, UDP over IP)
 
 ```bash
-docker run -it --rm --net=host microros/micro-ros-agent:humble serial --dev /dev/ttyUSB0 -v6
+docker run -it --rm --net=host microros/micro-ros-agent:humble udp4 --port 8888 -v6
 ```
+
+> The firmware uses `rmw_uros_options_set_udp_address(..., "8888", ...)`, so transport is **UDP/IP** (not serial).
 
 ### 1.12 Full Clean Rebuild
 
@@ -214,6 +216,30 @@ GND             --------------------> GND (logic)
 | Ultrasonic pins    | ✅ Yes        | Verified against `shelfbot.cpp`          |
 | LiDAR pin (GPIO3)  | ⚠️ Conflict   | May conflict with console                |
 | LED pin            | ❌ Missing    | Check `led_control` for actual GPIO     |
-| Environment setup  | ✅ Correct    | Includes empy pin, flash size, partition|
+| Environment setup  | ✅ Correct    | Uses UDP micro‑ROS agent, flash size, partition |
 
 **The system is ready for deployment after resolving the LED pin and potential UART conflict.**
+
+---
+
+## 5. ROS 2 Interface Verification (from firmware code)
+
+Node name: `shelfbot_firmware`
+
+### Publishers (ESP32 → ROS 2)
+
+| Topic | Type | Payload details |
+|---|---|---|
+| `shelfbot_firmware/heartbeat` | `std_msgs/msg/Int32` | Increments every 1 second |
+| `shelfbot_firmware/motor_positions` | `std_msgs/msg/Float32MultiArray` | **5 values** (radians), one per motor index 0..4 |
+| `shelfbot_firmware/distance_sensors` | `std_msgs/msg/Float32MultiArray` | Up to 6 values (cm): 4 ultrasonic + 1 ToF + 1 LiDAR (`-1.0` if invalid) |
+| `shelfbot_firmware/led_state` | `std_msgs/msg/Bool` | Current LED state |
+| `shelfbot_firmware/tof_distance` | `std_msgs/msg/Float32` | ToF[0] distance in cm (`-1.0` if invalid/unavailable) |
+
+### Subscriptions (ROS 2 → ESP32)
+
+| Topic | Type | Payload details |
+|---|---|---|
+| `shelfbot_firmware/motor_command` | `std_msgs/msg/Float32MultiArray` | Position commands in radians; consumes up to first 5 elements |
+| `shelfbot_firmware/set_speed` | `std_msgs/msg/Float32MultiArray` | Velocity commands in rad/s; consumes up to first 5 elements |
+| `shelfbot_firmware/led` | `std_msgs/msg/Bool` | `true` = LED ON, `false` = LED OFF |
