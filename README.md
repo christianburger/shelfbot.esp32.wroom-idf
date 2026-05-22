@@ -197,6 +197,9 @@ grep -nEi "Published heartbeat|Published motor_positions|Published distance_sens
 
 # 5) Confirm subscriber activity (commands received)
 grep -nEi "Received motor_command|Received set_speed|Received led command" cutecom.log
+
+# 6) Trace lifecycle cycles/counters and backoff behavior
+grep -nEi "microros-(info|warn|err)-(cycle|lifecycle|support|spin)" cutecom.log
 ```
 
 Expected lifecycle:
@@ -211,6 +214,20 @@ If you repeatedly see `Failed to init rcl init options`, capture and compare:
 - ESP32 Wi‑Fi IP/subnet
 - mDNS-resolved agent IPv4
 - Exact failing return code sequence in logs
+
+New diagnostic tags:
+- `microros-info-cycle`: per-cycle state + counters (`mdns`, `initopt`, `support`, `spin`) and retry backoff.
+- `microros-info-lifecycle`: successful entity creation transitions.
+- `microros-warn-spin`: non-OK `rclc_executor_spin_some` return codes.
+- `microros-err-lifecycle`: forced disconnect after consecutive spin failures.
+- `microros-err-support`: support init failures after transport setup.
+
+Recommended troubleshooting flow:
+1. Confirm agent session establishment in `microros_agent.log` (`create_client` + `session established`).
+2. Confirm firmware mDNS resolves to expected IPv4.
+3. Check for `microros-err-support` / `Failed to init rcl init options`.
+4. If connected but unstable, inspect `microros-warn-spin` and whether disconnect is due to 3 consecutive spin failures.
+5. Verify steady-state publishers/subscribers continue without repeated `delete_client` churn on the agent.
 
 ---
 

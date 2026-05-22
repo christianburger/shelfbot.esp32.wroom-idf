@@ -1,6 +1,9 @@
 #include <shelfbot.hpp>
 
 static auto TAG = "shelfbot";
+#define MROS_TAG_INFO(mod) "microros-info-" mod
+#define MROS_TAG_WARN(mod) "microros-warn-" mod
+#define MROS_TAG_ERR(mod)  "microros-err-" mod
 
 // --- Static Member Definitions ---
 bool Shelfbot::time_synchronized = false;
@@ -266,20 +269,46 @@ void Shelfbot::micro_ros_task_impl() {
 
     bool entities_created = false;
     rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
+    uint32_t cycle = 0;
+    uint32_t mdns_failures = 0;
+    uint32_t initopt_failures = 0;
+    uint32_t support_init_failures = 0;
+    uint32_t spin_failures = 0;
+    uint32_t consecutive_spin_failures = 0;
+    uint32_t reconnect_backoff_ms = 250;
+    constexpr uint32_t MAX_BACKOFF_MS = 5000;
 
     while(1) {
+        cycle++;
         switch(state) {
             case WAITING_AGENT:
+                ESP_LOGI(MROS_TAG_INFO("cycle"), "cycle=%lu state=WAITING_AGENT backoff_ms=%lu counters{mdns=%lu initopt=%lu support=%lu spin=%lu}",
+                         static_cast<unsigned long>(cycle),
+                         static_cast<unsigned long>(reconnect_backoff_ms),
+                         static_cast<unsigned long>(mdns_failures),
+                         static_cast<unsigned long>(initopt_failures),
+                         static_cast<unsigned long>(support_init_failures),
+                         static_cast<unsigned long>(spin_failures));
                 if (query_mdns_host(CONFIG_MICROROS_AGENT_MDNS_HOST)) {
                     init_options = rcl_get_zero_initialized_init_options();
                     rcl_ret_t ret = rcl_init_options_init(&init_options, allocator);
                     if (ret != RCL_RET_OK) {
                         ESP_LOGE(TAG, "Failed to init rcl init options: %ld (agent_ip=%s)", ret, agent_ip_str);
+                        initopt_failures++;
+                        vTaskDelay(pdMS_TO_TICKS(reconnect_backoff_ms));
+                        reconnect_backoff_ms = std::min(MAX_BACKOFF_MS, reconnect_backoff_ms * 2);
                         break;
                     }
                     rmw_uros_options_set_udp_address(agent_ip_str, "8888", rcl_init_options_get_rmw_init_options(&init_options));
                     if (rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator) == RCL_RET_OK) {
                         state = AGENT_CONNECTED;
+                        reconnect_backoff_ms = 250;
+                        consecutive_spin_failures = 0;
+                    } else {
+                        support_init_failures++;
+                        ESP_LOGE(MROS_TAG_ERR("support"), "cycle=%lu support init failed (agent_ip=%s)", static_cast<unsigned long>(cycle), agent_ip_str);
+                        vTaskDelay(pdMS_TO_TICKS(reconnect_backoff_ms));
+                        reconnect_backoff_ms = std::min(MAX_BACKOFF_MS, reconnect_backoff_ms * 2);
                     }
                     ret = rcl_init_options_fini(&init_options);
                     if (ret != RCL_RET_OK) {
@@ -287,17 +316,31 @@ void Shelfbot::micro_ros_task_impl() {
                     }
                 } else {
                     ESP_LOGW(TAG, "micro-ROS agent not found via mDNS host '%s.local'", CONFIG_MICROROS_AGENT_MDNS_HOST);
+                    mdns_failures++;
+                    vTaskDelay(pdMS_TO_TICKS(reconnect_backoff_ms));
+                    reconnect_backoff_ms = std::min(MAX_BACKOFF_MS, reconnect_backoff_ms * 2);
                 }
-                vTaskDelay(pdMS_TO_TICKS(2000));
                 break;
 
             case AGENT_CONNECTED:
                 if (!entities_created) {
                     create_entities();
                     entities_created = true;
+                    ESP_LOGI(MROS_TAG_INFO("lifecycle"), "cycle=%lu connected: entities created", static_cast<unsigned long>(cycle));
                 }
-                if (rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)) != RCL_RET_OK) {
-                    state = AGENT_DISCONNECTED;
+                {
+                    rcl_ret_t spin_ret = rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+                    if (spin_ret != RCL_RET_OK) {
+                        spin_failures++;
+                        consecutive_spin_failures++;
+                        ESP_LOGW(MROS_TAG_WARN("spin"), "cycle=%lu spin_some ret=%ld consecutive=%lu", static_cast<unsigned long>(cycle), static_cast<long>(spin_ret), static_cast<unsigned long>(consecutive_spin_failures));
+                        if (consecutive_spin_failures >= 3) {
+                            ESP_LOGE(MROS_TAG_ERR("lifecycle"), "cycle=%lu transitioning to AGENT_DISCONNECTED after %lu consecutive spin failures", static_cast<unsigned long>(cycle), static_cast<unsigned long>(consecutive_spin_failures));
+                            state = AGENT_DISCONNECTED;
+                        }
+                    } else {
+                        consecutive_spin_failures = 0;
+                    }
                 }
                 break;
 
@@ -306,6 +349,7 @@ void Shelfbot::micro_ros_task_impl() {
                     destroy_entities();
                     entities_created = false;
                 }
+                ESP_LOGW(MROS_TAG_WARN("lifecycle"), "cycle=%lu disconnected; will retry with backoff_ms=%lu", static_cast<unsigned long>(cycle), static_cast<unsigned long>(reconnect_backoff_ms));
                 state = WAITING_AGENT;
                 break;
 
