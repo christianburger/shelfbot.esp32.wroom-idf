@@ -13,11 +13,15 @@
     a:hover{text-decoration:underline}
     #meta{font-family:monospace;white-space:pre-wrap;color:#a7f3d0}
     svg{width:100%;max-width:700px;height:auto;background:#020617;border-radius:12px;border:1px solid #334155}
-    .legend{font-size:13px;color:#94a3b8;margin-top:8px}
+    .legend{display:flex;flex-wrap:wrap;gap:16px;margin-top:10px;font-size:12px;color:#94a3b8;align-items:center}
+    .legend-item{display:flex;align-items:center;gap:6px}
+    .swatch{width:24px;height:3px;border-radius:2px;flex-shrink:0}
+    .swatch-dot{width:10px;height:10px;border-radius:50%;flex-shrink:0}
     .toolbar{display:flex;gap:8px;flex-wrap:wrap;margin-top:8px}
     button{background:#22c55e;border:0;border-radius:8px;padding:8px 12px;color:#04110a;font-weight:700;cursor:pointer}
     button.secondary{background:#334155;color:#e2e8f0}
     #logStatus{font-size:13px;color:#94a3b8}
+    .hint{font-size:12px;color:#64748b;margin-top:6px}
   </style>
 </head>
 <body>
@@ -25,7 +29,33 @@
   <div class="top"><h1>🛰️ LiDAR Live Viewer</h1><a href="/">← Main Dashboard</a></div>
   <div class="card">
     <svg id="lidar" viewBox="0 0 600 600" role="img" aria-label="Live LiDAR scan"></svg>
-    <div class="legend">Click any point to inspect angle and distance.</div>
+    <div class="legend">
+      <div class="legend-item">
+        <div class="swatch-dot" style="background:#22d3ee"></div>
+        <span>Origin (sensor)</span>
+      </div>
+      <div class="legend-item">
+        <div class="swatch-dot" style="background:#4ade80"></div>
+        <span>Live point</span>
+      </div>
+      <div class="legend-item">
+        <div class="swatch-dot" style="background:#60a5fa"></div>
+        <span>Persisted point</span>
+      </div>
+      <div class="legend-item">
+        <div class="swatch" style="background:#1e3a5f"></div>
+        <span>Cardinal rings / axes (solid)</span>
+      </div>
+      <div class="legend-item">
+        <div class="swatch" style="background:#172032;border-top:1px dashed #172032"></div>
+        <span>250 mm ring (dashed)</span>
+      </div>
+      <div class="legend-item">
+        <div class="swatch" style="background:#172032;border-top:1px dashed #334155"></div>
+        <span>45° guides (dashed)</span>
+      </div>
+    </div>
+    <p class="hint">Rings at 250 mm, 500 mm, 1 m, 1.5 m, 2 m · Labels on all 4 axes · Hover anywhere for live distance &amp; angle · Click a point for full detail.</p>
     <div class="toolbar">
       <button id="startLogBtn">Start Local Log</button>
       <button id="stopLogBtn" class="secondary">Stop Local Log</button>
