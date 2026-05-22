@@ -1,6 +1,6 @@
 #include "vl53l0x.hpp"
 
-static const char* TAG = "TofDriver_VL53L0X";
+static auto TAG = "TofDriver_VL53L0X";
 
 // ═══════════════════════════════════════════════════════════════
 // Static member initialization
@@ -45,7 +45,7 @@ namespace Reg {
     constexpr uint8_t DYNAMIC_SPAD_NUM_REQUESTED_REF_SPAD       = 0x4E;
     constexpr uint8_t DYNAMIC_SPAD_REF_EN_START_OFFSET          = 0x4F;
     constexpr uint8_t POWER_MANAGEMENT_GO1_POWER_FORCE          = 0x80;
-    constexpr uint8_t VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV         = 0x89;
+    constexpr uint8_t VHV_CONFIG_PAD_SCL_SDA_EXTSUP_HV         = 0x89;
     constexpr uint8_t ALGO_PHASECAL_LIM                         = 0x30;
     constexpr uint8_t ALGO_PHASECAL_CONFIG_TIMEOUT              = 0x30;
 }
@@ -482,44 +482,48 @@ const char* VL53L0X_Driver::setSignalRateLimit(const float limit_mcps) const {
         return "Rate limit out of range";
     }
 
-    const uint16_t reg_val = static_cast<uint16_t>(limit_mcps * (1 << 7));
+    const auto reg_val = static_cast<uint16_t>(limit_mcps * (1 << 7));
     const esp_err_t err = writeReg16(Reg::FINAL_RANGE_CONFIG_MIN_COUNT_RATE_RTN_LIMIT, reg_val);
 
     return (err == ESP_OK) ? nullptr : "I2C write failed";
 }
 
 const char* VL53L0X_Driver::setMeasurementTimingBudget(uint32_t budget_us) {
-    SequenceStepEnables enables;
-    SequenceStepTimeouts timeouts;
+    SequenceStepEnables enables{};
+    SequenceStepTimeouts timeouts{};
 
     getSequenceStepEnables(&enables);
     getSequenceStepTimeouts(&enables, &timeouts);
 
     constexpr uint32_t StartOverhead = 1910;
     constexpr uint32_t EndOverhead = 960;
-    constexpr uint32_t MsrcOverhead = 660;
-    constexpr uint32_t TccOverhead = 590;
-    constexpr uint32_t DssOverhead = 690;
-    constexpr uint32_t PreRangeOverhead = 660;
-    constexpr uint32_t FinalRangeOverhead = 550;
 
     uint32_t used_budget_us = StartOverhead + EndOverhead;
 
-    if (enables.tcc) {
+    if (enables.tcc)
+    {
+        constexpr uint32_t TccOverhead = 590;
         used_budget_us += (timeouts.msrc_dss_tcc_us + TccOverhead);
     }
 
-    if (enables.dss) {
+    if (enables.dss)
+    {
+        constexpr uint32_t DssOverhead = 690;
         used_budget_us += 2 * (timeouts.msrc_dss_tcc_us + DssOverhead);
-    } else if (enables.msrc) {
+    } else if (enables.msrc)
+    {
+        constexpr uint32_t MsrcOverhead = 660;
         used_budget_us += (timeouts.msrc_dss_tcc_us + MsrcOverhead);
     }
 
-    if (enables.pre_range) {
+    if (enables.pre_range)
+    {
+        constexpr uint32_t PreRangeOverhead = 660;
         used_budget_us += (timeouts.pre_range_us + PreRangeOverhead);
     }
 
     if (enables.final_range) {
+        constexpr uint32_t FinalRangeOverhead = 550;
         used_budget_us += FinalRangeOverhead;
 
         if (used_budget_us > budget_us) {
@@ -543,8 +547,8 @@ const char* VL53L0X_Driver::setMeasurementTimingBudget(uint32_t budget_us) {
 }
 
 uint32_t VL53L0X_Driver::getMeasurementTimingBudget() {
-    SequenceStepEnables enables;
-    SequenceStepTimeouts timeouts;
+    SequenceStepEnables enables{};
+    SequenceStepTimeouts timeouts{};
 
     getSequenceStepEnables(&enables);
     getSequenceStepTimeouts(&enables, &timeouts);
@@ -587,10 +591,10 @@ uint32_t VL53L0X_Driver::getMeasurementTimingBudget() {
 }
 
 const char* VL53L0X_Driver::setVcselPulsePeriod(uint8_t type, uint8_t period_pclks) {
-    uint8_t vcsel_period_reg = encodeVcselPeriod(period_pclks);
+    const uint8_t vcsel_period_reg = encodeVcselPeriod(period_pclks);
 
-    SequenceStepEnables enables;
-    SequenceStepTimeouts timeouts;
+    SequenceStepEnables enables{};
+    SequenceStepTimeouts timeouts{};
 
     getSequenceStepEnables(&enables);
     getSequenceStepTimeouts(&enables, &timeouts);
@@ -713,7 +717,7 @@ const char* VL53L0X_Driver::init() {
 
     esp_err_t err = i2c_master_bus_add_device(shared_bus_handle_, &dev_config, &dev_handle_);
     if (err != ESP_OK) {
-        // If this fails and we just created the bus, clean it up
+        // If this fails, and we just created the bus, clean it up
         if (bus_reference_count_ == 1) {
             i2c_del_master_bus(shared_bus_handle_);
             shared_bus_handle_ = nullptr;
@@ -794,8 +798,8 @@ const char* VL53L0X_Driver::setup() {
     // Datasheet/API: enable 2V8 mode when IO lines run at AVDD levels
     if (io_2v8_) {
         uint8_t ext_sup_hv = 0;
-        if (readReg8(Reg::VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV, &ext_sup_hv) == ESP_OK) {
-            (void)writeReg8(Reg::VHV_CONFIG_PAD_SCL_SDA__EXTSUP_HV, ext_sup_hv | 0x01);
+        if (readReg8(Reg::VHV_CONFIG_PAD_SCL_SDA_EXTSUP_HV, &ext_sup_hv) == ESP_OK) {
+            (void)writeReg8(Reg::VHV_CONFIG_PAD_SCL_SDA_EXTSUP_HV, ext_sup_hv | 0x01);
         }
     }
 
