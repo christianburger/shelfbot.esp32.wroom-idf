@@ -257,7 +257,7 @@ void Shelfbot::micro_ros_task_impl() {
     while(1) {
         switch(state) {
             case WAITING_AGENT:
-                if (query_mdns_host("gentoo-laptop")) {
+                if (query_mdns_host(CONFIG_MICROROS_AGENT_MDNS_HOST)) {
                     rcl_ret_t ret = rcl_init_options_init(&init_options, allocator);
                     if (ret != RCL_RET_OK) {
                         ESP_LOGE(TAG, "Failed to init rcl init options: %ld", ret);
@@ -271,6 +271,8 @@ void Shelfbot::micro_ros_task_impl() {
                     if (ret != RCL_RET_OK) {
                         ESP_LOGE(TAG, "Failed to finalize rcl init options: %ld", ret);
                     }
+                } else {
+                    ESP_LOGW(TAG, "micro-ROS agent not found via mDNS host '%s.local'", CONFIG_MICROROS_AGENT_MDNS_HOST);
                 }
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 break;

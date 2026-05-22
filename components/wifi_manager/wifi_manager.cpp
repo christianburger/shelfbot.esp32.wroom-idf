@@ -17,6 +17,14 @@ static constexpr cred_t s_creds[] = {
 static constexpr int CRED_COUNT = static_cast<int>(std::size(s_creds));
 static_assert(CRED_COUNT > 0, "no credential slots defined");  // guardrail
 
+static int valid_cred_count() {
+    int valid = 0;
+    for (int i = 0; i < CRED_COUNT; i++) {
+        if (s_creds[i].ssid && s_creds[i].ssid[0] != '\0') valid++;
+    }
+    return valid;
+}
+
 // -------------------------------------------------------------------
 // Tuning from Kconfig
 // -------------------------------------------------------------------
@@ -266,10 +274,18 @@ static bool monitor_rssi() {
 // Manager task
 // -------------------------------------------------------------------
 [[noreturn]] static void manager_task(void *arg) {
-    ESP_LOGI(TAG, "manager task started, %d credential slot(s)", CRED_COUNT);
+    ESP_LOGI(TAG, "manager task started, %d credential slot(s), %d configured",
+             CRED_COUNT, valid_cred_count());
     for (int i = 0; i < CRED_COUNT; i++) {
         if (s_creds[i].ssid && s_creds[i].ssid[0] != '\0')
             ESP_LOGI(TAG, "  [%d] \"%s\"", i, s_creds[i].ssid);
+        else
+            ESP_LOGI(TAG, "  [%d] <empty>", i);
+    }
+
+    if (valid_cred_count() == 0) {
+        ESP_LOGE(TAG, "no Wi-Fi SSIDs configured; set CONFIG_WIFI_SSID_1..4 in menuconfig");
+        vTaskDelete(nullptr);
     }
     int  ci        = -1;
     bool skip_scan = false;
