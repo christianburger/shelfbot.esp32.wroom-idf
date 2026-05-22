@@ -171,10 +171,46 @@ Then rebuild.
 | Symptom                           | Likely solution                                                      |
 |-----------------------------------|----------------------------------------------------------------------|
 | `app partition is too small`      | Flash size not set to 4 MB (see ENVIRONMENT_SETUP.md step 1.8)       |
-| micro‑ROS agent connection fails  | Check that the agent uses `humble` and the correct serial port       |
+| micro‑ROS agent connection fails  | Verify UDP agent on port `8888`, mDNS host, and Wi‑Fi reachability   |
 | Wi‑Fi does not connect            | Verify SSID/password in menuconfig; check RSSI thresholds            |
 | Web interface not loading         | Check IP address; ensure HTTP server started (look for log message)  |
 | GPIO3 conflict (LiDAR + console)  | Move LiDAR to another UART or disable console on GPIO3               |
+
+---
+
+## micro-ROS lifecycle troubleshooting (logs + grep)
+
+Use these commands on your host log file (example: `cutecom.log`):
+
+```bash
+# 1) High-level lifecycle in order
+grep -nEi "Micro-ROS task waiting|Wi-Fi ready, starting Micro-ROS|Querying for mDNS host|mDNS Query Result|Failed to init rcl init options|create_entities|AGENT_CONNECTED|AGENT_DISCONNECTED" cutecom.log
+
+# 2) Focus on rcl/rmw errors with surrounding context
+grep -nEi -B4 -A6 "rcl|rmw|RCL_RET|Failed to init rcl" cutecom.log
+
+# 3) Confirm all entity creation logs
+grep -nEi "Created node|Created publishers|Created subscriptions|Executor configured|create_entities: complete" cutecom.log
+
+# 4) Confirm publisher activity
+grep -nEi "Published heartbeat|Published motor_positions|Published distance_sensors|Published led_state|Published tof_distance" cutecom.log
+
+# 5) Confirm subscriber activity (commands received)
+grep -nEi "Received motor_command|Received set_speed|Received led command" cutecom.log
+```
+
+Expected lifecycle:
+1. Wi‑Fi connects.
+2. mDNS resolves configured agent host (`<host>.local`) to IPv4.
+3. `rcl_init_options_init` succeeds.
+4. node + publishers + subscriptions + executor are created.
+5. publishers periodically post; subscriptions log inbound commands.
+
+If you repeatedly see `Failed to init rcl init options`, capture and compare:
+- Agent command line (`udp4 --port 8888 -v6`)
+- ESP32 Wi‑Fi IP/subnet
+- mDNS-resolved agent IPv4
+- Exact failing return code sequence in logs
 
 ---
 
