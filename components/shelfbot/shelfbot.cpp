@@ -1,6 +1,9 @@
 #include <shelfbot.hpp>
 
 static auto TAG = "shelfbot";
+#define MROS_TAG_INFO(mod) "microros-info-" mod
+#define MROS_TAG_WARN(mod) "microros-warn-" mod
+#define MROS_TAG_ERR(mod)  "microros-err-" mod
 
 // --- Static Member Definitions ---
 bool Shelfbot::time_synchronized = false;
@@ -63,6 +66,7 @@ void Shelfbot::heartbeat_timer_callback(rcl_timer_t * timer, int64_t last_call_t
     if (timer != NULL) {
         heartbeat_msg.data++;
         RCSOFTCHECK(rcl_publish(&heartbeat_publisher, &heartbeat_msg, NULL));
+        ESP_LOGD(TAG, "Published heartbeat=%ld", static_cast<long>(heartbeat_msg.data));
     }
 }
 
@@ -74,6 +78,7 @@ void Shelfbot::motor_position_timer_callback(rcl_timer_t * timer, int64_t last_c
         }
         motor_position_msg.data.size = NUM_MOTORS;
         RCSOFTCHECK(rcl_publish(&motor_position_publisher, &motor_position_msg, NULL));
+        ESP_LOGD(TAG, "Published motor_positions count=%u", static_cast<unsigned>(motor_position_msg.data.size));
     }
 }
 
@@ -97,6 +102,7 @@ void Shelfbot::distance_sensors_timer_callback(rcl_timer_t * timer, int64_t last
             }
             distance_sensors_msg.data.size = idx;
             RCSOFTCHECK(rcl_publish(&distance_sensors_publisher, &distance_sensors_msg, NULL));
+            ESP_LOGD(TAG, "Published distance_sensors count=%u", static_cast<unsigned>(distance_sensors_msg.data.size));
         }
     }
 }
@@ -106,6 +112,7 @@ void Shelfbot::led_state_timer_callback(rcl_timer_t * timer, int64_t last_call_t
     if (timer != NULL) {
         led_state_msg.data = led_state;
         RCSOFTCHECK(rcl_publish(&led_state_publisher, &led_state_msg, NULL));
+        ESP_LOGD(TAG, "Published led_state=%d", static_cast<int>(led_state_msg.data));
     }
 }
 
@@ -123,6 +130,7 @@ void Shelfbot::tof_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
             tof_distance_msg.data = -1.0f;
         }
         RCSOFTCHECK(rcl_publish(&tof_distance_publisher, &tof_distance_msg, NULL));
+        ESP_LOGD(TAG, "Published tof_distance=%.2f", tof_distance_msg.data);
     }
 }
 
@@ -130,6 +138,7 @@ void Shelfbot::tof_timer_callback(rcl_timer_t * timer, int64_t last_call_time) {
 void Shelfbot::motor_command_subscription_callback(const void * msin) {
     const auto * msg = static_cast<const std_msgs__msg__Float32MultiArray *>(msin);
     const size_t count = std::min(static_cast<size_t>(NUM_MOTORS), msg->data.size);
+    ESP_LOGI(TAG, "Received motor_command count=%u", static_cast<unsigned>(count));
     for (size_t i = 0; i < count; i++) {
         motor_control_set_position(static_cast<uint8_t>(i), msg->data.data[i]);
     }
@@ -138,6 +147,7 @@ void Shelfbot::motor_command_subscription_callback(const void * msin) {
 void Shelfbot::set_speed_subscription_callback(const void * msin) {
     const auto * msg = static_cast<const std_msgs__msg__Float32MultiArray *>(msin);
     const size_t count = std::min(static_cast<size_t>(NUM_MOTORS), msg->data.size);
+    ESP_LOGI(TAG, "Received set_speed count=%u", static_cast<unsigned>(count));
     for (size_t i = 0; i < count; i++) {
         motor_control_set_velocity(static_cast<uint8_t>(i), msg->data.data[i]);
     }
@@ -147,6 +157,7 @@ void Shelfbot::led_subscription_callback(const void * msin) {
     const auto * msg = static_cast<const std_msgs__msg__Bool *>(msin);
     led_state = msg->data;
     led_control_set(led_state);
+    ESP_LOGI(TAG, "Received led command=%d", static_cast<int>(led_state));
 }
 
 // --- Static Callback Wrappers ---
@@ -162,19 +173,21 @@ void Shelfbot::micro_ros_task_wrapper(void * arg) { if(instance) instance->micro
 
 // --- Entity Lifecycle ---
 void Shelfbot::create_entities() {
-    allocator = rcl_get_default_allocator();
-    RCCHECK(rclc_support_init(&support, 0, NULL, &allocator));
+    ESP_LOGI(TAG, "Micro-ROS create_entities: begin");
     RCCHECK(rclc_node_init_default(&node, "shelfbot_firmware", "", &support));
+    ESP_LOGI(TAG, "Created node: shelfbot_firmware");
 
     RCCHECK(rclc_publisher_init_default(&heartbeat_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32), "shelfbot_firmware/heartbeat"));
     RCCHECK(rclc_publisher_init_default(&motor_position_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "shelfbot_firmware/motor_positions"));
     RCCHECK(rclc_publisher_init_default(&distance_sensors_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "shelfbot_firmware/distance_sensors"));
     RCCHECK(rclc_publisher_init_default(&led_state_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "shelfbot_firmware/led_state"));
     RCCHECK(rclc_publisher_init_default(&tof_distance_publisher, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32), "shelfbot_firmware/tof_distance"));
+    ESP_LOGI(TAG, "Created publishers: heartbeat, motor_positions, distance_sensors, led_state, tof_distance");
 
     RCCHECK(rclc_subscription_init_default(&motor_command_subscription, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "shelfbot_firmware/motor_command"));
     RCCHECK(rclc_subscription_init_default(&set_speed_subscription, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray), "shelfbot_firmware/set_speed"));
     RCCHECK(rclc_subscription_init_default(&led_subscription, &node, ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool), "shelfbot_firmware/led"));
+    ESP_LOGI(TAG, "Created subscriptions: motor_command, set_speed, led");
 
     RCCHECK(rclc_timer_init_default(&heartbeat_timer, &support, RCL_MS_TO_NS(1000), heartbeat_timer_callback_wrapper));
     RCCHECK(rclc_timer_init_default(&motor_position_timer, &support, RCL_MS_TO_NS(100), motor_position_timer_callback_wrapper));
@@ -194,9 +207,11 @@ void Shelfbot::create_entities() {
     RCCHECK(rclc_executor_add_subscription(&executor, &motor_command_subscription, &motor_command_msg, &motor_command_subscription_callback_wrapper, ON_NEW_DATA));
     RCCHECK(rclc_executor_add_subscription(&executor, &set_speed_subscription, &set_speed_msg, &set_speed_subscription_callback_wrapper, ON_NEW_DATA));
     RCCHECK(rclc_executor_add_subscription(&executor, &led_subscription, &led_msg, &led_subscription_callback_wrapper, ON_NEW_DATA));
+    ESP_LOGI(TAG, "Executor configured with 5 timers + 3 subscriptions");
 
     init_multi_array(motor_position_msg, motor_pos_data, NUM_MOTORS);
     init_multi_array(distance_sensors_msg, distance_sensors_data, SensorCommon::NUM_SENSORS);
+    ESP_LOGI(TAG, "Micro-ROS create_entities: complete");
 }
 
 void Shelfbot::destroy_entities() {
@@ -247,41 +262,85 @@ static void network_services_task(void *arg) {
 // --- Micro-ROS task implementation ---
 void Shelfbot::micro_ros_task_impl() {
     EventGroupHandle_t wifi_evt = wifi_manager_get_event_group();
+    allocator = rcl_get_default_allocator();
     ESP_LOGI(TAG, "Micro-ROS task waiting for Wi-Fi...");
     xEventGroupWaitBits(wifi_evt, WM_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
     ESP_LOGI(TAG, "Wi-Fi ready, starting Micro-ROS agent discovery");
 
     bool entities_created = false;
     rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
+    uint32_t cycle = 0;
+    uint32_t mdns_failures = 0;
+    uint32_t initopt_failures = 0;
+    uint32_t support_init_failures = 0;
+    uint32_t spin_failures = 0;
+    uint32_t consecutive_spin_failures = 0;
+    uint32_t reconnect_backoff_ms = 250;
+    constexpr uint32_t MAX_BACKOFF_MS = 5000;
 
     while(1) {
+        cycle++;
         switch(state) {
             case WAITING_AGENT:
-                if (query_mdns_host("gentoo-laptop")) {
+                ESP_LOGI(MROS_TAG_INFO("cycle"), "cycle=%lu state=WAITING_AGENT backoff_ms=%lu counters{mdns=%lu initopt=%lu support=%lu spin=%lu}",
+                         static_cast<unsigned long>(cycle),
+                         static_cast<unsigned long>(reconnect_backoff_ms),
+                         static_cast<unsigned long>(mdns_failures),
+                         static_cast<unsigned long>(initopt_failures),
+                         static_cast<unsigned long>(support_init_failures),
+                         static_cast<unsigned long>(spin_failures));
+                if (query_mdns_host(CONFIG_MICROROS_AGENT_MDNS_HOST)) {
+                    init_options = rcl_get_zero_initialized_init_options();
                     rcl_ret_t ret = rcl_init_options_init(&init_options, allocator);
                     if (ret != RCL_RET_OK) {
-                        ESP_LOGE(TAG, "Failed to init rcl init options: %ld", ret);
+                        ESP_LOGE(TAG, "Failed to init rcl init options: %ld (agent_ip=%s)", ret, agent_ip_str);
+                        initopt_failures++;
+                        vTaskDelay(pdMS_TO_TICKS(reconnect_backoff_ms));
+                        reconnect_backoff_ms = std::min(MAX_BACKOFF_MS, reconnect_backoff_ms * 2);
                         break;
                     }
                     rmw_uros_options_set_udp_address(agent_ip_str, "8888", rcl_init_options_get_rmw_init_options(&init_options));
                     if (rclc_support_init_with_options(&support, 0, NULL, &init_options, &allocator) == RCL_RET_OK) {
                         state = AGENT_CONNECTED;
+                        reconnect_backoff_ms = 250;
+                        consecutive_spin_failures = 0;
+                    } else {
+                        support_init_failures++;
+                        ESP_LOGE(MROS_TAG_ERR("support"), "cycle=%lu support init failed (agent_ip=%s)", static_cast<unsigned long>(cycle), agent_ip_str);
+                        vTaskDelay(pdMS_TO_TICKS(reconnect_backoff_ms));
+                        reconnect_backoff_ms = std::min(MAX_BACKOFF_MS, reconnect_backoff_ms * 2);
                     }
                     ret = rcl_init_options_fini(&init_options);
                     if (ret != RCL_RET_OK) {
                         ESP_LOGE(TAG, "Failed to finalize rcl init options: %ld", ret);
                     }
+                } else {
+                    ESP_LOGW(TAG, "micro-ROS agent not found via mDNS host '%s.local'", CONFIG_MICROROS_AGENT_MDNS_HOST);
+                    mdns_failures++;
+                    vTaskDelay(pdMS_TO_TICKS(reconnect_backoff_ms));
+                    reconnect_backoff_ms = std::min(MAX_BACKOFF_MS, reconnect_backoff_ms * 2);
                 }
-                vTaskDelay(pdMS_TO_TICKS(2000));
                 break;
 
             case AGENT_CONNECTED:
                 if (!entities_created) {
                     create_entities();
                     entities_created = true;
+                    ESP_LOGI(MROS_TAG_INFO("lifecycle"), "cycle=%lu connected: entities created", static_cast<unsigned long>(cycle));
                 }
-                if (rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100)) != RCL_RET_OK) {
-                    state = AGENT_DISCONNECTED;
+                {
+                    rcl_ret_t spin_ret = rclc_executor_spin_some(&executor, RCL_MS_TO_NS(100));
+                    if (spin_ret != RCL_RET_OK) {
+                        spin_failures++;
+                        consecutive_spin_failures++;
+                        ESP_LOGW(MROS_TAG_WARN("spin"), "cycle=%lu spin_some ret=%ld consecutive=%lu", static_cast<unsigned long>(cycle), static_cast<long>(spin_ret), static_cast<unsigned long>(consecutive_spin_failures));
+                        if (consecutive_spin_failures >= 3) {
+                            ESP_LOGE(MROS_TAG_ERR("lifecycle"), "cycle=%lu transitioning to AGENT_DISCONNECTED after %lu consecutive spin failures", static_cast<unsigned long>(cycle), static_cast<unsigned long>(consecutive_spin_failures));
+                            state = AGENT_DISCONNECTED;
+                        }
+                    } else {
+                        consecutive_spin_failures = 0;
+                    }
                 }
                 break;
 
@@ -290,7 +349,7 @@ void Shelfbot::micro_ros_task_impl() {
                     destroy_entities();
                     entities_created = false;
                 }
-                rclc_support_fini(&support);
+                ESP_LOGW(MROS_TAG_WARN("lifecycle"), "cycle=%lu disconnected; will retry with backoff_ms=%lu", static_cast<unsigned long>(cycle), static_cast<unsigned long>(reconnect_backoff_ms));
                 state = WAITING_AGENT;
                 break;
 
