@@ -4,8 +4,10 @@
 #include <lidar_sensor.hpp>
 #include <lidar_packet_parser.hpp>
 #include <firmware_version.hpp>
+#include <state_machine.hpp>
+#include <state_machine_lifecycle.hpp>
 
-// Include ONLY the adapter for the selected driver
+// Include adapter for the selected driver
 #if SHELFBOT_DRIVER_VL53L0X
     #include "vl53l0x_adapter.hpp"
 #elif SHELFBOT_DRIVER_VL53L1
@@ -17,6 +19,18 @@
 #endif
 
 const char* SensorControl::TAG = "SensorControl";
+
+static SensorControlState s_current_state = SensorControlState::OFF;
+
+static void set_sensor_state(SensorControlState new_state) {
+    if (s_current_state == new_state) return;
+    const char* state_str = stateToString(new_state);
+    if (StateMachine::changeState("sensor_control", state_str)) {
+        s_current_state = new_state;
+    } else {
+        ESP_LOGE(SensorControl::TAG, "Failed to transition to state %s", state_str);
+    }
+}
 
 SensorControl::SensorControl(Config config) : config_(std::move(config)) {
     data_mutex_ = xSemaphoreCreateMutex();
@@ -36,10 +50,11 @@ SensorControl::~SensorControl() {
 }
 
 // -------------------------------------------------------------------
-// Factory for UltrasonicArray
+// Factory methods – always defined (return nullptr if feature disabled)
 // -------------------------------------------------------------------
 std::unique_ptr<IUltrasonicArray> SensorControl::createUltrasonicArray() {
 #if SHELFBOT_HAS_ULTRASONIC == 0
+    ESP_LOGW(TAG, "Ultrasonic support disabled at compile time");
     return nullptr;
 #else
     if (config_.ultrasonic_configs.empty()) {
@@ -74,11 +89,9 @@ std::unique_ptr<IUltrasonicArray> SensorControl::createUltrasonicArray() {
 #endif
 }
 
-// -------------------------------------------------------------------
-// Factory for ToF sensor – macro decides which driver to instantiate
-// -------------------------------------------------------------------
 std::unique_ptr<IToFSensor> SensorControl::createToFSensor() {
 #if SHELFBOT_HAS_TOF == 0
+    ESP_LOGW(TAG, "ToF support disabled at compile time");
     return nullptr;
 #else
     TofSensor::Config tof_config;
@@ -116,11 +129,9 @@ std::unique_ptr<IToFSensor> SensorControl::createToFSensor() {
 #endif
 }
 
-// -------------------------------------------------------------------
-// Factory for LiDAR
-// -------------------------------------------------------------------
 std::unique_ptr<ILidarSensor> SensorControl::createLidarSensor() {
 #if SHELFBOT_HAS_LIDAR == 0
+    ESP_LOGW(TAG, "LiDAR support disabled at compile time");
     return nullptr;
 #else
     if (!config_.lidar_config.enabled) {
@@ -160,7 +171,6 @@ esp_err_t SensorControl::initialize() {
     tof_sensor_       = createToFSensor();
     lidar_sensor_     = createLidarSensor();
 
-    // Update latest_data_ activity flags
     for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS; ++i) {
         latest_data_.ultrasonic_readings[i].active = (ultrasonic_array_ && i < static_cast<int>(config_.ultrasonic_configs.size()));
     }
@@ -170,6 +180,9 @@ esp_err_t SensorControl::initialize() {
     latest_data_.lidar_measurement.active = (lidar_sensor_ != nullptr);
 
     initialized_ = true;
+
+    StateMachine::setInitial("sensor_control", stateToString(SensorControlState::OFF));
+    set_sensor_state(SensorControlState::OFF);
 
     ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "Sensor Control Initialization Complete");
@@ -329,6 +342,7 @@ esp_err_t SensorControl::start_continuous() {
     }
 
     continuous_mode_ = true;
+    set_sensor_state(SensorControlState::SCANNING);
 
     BaseType_t result = xTaskCreate(
         continuous_read_task,
@@ -342,6 +356,7 @@ esp_err_t SensorControl::start_continuous() {
     if (result != pdPASS) {
         ESP_LOGE(TAG, "Failed to create continuous reading task");
         continuous_mode_ = false;
+        set_sensor_state(SensorControlState::ERROR);
         if (tof_sensor_) tof_sensor_->stopContinuous();
         return ESP_FAIL;
     }
@@ -353,6 +368,7 @@ esp_err_t SensorControl::start_continuous() {
 esp_err_t SensorControl::stop_continuous() {
     if (!continuous_mode_) return ESP_OK;
     continuous_mode_ = false;
+    set_sensor_state(SensorControlState::IDLE);
     if (continuous_task_handle_) {
         vTaskDelay(pdMS_TO_TICKS(100));
         continuous_task_handle_ = nullptr;

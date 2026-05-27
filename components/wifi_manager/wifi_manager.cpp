@@ -1,6 +1,8 @@
 #include <wifi_manager.hpp>
+#include <state_machine.hpp>
+#include <state_machine_lifecycle.hpp>
 
-static auto TAG = "wifi_manager";
+static const char* TAG = "wifi_manager";
 
 // -------------------------------------------------------------------
 // Credential table – populated from Kconfig (menuconfig)
@@ -15,7 +17,7 @@ static constexpr cred_t s_creds[] = {
 };
 
 static constexpr int CRED_COUNT = static_cast<int>(std::size(s_creds));
-static_assert(CRED_COUNT > 0, "no credential slots defined");  // guardrail
+static_assert(CRED_COUNT > 0, "no credential slots defined");
 
 static int valid_cred_count() {
     int valid = 0;
@@ -44,7 +46,6 @@ static int valid_cred_count() {
 #define EVT_GOT_IP       BIT2
 #define EVT_DISCONNECTED BIT3
 
-// FIX: guardrails – catch bit collisions at compile time
 static_assert((EVT_GOT_IP       & (WM_CONNECTED_BIT | WM_DISCONNECTED_BIT)) == 0,
               "EVT_GOT_IP overlaps a public WM bit");
 static_assert((EVT_DISCONNECTED & (WM_CONNECTED_BIT | WM_DISCONNECTED_BIT)) == 0,
@@ -57,7 +58,6 @@ static_assert(EVT_GOT_IP != EVT_DISCONNECTED,
 // -------------------------------------------------------------------
 static EventGroupHandle_t   s_evt      = nullptr;
 static esp_netif_t         *s_netif    = nullptr;
-static wifi_manager_state_t s_state    = WM_STATE_IDLE;
 static wifi_manager_info_t  s_info     = {};
 static portMUX_TYPE         s_info_mux = portMUX_INITIALIZER_UNLOCKED;
 
@@ -67,32 +67,38 @@ static uint32_t s_reconnects      = 0;
 static int      s_degrade_streak  = 0;
 
 // -------------------------------------------------------------------
-// Helper: state string
+// State machine integration – using only OFF, CONNECTING, CONNECTED, DISCONNECTED
 // -------------------------------------------------------------------
-const char *wifi_manager_state_str(wifi_manager_state_t s) {
-    switch (s) {
-        case WM_STATE_IDLE:       return "IDLE";
-        case WM_STATE_SCANNING:   return "SCANNING";
-        case WM_STATE_CONNECTING: return "CONNECTING";
-        case WM_STATE_CONNECTED:  return "CONNECTED";
-        case WM_STATE_DEGRADED:   return "DEGRADED";
-        default:                  return "UNKNOWN";
+static void set_wifi_state(WifiManagerState new_state) {
+    const char* state_str = stateToString(new_state);
+    if (!StateMachine::changeState("wifi_manager", state_str)) {
+        ESP_LOGE(TAG, "Failed to transition to %s", state_str);
+    } else {
+        ESP_LOGI(TAG, "State → %s", state_str);
     }
+
+    // Map to legacy wifi_manager_state_t for info struct
+    portENTER_CRITICAL(&s_info_mux);
+    switch (new_state) {
+        case WifiManagerState::OFF:
+            s_info.state = WM_STATE_IDLE;
+            break;
+        case WifiManagerState::DISCONNECTED:
+            s_info.state = WM_STATE_SCANNING;
+            break;
+        case WifiManagerState::CONNECTING:
+            s_info.state = WM_STATE_CONNECTING;
+            break;
+        case WifiManagerState::CONNECTED:
+            s_info.state = WM_STATE_CONNECTED;
+            break;
+        default:
+            s_info.state = WM_STATE_IDLE;
+            break;
+    }
+    portEXIT_CRITICAL(&s_info_mux);
 }
 
-static void set_state(const wifi_manager_state_t next) {
-    if (s_state != next) {
-        ESP_LOGI(TAG, "state %s → %s", wifi_manager_state_str(s_state), wifi_manager_state_str(next));
-        s_state = next;
-        portENTER_CRITICAL(&s_info_mux);
-        s_info.state = next;
-        portEXIT_CRITICAL(&s_info_mux);
-    }
-}
-
-// -------------------------------------------------------------------
-// Publish thread-safe info snapshot
-// -------------------------------------------------------------------
 static void publish_info(const char *ssid, const int8_t rssi, const bool degraded) {
     esp_netif_ip_info_t ip = {};
     if (s_netif) esp_netif_get_ip_info(s_netif, &ip);
@@ -102,12 +108,10 @@ static void publish_info(const char *ssid, const int8_t rssi, const bool degrade
         snprintf(ip_str, sizeof(ip_str), IPSTR, IP2STR(&ip.ip));
 
     const uint32_t uptime = (s_connected_at_us > 0)
-        ? static_cast<uint32_t>(
-              (esp_timer_get_time() - s_connected_at_us) / 1000000ULL)
+        ? static_cast<uint32_t>((esp_timer_get_time() - s_connected_at_us) / 1000000ULL)
         : 0;
 
     portENTER_CRITICAL(&s_info_mux);
-    s_info.state      = s_state;   // belt-and-suspenders; set_state keeps this in sync too
     s_info.rssi_dbm   = rssi;
     s_info.degraded   = degraded;
     s_info.uptime_s   = uptime;
@@ -123,21 +127,21 @@ static void publish_info(const char *ssid, const int8_t rssi, const bool degrade
 // -------------------------------------------------------------------
 static void on_wifi_event(void *arg, esp_event_base_t base, const int32_t id, const void *data) {
     if (id == WIFI_EVENT_STA_DISCONNECTED) {
-        const auto *d =
-            static_cast<const wifi_event_sta_disconnected_t *>(data);
+        const auto *d = static_cast<const wifi_event_sta_disconnected_t *>(data);
         ESP_LOGW(TAG, "STA disconnected, reason=%d", d->reason);
         xEventGroupClearBits(s_evt, WM_CONNECTED_BIT);
         xEventGroupSetBits(s_evt, WM_DISCONNECTED_BIT | EVT_DISCONNECTED);
+        set_wifi_state(WifiManagerState::DISCONNECTED);
     }
 }
 
 static void on_ip_event(void *arg, esp_event_base_t base, const int32_t id, const void *data) {
     if (id == IP_EVENT_STA_GOT_IP) {
-        const auto *e =
-            static_cast<const ip_event_got_ip_t *>(data);
+        const auto *e = static_cast<const ip_event_got_ip_t *>(data);
         ESP_LOGI(TAG, "got IP: " IPSTR, IP2STR(&e->ip_info.ip));
         xEventGroupClearBits(s_evt, WM_DISCONNECTED_BIT | EVT_DISCONNECTED);
         xEventGroupSetBits(s_evt, WM_CONNECTED_BIT | EVT_GOT_IP);
+        set_wifi_state(WifiManagerState::CONNECTED);
     }
 }
 
@@ -175,12 +179,9 @@ static int scan_pick_best() {
     int8_t best_rssi = INT8_MIN;
 
     for (int ci = 0; ci < CRED_COUNT; ci++) {
-        // FIX: guard null pointer before dereference (Kconfig edge case)
         if (!s_creds[ci].ssid || s_creds[ci].ssid[0] == '\0') continue;
         for (uint16_t ai = 0; ai < count; ai++) {
-            if (strcmp(reinterpret_cast<const char *>(aps[ai].ssid),
-                       s_creds[ci].ssid) == 0) {
-                // FIX: was "%p" – printed the array's stack address, not the string
+            if (strcmp(reinterpret_cast<const char *>(aps[ai].ssid), s_creds[ci].ssid) == 0) {
                 ESP_LOGI(TAG, "  found known AP \"%s\" ch%d rssi=%d",
                          reinterpret_cast<const char *>(aps[ai].ssid),
                          aps[ai].primary, aps[ai].rssi);
@@ -193,8 +194,7 @@ static int scan_pick_best() {
     }
 
     if (best_cred >= 0)
-        ESP_LOGI(TAG, "scan winner: \"%s\" rssi=%d dBm",
-                 s_creds[best_cred].ssid, best_rssi);
+        ESP_LOGI(TAG, "scan winner: \"%s\" rssi=%d dBm", s_creds[best_cred].ssid, best_rssi);
     else
         ESP_LOGW(TAG, "scan: no known AP visible");
 
@@ -208,18 +208,13 @@ static void disconnect_blocking() {
     xEventGroupClearBits(s_evt, EVT_DISCONNECTED | EVT_GOT_IP);
     const esp_err_t r = esp_wifi_disconnect();
     if (r != ESP_OK) {
-        // Not always fatal (e.g. already disconnected); log and fall through
         ESP_LOGW(TAG, "disconnect: %s", esp_err_to_name(r));
     }
-    xEventGroupWaitBits(s_evt, EVT_DISCONNECTED,
-                        pdTRUE, pdFALSE, pdMS_TO_TICKS(2000));
-    // Clear again: remove the disconnect event we just consumed so it
-    // doesn't confuse the subsequent connect wait.
+    xEventGroupWaitBits(s_evt, EVT_DISCONNECTED, pdTRUE, pdFALSE, pdMS_TO_TICKS(2000));
     xEventGroupClearBits(s_evt, EVT_DISCONNECTED | EVT_GOT_IP);
 }
 
 static esp_err_t start_connect(int ci) {
-    // FIX: runtime guardrails
     configASSERT(ci >= 0 && ci < CRED_COUNT);
     configASSERT(s_creds[ci].ssid && s_creds[ci].ssid[0] != '\0');
     wifi_config_t cfg = {};
@@ -242,19 +237,18 @@ static bool monitor_rssi() {
     if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) {
         return false;
     }
-    if (const bool degraded = (ap.rssi < RSSI_WARN); !degraded) {
+    const bool degraded = (ap.rssi < RSSI_WARN);
+    if (!degraded) {
         if (s_degrade_streak > 0)
             ESP_LOGI(TAG, "RSSI recovered: %d dBm", ap.rssi);
         s_degrade_streak = 0;
-        if (s_state == WM_STATE_DEGRADED) set_state(WM_STATE_CONNECTED);
         publish_info(nullptr, ap.rssi, false);
         return false;
     }
 
     s_degrade_streak++;
-    ESP_LOGW(TAG, "RSSI %d dBm (warn=%d, crit=%d) streak=%d/%d", ap.rssi, RSSI_WARN, RSSI_CRITICAL, s_degrade_streak, DEGRADE_N);
-
-    if (s_state == WM_STATE_CONNECTED) set_state(WM_STATE_DEGRADED);
+    ESP_LOGW(TAG, "RSSI %d dBm (warn=%d, crit=%d) streak=%d/%d",
+             ap.rssi, RSSI_WARN, RSSI_CRITICAL, s_degrade_streak, DEGRADE_N);
     publish_info(nullptr, ap.rssi, true);
 
     if (ap.rssi < RSSI_CRITICAL) {
@@ -283,22 +277,33 @@ static bool monitor_rssi() {
             ESP_LOGI(TAG, "  [%d] <empty>", i);
     }
 
-    if (valid_cred_count() == 0) {
-        ESP_LOGE(TAG, "no Wi-Fi SSIDs configured; set CONFIG_WIFI_SSID_1..4 in menuconfig");
-        vTaskDelete(nullptr);
-    }
+    // If no valid credentials, log error, set state to OFF, and loop will keep scanning (but will never find anything)
+    // We still log the reason each time we enter OFF.
+    bool no_creds_logged = false;
+
     int  ci        = -1;
     bool skip_scan = false;
 
     while (true) {
         // ---------- SCAN ----------
         if (!skip_scan) {
-            set_state(WM_STATE_SCANNING);
+            if (valid_cred_count() == 0) {
+                if (!no_creds_logged) {
+                    ESP_LOGE(TAG, "No valid Wi-Fi SSIDs configured. Set CONFIG_WIFI_SSID_1..4 in menuconfig. Staying in OFF state.");
+                    no_creds_logged = true;
+                }
+                set_wifi_state(WifiManagerState::OFF);
+                vTaskDelay(pdMS_TO_TICKS(CYCLE_DELAY_S * 1000));
+                continue;
+            }
+            no_creds_logged = false;
+
+            set_wifi_state(WifiManagerState::DISCONNECTED);  // scanning state
             publish_info(nullptr, 0, false);
 
             ci = scan_pick_best();
             if (ci < 0) {
-                ESP_LOGW(TAG, "no known AP visible, waiting %d s", CYCLE_DELAY_S);
+                ESP_LOGW(TAG, "No known AP visible, waiting %d s", CYCLE_DELAY_S);
                 vTaskDelay(pdMS_TO_TICKS(CYCLE_DELAY_S * 1000));
                 continue;
             }
@@ -307,7 +312,7 @@ static bool monitor_rssi() {
         configASSERT(ci >= 0 && ci < CRED_COUNT);
 
         // ---------- CONNECT ----------
-        set_state(WM_STATE_CONNECTING);
+        set_wifi_state(WifiManagerState::CONNECTING);
         bool connected = false;
         s_reconnects++;
 
@@ -343,7 +348,6 @@ static bool monitor_rssi() {
         // ---------- CONNECTED ----------
         s_connected_at_us = esp_timer_get_time();
         s_degrade_streak  = 0;
-        set_state(WM_STATE_CONNECTED);
         publish_info(s_creds[ci].ssid, 0, false);
         ESP_LOGI(TAG, "connected to \"%s\" (reconnect #%lu)",
                  s_creds[ci].ssid, static_cast<unsigned long>(s_reconnects));
@@ -358,23 +362,20 @@ static bool monitor_rssi() {
             if (bits & EVT_DISCONNECTED) {
                 ESP_LOGW(TAG, "connection lost – rescanning");
                 s_connected_at_us = 0;
-                break; // outer loop will scan from scratch
+                set_wifi_state(WifiManagerState::DISCONNECTED);
+                break;
             }
 
             if (monitor_rssi()) {
-                set_state(WM_STATE_SCANNING);
                 const int better = scan_pick_best();
 
                 if (better < 0) {
                     ESP_LOGW(TAG, "degraded but no alternatives – staying");
-                    set_state(WM_STATE_DEGRADED);
                     continue;
                 }
 
                 if (better == ci) {
-                    ESP_LOGI(TAG, "\"%s\" is still best – staying",
-                             s_creds[ci].ssid);
-                    set_state(WM_STATE_DEGRADED);
+                    ESP_LOGI(TAG, "\"%s\" is still best – staying", s_creds[ci].ssid);
                     continue;
                 }
 
@@ -383,8 +384,8 @@ static bool monitor_rssi() {
                          s_creds[ci].ssid, s_creds[better].ssid,
                          static_cast<unsigned long>(s_switches));
 
-                ci        = better;  // FIX: now actually used – outer loop
-                skip_scan = true;    //      skips the scan and reconnects directly
+                ci        = better;
+                skip_scan = true;
                 s_connected_at_us = 0;
                 xEventGroupClearBits(s_evt, WM_CONNECTED_BIT);
                 xEventGroupSetBits(s_evt, WM_DISCONNECTED_BIT);
@@ -415,6 +416,10 @@ esp_err_t wifi_manager_init() {
     ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(84));
     ESP_ERROR_CHECK(esp_event_handler_register(WIFI_EVENT, ESP_EVENT_ANY_ID, reinterpret_cast<esp_event_handler_t>(on_wifi_event), nullptr));
     ESP_ERROR_CHECK(esp_event_handler_register(IP_EVENT, IP_EVENT_STA_GOT_IP, reinterpret_cast<esp_event_handler_t>(on_ip_event), nullptr));
+
+    // Set initial state in central state machine
+    StateMachine::setInitial("wifi_manager", stateToString(WifiManagerState::OFF));
+    set_wifi_state(WifiManagerState::OFF);
 
     const BaseType_t r = xTaskCreatePinnedToCore( manager_task, "wifi_mgr", 4096, nullptr,
         configMAX_PRIORITIES - 2, nullptr, 1);

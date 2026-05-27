@@ -8,6 +8,7 @@ idf_component_register(
         led_control
         wifi_manager
         sensor_control
+        state_machine
     PRIV_REQUIRES
         firmware_version
 )

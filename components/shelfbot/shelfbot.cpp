@@ -6,6 +6,8 @@
 #include <wifi_manager.hpp>
 #include <http_server.hpp>
 #include <firmware_version.hpp>
+#include <state_machine.hpp>
+#include <state_machine_lifecycle.hpp>
 
 static const char* TAG = "Shelfbot";
 
@@ -16,7 +18,6 @@ Shelfbot& Shelfbot::get_instance() {
     return *instance_;
 }
 
-// Network services task (mDNS, HTTP, SNTP) – unchanged except no ROS here
 static void network_services_task(void* arg) {
     EventGroupHandle_t wifi_evt = wifi_manager_get_event_group();
     xEventGroupWaitBits(wifi_evt, WM_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
@@ -39,9 +40,13 @@ esp_err_t Shelfbot::begin() {
     ESP_LOGI(TAG, "Shelfbot Firmware v%s", FirmwareVersion::get_version_string());
     ESP_LOGI(TAG, "========================================");
 
+    // Initialize central state machine first
+    StateMachine::init();
+    StateMachine::setInitial("shelfbot", stateToString(ShelfbotState::STARTING));
+
     // 1. Hardware
     led_control_init();
-    motor_control_begin();
+    motor_control_begin();   // internally calls StateMachine::setInitial for motor_control
 
     // 2. NVS
     esp_err_t ret = nvs_flash_init();
@@ -52,7 +57,7 @@ esp_err_t Shelfbot::begin() {
     if (ret != ESP_OK) return ret;
 
     // 3. Wi‑Fi
-    ret = wifi_manager_init();
+    ret = wifi_manager_init(); // internally calls StateMachine::setInitial for wifi_manager
     if (ret != ESP_OK) return ret;
 
     // 4. Sensors
@@ -69,7 +74,6 @@ esp_err_t Shelfbot::begin() {
     sensor_config.lidar_config.uart_rx_pin = GPIO_NUM_3;
     sensor_config.lidar_config.baud_rate = 115200;
 
-    // Set callbacks to publish via microros_sync
     sensor_config.ultrasonic_callback = [](const std::vector<uint16_t>& distances) {
         float float_distances[SensorCommon::NUM_ULTRASONIC_SENSORS];
         for (size_t i = 0; i < distances.size(); ++i)
@@ -85,14 +89,17 @@ esp_err_t Shelfbot::begin() {
     };
 
     SensorManager::get_instance().initialize(sensor_config);
-    SensorManager::get_instance().start();
+    SensorManager::get_instance().start(); // internally calls StateMachine::setInitial for sensor_control
 
     // 5. Network services task
     xTaskCreate(network_services_task, "net_services", 8192, nullptr, 5, nullptr);
 
     // 6. Micro-ROS node
-    MicrorosSync::getInstance().init();
+    MicrorosSync::getInstance().init();  // calls StateMachine::setInitial for microros_sync
     MicrorosSync::getInstance().start();
+
+    // Shelfbot now running
+    StateMachine::changeState("shelfbot", stateToString(ShelfbotState::RUNNING));
 
     ESP_LOGI(TAG, "Initialization complete");
     return ESP_OK;

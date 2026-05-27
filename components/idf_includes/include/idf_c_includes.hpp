@@ -53,6 +53,8 @@ extern "C" {
 // C++ standard library
 #include <functional>
 #include <cstdint>
+#include <cstdint>
+#include <string>
 #include <cstring>
 #include <cinttypes>
 #include <cmath>
@@ -65,3 +67,7 @@ extern "C" {
 #include <fstream>
 #include <sstream>
 #include <iomanip>
+#include <unordered_map>
+#include <unordered_set>
+#include <mutex>
+
