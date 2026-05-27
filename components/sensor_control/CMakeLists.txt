@@ -16,4 +16,5 @@ idf_component_register(
         lydsto_driver
         firmware_version
         duart_modbus
+        microros_sync      # <-- added
 )

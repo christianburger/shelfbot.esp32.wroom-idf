@@ -9,4 +9,5 @@ idf_component_register(SRCS "shelfbot.cpp"
         led_control
         sensor_control
         firmware_version
+        microros_sync
 )
