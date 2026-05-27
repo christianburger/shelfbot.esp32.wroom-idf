@@ -58,7 +58,7 @@ struct MicrorosSyncImpl {
     std_msgs__msg__Float32MultiArray set_speed_msg;
     std_msgs__msg__Bool led_msg;
 
-    float motor_positions_data[NUM_MOTORS];                    // FIXED: was [4]
+    float motor_positions_data[NUM_MOTORS];
     float distance_sensors_data[SensorCommon::NUM_SENSORS];
     float lidar_scan_data[30];
 
@@ -461,7 +461,7 @@ void MicrorosSync::publishLidarScan(const SensorCommon::LidarMeasurement& m) {
     g_impl->lidar_scan_data[1] = m.end_angle_deg;
     g_impl->lidar_scan_data[2] = m.min_distance_angle_deg;
     g_impl->lidar_scan_data[3] = static_cast<float>(m.distance_mm);
-    g_impl->lidar_scan_data[4] = static_cast<float>(m.packet_speed);
+    g_impl->lidar_scan_data[4] = static_cast<float>(m.rotational_speed_rpm);   // renamed
     for (int i = 0; i < 12; ++i) {
         g_impl->lidar_scan_data[5 + i] = static_cast<float>(m.packet_distances_mm[i]);
         g_impl->lidar_scan_data[17 + i] = static_cast<float>(m.packet_confidences[i]);
