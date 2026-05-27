@@ -49,7 +49,7 @@ namespace SensorCommon {
     float end_angle_deg;
     float min_distance_angle_deg;
     bool has_packet_points;
-    uint16_t rotational_speed_rpm;   // renamed from packet_speed
+    uint16_t rotational_speed_rpm;   // was packet_speed
     uint16_t packet_timestamp;
     uint8_t packet_crc;
     uint8_t sample_count;            // number of valid points in packet (usually 12)

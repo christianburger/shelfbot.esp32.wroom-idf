@@ -54,9 +54,14 @@ struct MicrorosSyncImpl {
     std_msgs__msg__Float32 tof_distance_msg;
     std_msgs__msg__Float32MultiArray lidar_scan_msg;
 
+    // Subscription message storage
     std_msgs__msg__Float32MultiArray motor_command_msg;
     std_msgs__msg__Float32MultiArray set_speed_msg;
     std_msgs__msg__Bool led_msg;
+
+    // Backing arrays for subscription data
+    float motor_cmd_data[NUM_MOTORS];
+    float set_speed_data[NUM_MOTORS];
 
     float motor_positions_data[NUM_MOTORS];
     float distance_sensors_data[SensorCommon::NUM_SENSORS];
@@ -65,6 +70,8 @@ struct MicrorosSyncImpl {
     bool entities_created;
     TaskHandle_t task_handle;
     MicrorosState current_state;
+
+    SemaphoreHandle_t mutex;
 
     MicrorosSyncImpl()
         : node(rcl_get_zero_initialized_node()),
@@ -83,7 +90,8 @@ struct MicrorosSyncImpl {
           heartbeat_timer(rcl_get_zero_initialized_timer()),
           motor_position_timer(rcl_get_zero_initialized_timer()),
           sensor_control_timer(rcl_get_zero_initialized_timer()),
-          entities_created(false), task_handle(nullptr), current_state(MicrorosState::OFF)
+          entities_created(false), task_handle(nullptr), current_state(MicrorosState::OFF),
+          mutex(nullptr)
     {
         std_msgs__msg__Int32__init(&heartbeat_msg);
         std_msgs__msg__Float32MultiArray__init(&motor_positions_msg);
@@ -95,12 +103,19 @@ struct MicrorosSyncImpl {
         std_msgs__msg__Float32MultiArray__init(&set_speed_msg);
         std_msgs__msg__Bool__init(&led_msg);
 
+        memset(motor_cmd_data, 0, sizeof(motor_cmd_data));
+        memset(set_speed_data, 0, sizeof(set_speed_data));
+        motor_command_msg.data.data = motor_cmd_data;
+        motor_command_msg.data.capacity = NUM_MOTORS;
+        set_speed_msg.data.data = set_speed_data;
+        set_speed_msg.data.capacity = NUM_MOTORS;
+
         memset(motor_positions_data, 0, sizeof(motor_positions_data));
         memset(distance_sensors_data, 0, sizeof(distance_sensors_data));
         memset(lidar_scan_data, 0, sizeof(lidar_scan_data));
 
         motor_positions_msg.data.data = motor_positions_data;
-        motor_positions_msg.data.capacity = sizeof(motor_positions_data)/sizeof(float);
+        motor_positions_msg.data.capacity = NUM_MOTORS;
         motor_positions_msg.data.size = 0;
 
         distance_sensors_msg.data.data = distance_sensors_data;
@@ -110,9 +125,12 @@ struct MicrorosSyncImpl {
         lidar_scan_msg.data.data = lidar_scan_data;
         lidar_scan_msg.data.capacity = 30;
         lidar_scan_msg.data.size = 0;
+
+        mutex = xSemaphoreCreateMutex();
     }
 
     ~MicrorosSyncImpl() {
+        if (mutex) vSemaphoreDelete(mutex);
         if (task_handle) vTaskDelete(task_handle);
     }
 
@@ -129,58 +147,84 @@ struct MicrorosSyncImpl {
 
 static MicrorosSyncImpl* g_impl = nullptr;
 
-// Publishing helpers
-static void publish_heartbeat() {
-    if (!g_impl || !g_impl->entities_created) return;
-    ROS_CHECK(rcl_publish(&g_impl->heartbeat_pub, &g_impl->heartbeat_msg, NULL), "heartbeat publish");
+// Helper for thread‑safe access to g_impl
+static bool lock_impl() {
+    return g_impl && xSemaphoreTake(g_impl->mutex, pdMS_TO_TICKS(100)) == pdTRUE;
 }
-static void publish_motor_positions() {
-    if (!g_impl || !g_impl->entities_created) return;
-    ROS_CHECK(rcl_publish(&g_impl->motor_positions_pub, &g_impl->motor_positions_msg, NULL), "motor_positions publish");
-}
-static void publish_distance_sensors() {
-    if (!g_impl || !g_impl->entities_created) return;
-    ROS_CHECK(rcl_publish(&g_impl->distance_sensors_pub, &g_impl->distance_sensors_msg, NULL), "distance_sensors publish");
-}
-static void publish_led_state() {
-    if (!g_impl || !g_impl->entities_created) return;
-    ROS_CHECK(rcl_publish(&g_impl->led_state_pub, &g_impl->led_state_msg, NULL), "led_state publish");
-}
-static void publish_tof_distance() {
-    if (!g_impl || !g_impl->entities_created) return;
-    ROS_CHECK(rcl_publish(&g_impl->tof_distance_pub, &g_impl->tof_distance_msg, NULL), "tof_distance publish");
-}
-static void publish_lidar_scan() {
-    if (!g_impl || !g_impl->entities_created) return;
-    ROS_CHECK(rcl_publish(&g_impl->lidar_scan_pub, &g_impl->lidar_scan_msg, NULL), "lidar_scan publish");
+static void unlock_impl() {
+    if (g_impl) xSemaphoreGive(g_impl->mutex);
 }
 
+// ==================== UNLOCKED publish helpers (caller must hold mutex) ====================
+static void _publish_heartbeat_unlocked() {
+    if (g_impl->entities_created) {
+        ROS_CHECK(rcl_publish(&g_impl->heartbeat_pub, &g_impl->heartbeat_msg, NULL), "heartbeat publish");
+    }
+}
+static void _publish_motor_positions_unlocked() {
+    if (g_impl->entities_created) {
+        ROS_CHECK(rcl_publish(&g_impl->motor_positions_pub, &g_impl->motor_positions_msg, NULL), "motor_positions publish");
+    }
+}
+static void _publish_distance_sensors_unlocked() {
+    if (g_impl->entities_created) {
+        ROS_CHECK(rcl_publish(&g_impl->distance_sensors_pub, &g_impl->distance_sensors_msg, NULL), "distance_sensors publish");
+    }
+}
+static void _publish_led_state_unlocked() {
+    if (g_impl->entities_created) {
+        ROS_CHECK(rcl_publish(&g_impl->led_state_pub, &g_impl->led_state_msg, NULL), "led_state publish");
+    }
+}
+static void _publish_tof_distance_unlocked() {
+    if (g_impl->entities_created) {
+        ROS_CHECK(rcl_publish(&g_impl->tof_distance_pub, &g_impl->tof_distance_msg, NULL), "tof_distance publish");
+    }
+}
+static void _publish_lidar_scan_unlocked() {
+    if (g_impl->entities_created) {
+        ROS_CHECK(rcl_publish(&g_impl->lidar_scan_pub, &g_impl->lidar_scan_msg, NULL), "lidar_scan publish");
+    }
+}
+
+// ==================== Timer callbacks (lock once, call unlocked publishes) ====================
 static void heartbeat_timer_cb(rcl_timer_t* timer, int64_t last_call_time) {
     (void)last_call_time;
     static int32_t counter = 0;
-    if (g_impl && g_impl->entities_created) {
-        g_impl->heartbeat_msg.data = ++counter;
-        publish_heartbeat();
+    if (lock_impl()) {
+        if (g_impl->entities_created) {
+            g_impl->heartbeat_msg.data = ++counter;
+            _publish_heartbeat_unlocked();
+        }
+        unlock_impl();
     }
 }
 
 static void motor_position_timer_cb(rcl_timer_t* timer, int64_t last_call_time) {
     (void)last_call_time;
-    if (g_impl && g_impl->entities_created) {
-        for (uint8_t i = 0; i < NUM_MOTORS; ++i)
-            g_impl->motor_positions_data[i] = static_cast<float>(motor_control_get_position(i));
-        g_impl->motor_positions_msg.data.size = NUM_MOTORS;
-        publish_motor_positions();
+    if (lock_impl()) {
+        if (g_impl->entities_created) {
+            for (uint8_t i = 0; i < NUM_MOTORS; ++i)
+                g_impl->motor_positions_data[i] = static_cast<float>(motor_control_get_position(i));
+            g_impl->motor_positions_msg.data.size = NUM_MOTORS;
+            _publish_motor_positions_unlocked();
+        }
+        unlock_impl();
     }
 }
 
 static void sensor_control_timer_cb(rcl_timer_t* timer, int64_t last_call_time) {
     (void)last_call_time;
-    if (!g_impl || !g_impl->entities_created) return;
+    if (!lock_impl()) return;
+    if (!g_impl->entities_created) {
+        unlock_impl();
+        return;
+    }
 
     SensorCommon::SensorDataPacket data;
     if (!SensorManager::get_instance().get_latest_data(data)) {
         ESP_LOGW(TAG, "Failed to get latest sensor data");
+        unlock_impl();
         return;
     }
 
@@ -196,13 +240,36 @@ static void sensor_control_timer_cb(rcl_timer_t* timer, int64_t last_call_time) 
         distances[idx] = data.lidar_measurement.valid ? (data.lidar_measurement.distance_mm / 10.0f) : -1.0f;
         ++idx;
     }
-    MicrorosSync::publishDistanceSensors(distances, idx);
+    // Update distance sensors message
+    size_t copy = std::min(idx, (size_t)SensorCommon::NUM_SENSORS);
+    memcpy(g_impl->distance_sensors_data, distances, copy * sizeof(float));
+    g_impl->distance_sensors_msg.data.size = copy;
+    _publish_distance_sensors_unlocked();
 
+    // Update ToF distance
     float tof_m = data.tof_measurements[0].valid ? (data.tof_measurements[0].distance_mm / 1000.0f) : -1.0f;
-    MicrorosSync::publishTofDistance(tof_m);
-    MicrorosSync::publishLidarScan(data.lidar_measurement);
+    g_impl->tof_distance_msg.data = tof_m;
+    _publish_tof_distance_unlocked();
+
+    // Update LiDAR scan
+    const auto& m = data.lidar_measurement;
+    g_impl->lidar_scan_data[0] = m.start_angle_deg;
+    g_impl->lidar_scan_data[1] = m.end_angle_deg;
+    g_impl->lidar_scan_data[2] = m.min_distance_angle_deg;
+    g_impl->lidar_scan_data[3] = static_cast<float>(m.distance_mm);
+    g_impl->lidar_scan_data[4] = static_cast<float>(m.rotational_speed_rpm);
+    for (int i = 0; i < 12; ++i) {
+        g_impl->lidar_scan_data[5 + i] = static_cast<float>(m.packet_distances_mm[i]);
+        g_impl->lidar_scan_data[17 + i] = static_cast<float>(m.packet_confidences[i]);
+    }
+    g_impl->lidar_scan_data[29] = (m.valid && m.has_packet_points) ? 1.0f : 0.0f;
+    g_impl->lidar_scan_msg.data.size = 30;
+    _publish_lidar_scan_unlocked();
+
+    unlock_impl();
 }
 
+// ==================== Subscription callbacks (no mutex needed for motor/led control) ====================
 static void motor_command_cb(const void* msg) {
     auto* cmd = static_cast<const std_msgs__msg__Float32MultiArray*>(msg);
     size_t count = std::min((size_t)NUM_MOTORS, cmd->data.size);
@@ -218,12 +285,16 @@ static void set_speed_cb(const void* msg) {
 static void led_cb(const void* msg) {
     auto* led = static_cast<const std_msgs__msg__Bool*>(msg);
     led_control_set(led->data);
-    if (g_impl && g_impl->entities_created) {
-        g_impl->led_state_msg.data = led->data;
-        publish_led_state();
+    if (lock_impl()) {
+        if (g_impl->entities_created) {
+            g_impl->led_state_msg.data = led->data;
+            _publish_led_state_unlocked();
+        }
+        unlock_impl();
     }
 }
 
+// ==================== Entity creation/destruction (unchanged) ====================
 static void create_entities(MicrorosSyncImpl& impl) {
     ESP_LOGI(TAG, "Creating micro-ROS entities");
     ROS_CHECK(rclc_node_init_default(&impl.node, "shelfbot_firmware", "", &impl.support), "node init");
@@ -283,6 +354,7 @@ static void destroy_entities(MicrorosSyncImpl& impl) {
     ROS_CHECK(rclc_support_fini(&impl.support), "support fini");
 }
 
+// ==================== mDNS and micro-ROS task (unchanged except for call to unlocked publish?) ====================
 static bool query_mdns_host(const char* host_name, char* out_ip, size_t len) {
     ESP_LOGI(TAG, "Querying mDNS for %s.local", host_name);
     esp_ip4_addr_t addr;
@@ -326,7 +398,10 @@ static void microros_task(void* arg) {
                 mdns_init();
                 mdns_hostname_set("shelfbot");
                 mdns_instance_name_set("Shelfbot ESP32 Client");
-                impl->setState(MicrorosState::DISCOVERING);
+                if (lock_impl()) {
+                    impl->setState(MicrorosState::DISCOVERING);
+                    unlock_impl();
+                }
                 state = TaskState::DISCOVER_AGENT;
                 break;
             }
@@ -354,10 +429,16 @@ static void microros_task(void* arg) {
 
                 if (rclc_support_init_with_options(&impl->support, 0, NULL, &init_options, &impl->allocator) == RCL_RET_OK) {
                     create_entities(*impl);
-                    impl->entities_created = true;
+                    if (lock_impl()) {
+                        impl->entities_created = true;
+                        unlock_impl();
+                    }
                     consecutive_spin_failures = 0;
                     backoff_ms = 250;
-                    impl->setState(MicrorosState::CONNECTED);
+                    if (lock_impl()) {
+                        impl->setState(MicrorosState::CONNECTED);
+                        unlock_impl();
+                    }
                     state = TaskState::CONNECTED;
                 } else {
                     ESP_LOGE(TAG, "rclc_support_init_with_options failed");
@@ -374,8 +455,11 @@ static void microros_task(void* arg) {
                     if (++consecutive_spin_failures >= 3) {
                         ESP_LOGW(TAG, "3 consecutive spin failures, disconnecting...");
                         destroy_entities(*impl);
-                        impl->entities_created = false;
-                        impl->setState(MicrorosState::DISCONNECTED);
+                        if (lock_impl()) {
+                            impl->entities_created = false;
+                            impl->setState(MicrorosState::DISCONNECTED);
+                            unlock_impl();
+                        }
                         state = TaskState::BACKING_OFF;
                     }
                 } else {
@@ -389,7 +473,10 @@ static void microros_task(void* arg) {
                 ESP_LOGW(TAG, "Backing off for %lu ms", (unsigned long)backoff_ms);
                 vTaskDelay(pdMS_TO_TICKS(backoff_ms));
                 backoff_ms = std::min(MAX_BACKOFF, backoff_ms * 2);
-                impl->setState(MicrorosState::DISCOVERING);
+                if (lock_impl()) {
+                    impl->setState(MicrorosState::DISCOVERING);
+                    unlock_impl();
+                }
                 state = TaskState::DISCOVER_AGENT;
                 break;
             }
@@ -397,6 +484,7 @@ static void microros_task(void* arg) {
     }
 }
 
+// ==================== Public API (lock and call unlocked internal publishes) ====================
 MicrorosSync::MicrorosSync() { g_impl = new MicrorosSyncImpl(); }
 MicrorosSync::~MicrorosSync() { delete g_impl; g_impl = nullptr; }
 
@@ -408,7 +496,10 @@ MicrorosSync& MicrorosSync::getInstance() {
 bool MicrorosSync::init() {
     ESP_LOGI(TAG, "MicrorosSync initialised");
     StateMachine::setInitial("microros_sync", stateToString(MicrorosState::OFF));
-    if (g_impl) g_impl->setState(MicrorosState::OFF);
+    if (lock_impl()) {
+        g_impl->setState(MicrorosState::OFF);
+        unlock_impl();
+    }
     return true;
 }
 
@@ -419,54 +510,75 @@ void MicrorosSync::start() {
 }
 
 void MicrorosSync::publishHeartbeat(int32_t value) {
-    if (g_impl && g_impl->entities_created) {
-        g_impl->heartbeat_msg.data = value;
-        publish_heartbeat();
+    if (lock_impl()) {
+        if (g_impl->entities_created) {
+            g_impl->heartbeat_msg.data = value;
+            _publish_heartbeat_unlocked();
+        }
+        unlock_impl();
     }
 }
 
 void MicrorosSync::publishMotorPositions(const float* positions, size_t count) {
-    if (!g_impl || !g_impl->entities_created) return;
-    size_t copy = std::min(count, sizeof(g_impl->motor_positions_data)/sizeof(float));
-    memcpy(g_impl->motor_positions_data, positions, copy * sizeof(float));
-    g_impl->motor_positions_msg.data.size = copy;
-    publish_motor_positions();
+    if (lock_impl()) {
+        if (g_impl->entities_created) {
+            size_t copy = std::min(count, sizeof(g_impl->motor_positions_data)/sizeof(float));
+            memcpy(g_impl->motor_positions_data, positions, copy * sizeof(float));
+            g_impl->motor_positions_msg.data.size = copy;
+            _publish_motor_positions_unlocked();
+        }
+        unlock_impl();
+    }
 }
 
 void MicrorosSync::publishDistanceSensors(const float* distances, size_t count) {
-    if (!g_impl || !g_impl->entities_created) return;
-    size_t copy = std::min(count, (size_t)SensorCommon::NUM_SENSORS);
-    memcpy(g_impl->distance_sensors_data, distances, copy * sizeof(float));
-    g_impl->distance_sensors_msg.data.size = copy;
-    publish_distance_sensors();
+    if (lock_impl()) {
+        if (g_impl->entities_created) {
+            size_t copy = std::min(count, (size_t)SensorCommon::NUM_SENSORS);
+            memcpy(g_impl->distance_sensors_data, distances, copy * sizeof(float));
+            g_impl->distance_sensors_msg.data.size = copy;
+            _publish_distance_sensors_unlocked();
+        }
+        unlock_impl();
+    }
 }
 
 void MicrorosSync::publishLedState(bool state) {
-    if (g_impl && g_impl->entities_created) {
-        g_impl->led_state_msg.data = state;
-        publish_led_state();
+    if (lock_impl()) {
+        if (g_impl->entities_created) {
+            g_impl->led_state_msg.data = state;
+            _publish_led_state_unlocked();
+        }
+        unlock_impl();
     }
 }
 
 void MicrorosSync::publishTofDistance(float distance_m) {
-    if (g_impl && g_impl->entities_created) {
-        g_impl->tof_distance_msg.data = distance_m;
-        publish_tof_distance();
+    if (lock_impl()) {
+        if (g_impl->entities_created) {
+            g_impl->tof_distance_msg.data = distance_m;
+            _publish_tof_distance_unlocked();
+        }
+        unlock_impl();
     }
 }
 
 void MicrorosSync::publishLidarScan(const SensorCommon::LidarMeasurement& m) {
-    if (!g_impl || !g_impl->entities_created) return;
-    g_impl->lidar_scan_data[0] = m.start_angle_deg;
-    g_impl->lidar_scan_data[1] = m.end_angle_deg;
-    g_impl->lidar_scan_data[2] = m.min_distance_angle_deg;
-    g_impl->lidar_scan_data[3] = static_cast<float>(m.distance_mm);
-    g_impl->lidar_scan_data[4] = static_cast<float>(m.rotational_speed_rpm);   // renamed
-    for (int i = 0; i < 12; ++i) {
-        g_impl->lidar_scan_data[5 + i] = static_cast<float>(m.packet_distances_mm[i]);
-        g_impl->lidar_scan_data[17 + i] = static_cast<float>(m.packet_confidences[i]);
+    if (lock_impl()) {
+        if (g_impl->entities_created) {
+            g_impl->lidar_scan_data[0] = m.start_angle_deg;
+            g_impl->lidar_scan_data[1] = m.end_angle_deg;
+            g_impl->lidar_scan_data[2] = m.min_distance_angle_deg;
+            g_impl->lidar_scan_data[3] = static_cast<float>(m.distance_mm);
+            g_impl->lidar_scan_data[4] = static_cast<float>(m.rotational_speed_rpm);
+            for (int i = 0; i < 12; ++i) {
+                g_impl->lidar_scan_data[5 + i] = static_cast<float>(m.packet_distances_mm[i]);
+                g_impl->lidar_scan_data[17 + i] = static_cast<float>(m.packet_confidences[i]);
+            }
+            g_impl->lidar_scan_data[29] = (m.valid && m.has_packet_points) ? 1.0f : 0.0f;
+            g_impl->lidar_scan_msg.data.size = 30;
+            _publish_lidar_scan_unlocked();
+        }
+        unlock_impl();
     }
-    g_impl->lidar_scan_data[29] = (m.valid && m.has_packet_points) ? 1.0f : 0.0f;
-    g_impl->lidar_scan_msg.data.size = 30;
-    publish_lidar_scan();
 }

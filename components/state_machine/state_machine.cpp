@@ -1,219 +1,104 @@
-#include <state_machine.hpp>
-#include <state_machine_lifecycle.hpp>
-#include <esp_timer.h>
+#include "state_machine.hpp"
 
 static const char* TAG = "StateMachine";
 
-std::unordered_map<std::string, StateMachine::ModuleState> StateMachine::modules_;
+// Static member definitions
 std::mutex StateMachine::mutex_;
+std::unordered_map<std::string, StateMachine::ModuleState> StateMachine::modules_;
+TaskHandle_t StateMachine::status_task_handle_ = nullptr;
+bool StateMachine::task_running_ = false;
 
-// ----------------------------------------------------------------------------
-// String to enum conversion (forward declarations from lifecycle header)
-// ----------------------------------------------------------------------------
-static ShelfbotState toShelfbotState(const std::string& s) {
-    if (s == "starting") return ShelfbotState::STARTING;
-    if (s == "running")  return ShelfbotState::RUNNING;
-    if (s == "error")    return ShelfbotState::ERROR;
-    if (s == "shutdown") return ShelfbotState::SHUTDOWN;
-    return ShelfbotState::ERROR;
-}
-static MotorControlState toMotorControlState(const std::string& s) {
-    if (s == "off")      return MotorControlState::OFF;
-    if (s == "idle")     return MotorControlState::IDLE;
-    if (s == "moving")   return MotorControlState::MOVING;
-    if (s == "error")    return MotorControlState::ERROR;
-    if (s == "disabled") return MotorControlState::DISABLED;
-    return MotorControlState::ERROR;
-}
-static SensorControlState toSensorControlState(const std::string& s) {
-    if (s == "off")      return SensorControlState::OFF;
-    if (s == "idle")     return SensorControlState::IDLE;
-    if (s == "scanning") return SensorControlState::SCANNING;
-    if (s == "error")    return SensorControlState::ERROR;
-    if (s == "disabled") return SensorControlState::DISABLED;
-    return SensorControlState::ERROR;
-}
-static MicrorosState toMicrorosState(const std::string& s) {
-    if (s == "off")          return MicrorosState::OFF;
-    if (s == "discovering")  return MicrorosState::DISCOVERING;
-    if (s == "connected")    return MicrorosState::CONNECTED;
-    if (s == "error")        return MicrorosState::ERROR;
-    if (s == "disconnected") return MicrorosState::DISCONNECTED;
-    return MicrorosState::ERROR;
-}
-static WifiManagerState toWifiManagerState(const std::string& s) {
-    if (s == "off")          return WifiManagerState::OFF;
-    if (s == "connecting")   return WifiManagerState::CONNECTING;
-    if (s == "connected")    return WifiManagerState::CONNECTED;
-    if (s == "error")        return WifiManagerState::ERROR;
-    if (s == "disconnected") return WifiManagerState::DISCONNECTED;
-    return WifiManagerState::ERROR;
+void StateMachine::init() {
+    if (task_running_) {
+        ESP_LOGW(TAG, "StateMachine already initialised");
+        return;
+    }
+
+    task_running_ = true;
+    BaseType_t ret = xTaskCreate(
+        status_dump_task,
+        "state_dump",
+        4096,
+        nullptr,
+        tskIDLE_PRIORITY + 1,
+        &status_task_handle_
+    );
+
+    if (ret != pdPASS) {
+        ESP_LOGE(TAG, "Failed to create status dump task");
+        task_running_ = false;
+    } else {
+        ESP_LOGI(TAG, "StateMachine initialised, status logged every 10 seconds");
+    }
 }
 
-// ----------------------------------------------------------------------------
-// Helper: check if a transition is allowed for a given module and state strings
-// ----------------------------------------------------------------------------
-static bool is_transition_allowed(const std::string& module_name,
-                                  const std::string& from_state_str,
-                                  const std::string& to_state_str) {
-    if (module_name == "shelfbot") {
-        ShelfbotState from = toShelfbotState(from_state_str);
-        ShelfbotState to   = toShelfbotState(to_state_str);
-        if (from == ShelfbotState::ERROR || to == ShelfbotState::ERROR) return false;
-        return shelfbot_transitions[static_cast<size_t>(from)][static_cast<size_t>(to)];
-    }
-    else if (module_name == "motor_control") {
-        MotorControlState from = toMotorControlState(from_state_str);
-        MotorControlState to   = toMotorControlState(to_state_str);
-        if (from == MotorControlState::ERROR || to == MotorControlState::ERROR) return false;
-        return motor_control_transitions[static_cast<size_t>(from)][static_cast<size_t>(to)];
-    }
-    else if (module_name == "sensor_control") {
-        SensorControlState from = toSensorControlState(from_state_str);
-        SensorControlState to   = toSensorControlState(to_state_str);
-        if (from == SensorControlState::ERROR || to == SensorControlState::ERROR) return false;
-        return sensor_control_transitions[static_cast<size_t>(from)][static_cast<size_t>(to)];
-    }
-    else if (module_name == "microros_sync") {
-        MicrorosState from = toMicrorosState(from_state_str);
-        MicrorosState to   = toMicrorosState(to_state_str);
-        if (from == MicrorosState::ERROR || to == MicrorosState::ERROR) return false;
-        return microros_transitions[static_cast<size_t>(from)][static_cast<size_t>(to)];
-    }
-    else if (module_name == "wifi_manager") {
-        WifiManagerState from = toWifiManagerState(from_state_str);
-        WifiManagerState to   = toWifiManagerState(to_state_str);
-        if (from == WifiManagerState::ERROR || to == WifiManagerState::ERROR) return false;
-        return wifi_manager_transitions[static_cast<size_t>(from)][static_cast<size_t>(to)];
-    }
-    return false; // unknown module
-}
-
-// ----------------------------------------------------------------------------
-// Public API
-// ----------------------------------------------------------------------------
-bool StateMachine::init() {
+bool StateMachine::setInitial(const std::string& module, const std::string& initial_state) {
     std::lock_guard<std::mutex> lock(mutex_);
-    modules_.clear();
-    const std::vector<std::string> module_names = {
-        "shelfbot", "motor_control", "sensor_control", "microros_sync", "wifi_manager"
-    };
-    for (const auto& mod : module_names) {
-        ModuleState ms;
-        ms.current_state_str = "";
-        ms.current_timestamp = 0;
-        ms.previous_state_str = "";
-        ms.previous_timestamp = 0;
-        modules_[mod] = ms;
+    auto it = modules_.find(module);
+    if (it != modules_.end()) {
+        ESP_LOGW(TAG, "Module '%s' already exists (state=%s), ignoring setInitial",
+                 module.c_str(), it->second.current_state.c_str());
+        return false;
     }
-    ESP_LOGI(TAG, "State machine initialized with %zu modules", modules_.size());
+    modules_[module] = ModuleState(initial_state);
+    ESP_LOGI(TAG, "Module '%s' initial state: %s", module.c_str(), initial_state.c_str());
     return true;
 }
 
-bool StateMachine::setInitial(const std::string& module_name, const std::string& initial_state) {
+bool StateMachine::changeState(const std::string& module, const std::string& new_state) {
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = modules_.find(module_name);
+    auto it = modules_.find(module);
     if (it == modules_.end()) {
-        ESP_LOGE(TAG, "Unknown module '%s'", module_name.c_str());
+        ESP_LOGE(TAG, "Module '%s' not found, cannot change state to '%s'",
+                 module.c_str(), new_state.c_str());
         return false;
     }
-    // Validate that the state string is a valid state for this module
-    bool valid = false;
-    if (module_name == "shelfbot") {
-        valid = (toShelfbotState(initial_state) != ShelfbotState::ERROR);
-    } else if (module_name == "motor_control") {
-        valid = (toMotorControlState(initial_state) != MotorControlState::ERROR);
-    } else if (module_name == "sensor_control") {
-        valid = (toSensorControlState(initial_state) != SensorControlState::ERROR);
-    } else if (module_name == "microros_sync") {
-        valid = (toMicrorosState(initial_state) != MicrorosState::ERROR);
-    } else if (module_name == "wifi_manager") {
-        valid = (toWifiManagerState(initial_state) != WifiManagerState::ERROR);
-    }
-    if (!valid) {
-        ESP_LOGE(TAG, "Invalid initial state '%s' for module '%s'", initial_state.c_str(), module_name.c_str());
-        return false;
-    }
-    it->second.current_state_str = initial_state;
-    it->second.current_timestamp = esp_timer_get_time();
-    it->second.previous_state_str = "";
-    it->second.previous_timestamp = 0;
-    ESP_LOGI(TAG, "Module '%s' initial state set to '%s'", module_name.c_str(), initial_state.c_str());
-    return true;
-}
-
-bool StateMachine::changeState(const std::string& module_name, const std::string& new_state_str) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = modules_.find(module_name);
-    if (it == modules_.end()) {
-        ESP_LOGE(TAG, "Unknown module '%s'", module_name.c_str());
-        return false;
-    }
-    const std::string& old_state_str = it->second.current_state_str;
-    if (old_state_str == new_state_str) {
-        ESP_LOGW(TAG, "Module '%s' already in state '%s'", module_name.c_str(), new_state_str.c_str());
+    std::string old_state = it->second.current_state;
+    if (old_state == new_state) {
         return true;
     }
-
-    // Check transition using the helper
-    if (!is_transition_allowed(module_name, old_state_str, new_state_str)) {
-        ESP_LOGE(TAG, "Transition from '%s' to '%s' not allowed for module '%s'",
-                 old_state_str.c_str(), new_state_str.c_str(), module_name.c_str());
-        return false;
-    }
-
-    // Perform transition
-    ESP_LOGI(TAG, "Module '%s' transition: '%s' -> '%s'",
-             module_name.c_str(), old_state_str.c_str(), new_state_str.c_str());
-    updateState(module_name, new_state_str);
+    it->second.current_state = new_state;
+    ESP_LOGI(TAG, "Module '%s' transition: %s -> %s",
+             module.c_str(), old_state.c_str(), new_state.c_str());
     return true;
 }
 
-std::string StateMachine::getCurrentState(const std::string& module_name) {
+const std::string& StateMachine::getState(const std::string& module) {
+    static const std::string empty;
     std::lock_guard<std::mutex> lock(mutex_);
-    auto it = modules_.find(module_name);
-    return (it != modules_.end()) ? it->second.current_state_str : "";
-}
-
-int64_t StateMachine::getCurrentStateTimestamp(const std::string& module_name) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = modules_.find(module_name);
-    return (it != modules_.end()) ? it->second.current_timestamp : 0;
-}
-
-std::string StateMachine::getPreviousState(const std::string& module_name) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = modules_.find(module_name);
-    return (it != modules_.end()) ? it->second.previous_state_str : "";
-}
-
-int64_t StateMachine::getPreviousStateTimestamp(const std::string& module_name) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = modules_.find(module_name);
-    return (it != modules_.end()) ? it->second.previous_timestamp : 0;
-}
-
-void StateMachine::logCurrentState(const std::string& module_name) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    auto it = modules_.find(module_name);
-    if (it != modules_.end()) {
-        const auto& mod = it->second;
-        ESP_LOGI(TAG, "Module '%s' state='%s' (since %lld µs), prev='%s'",
-                 module_name.c_str(),
-                 mod.current_state_str.c_str(),
-                 (long long)mod.current_timestamp,
-                 mod.previous_state_str.c_str());
-    } else {
-        ESP_LOGW(TAG, "Module '%s' not registered", module_name.c_str());
+    auto it = modules_.find(module);
+    if (it == modules_.end()) {
+        return empty;
     }
+    return it->second.current_state;
 }
 
-void StateMachine::updateState(const std::string& module_name, const std::string& new_state_str) {
-    auto it = modules_.find(module_name);
-    if (it == modules_.end()) return;
-    ModuleState& mod = it->second;
-    mod.previous_state_str = mod.current_state_str;
-    mod.previous_timestamp = mod.current_timestamp;
-    mod.current_state_str = new_state_str;
-    mod.current_timestamp = esp_timer_get_time();
+void StateMachine::dumpAllStates() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    if (modules_.empty()) {
+        ESP_LOGI(TAG, "No modules registered yet");
+        return;
+    }
+
+    ESP_LOGI(TAG, "========== State Machine Status ==========");
+    for (const auto& pair : modules_) {
+        ESP_LOGI(TAG, "  %-20s : %s",
+                 pair.first.c_str(),
+                 pair.second.current_state.c_str());
+    }
+    ESP_LOGI(TAG, "===========================================");
+}
+
+void StateMachine::status_dump_task(void* arg) {
+    (void)arg;
+    ESP_LOGI(TAG, "Status dump task started");
+
+    while (task_running_) {
+        vTaskDelay(pdMS_TO_TICKS(10000));
+        dumpAllStates();
+    }
+
+    ESP_LOGI(TAG, "Status dump task stopping");
+    status_task_handle_ = nullptr;
+    vTaskDelete(nullptr);
 }
