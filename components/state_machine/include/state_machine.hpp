@@ -1,12 +1,5 @@
 #pragma once
-
-#include <string>
-#include <unordered_map>
-#include <mutex>
-
-#include "freertos/FreeRTOS.h"
-#include "freertos/task.h"
-#include "esp_log.h"
+#include <idf_c_includes.hpp>
 
 class StateMachine {
 public:

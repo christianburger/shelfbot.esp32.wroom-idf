@@ -1,6 +1,6 @@
-#include "state_machine.hpp"
+#include <state_machine.hpp>
 
-static const char* TAG = "StateMachine";
+static auto TAG = "StateMachine";
 
 // Static member definitions
 std::mutex StateMachine::mutex_;
