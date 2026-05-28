@@ -1,0 +1,72 @@
+digraph DataFlow {
+    rankdir=TB;
+    node [shape=box, style=filled, fillcolor=lightblue];
+
+    subgraph cluster_lydsto {
+        label="LYDSTO Driver (lydsto.cpp)";
+        style=filled;
+        fillcolor=lightgrey;
+        UART [label="UART Hardware\n(GPIO3 RX)"];
+        LYDSTO_Driver [label="LYDSTO_Driver\n- readPacket()\n- validPacket()\n- extractMinDistance()"];
+        RawPacket [label="Raw Packet\n(47 bytes)"];
+        UART -> LYDSTO_Driver [label="uart_read_bytes()"];
+        LYDSTO_Driver -> RawPacket [label="get_last_packet()"];
+    }
+
+    subgraph cluster_lidarsensor {
+        label="LidarSensor (lidar_sensor.cpp)";
+        style=filled;
+        fillcolor=lightgrey;
+        LidarSensor [label="LidarSensor\n- read()"];
+        PacketParser [label="LidarPacketParser\n- parse()\n- crc8_poly4d()"];
+        LidarMeasurement [label="SensorCommon::LidarMeasurement\n- packet_distances_mm[12]\n- packet_confidences[12]\n- start_angle_deg\n- end_angle_deg\n- valid, has_packet_points"];
+        RawPacket -> LidarSensor [label="driver_.get_last_packet()"];
+        LidarSensor -> PacketParser [label="parse(raw, parsed)"];
+        PacketParser -> LidarMeasurement [label="fill distances, confidences, angles"];
+        LidarSensor -> LidarMeasurement [label="populates"];
+    }
+
+    subgraph cluster_sensorcontrol {
+        label="SensorControl (sensor_control.cpp)";
+        style=filled;
+        fillcolor=lightgrey;
+        SensorControl [label="SensorControl\n- continuous_read_loop()"];
+        SensorDataPacket [label="SensorCommon::SensorDataPacket\n- lidar_measurement\n- ultrasonic_readings[]\n- tof_measurements[]"];
+        LidarMeasurement -> SensorControl [label="lidar_sensor_->read()"];
+        SensorControl -> SensorDataPacket [label="stores latest_data_"];
+    }
+
+    subgraph cluster_sensormanager {
+        label="SensorManager (sensor_manager.cpp)";
+        style=filled;
+        fillcolor=lightgrey;
+        SensorManager [label="SensorManager\n- get_latest_data()"];
+        Mutex [label="data_mutex_"];
+        SensorDataPacket -> SensorManager [label="shared via mutex"];
+        SensorManager -> Mutex [label="xSemaphoreTake/Give"];
+    }
+
+    subgraph cluster_microros {
+        label="MicrorosSync (microros_sync.cpp)";
+        style=filled;
+        fillcolor=lightgrey;
+        MicrorosSync [label="MicrorosSyncImpl\n- sensor_control_timer_cb()"];
+        LaserScanMsg [label="sensor_msgs__msg__LaserScan\n- ranges[12]\n- intensities[12]\n- angle_min/max\n- header"];
+        SensorManager -> MicrorosSync [label="get_latest_data()"];
+        MicrorosSync -> LaserScanMsg [label="fills from LidarMeasurement"];
+    }
+
+    subgraph cluster_microros_agent {
+        label="micro-ROS Agent (external)";
+        style=filled;
+        fillcolor=lightgrey;
+        Agent [label="micro-ROS Agent\n(UDP server)"];
+        rcl_publish [label="rcl_publish()"];
+        LaserScanMsg -> rcl_publish;
+        rcl_publish -> Agent [label="UDP (agent IP:8888)"];
+    }
+
+    // Additional notes
+    Note [shape=note, fillcolor=yellow, label="Data flow timing:\n- LYDSTO sends packets ~25-40ms\n- SensorControl reads every 10ms\n- MicrorosSync timer every 200ms\n- LaserScan published on each valid packet"];
+    Note -> MicrorosSync [style=dashed];
+}
