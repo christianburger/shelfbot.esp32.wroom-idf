@@ -10,15 +10,14 @@ static int8_t motor_direction_sign[NUM_MOTORS] = {0};
 static MotorControlState current_state = MotorControlState::OFF;
 
 static const int motorPins[NUM_MOTORS][2] = {
-    {27, 26},  // Motor 0: PULSE=GPIO27, DIR=GPIO26
-    {14, 33},  // Motor 1: PULSE=GPIO14, DIR=GPIO33
-    {13, 19},  // Motor 2: PULSE=GPIO13, DIR=GPIO19
-    { 4, 18},  // Motor 3: PULSE=GPIO4,  DIR=GPIO18
-    {12, 23},  // Motor 4: PULSE=GPIO12, DIR=GPIO23
+    {13, 19},   // Motor 0: PULSE=GPIO13, DIR=GPIO19
+    {14, 33},   // Motor 1: PULSE=GPIO14, DIR=GPIO33
+    {4, 18},    // Motor 2: PULSE=GPIO4, DIR=GPIO18
+    {27, 26},   // Motor 3: PULSE=GPIO27, DIR=GPIO26
+    {12, 23}    // Motor 4: PULSE=GPIO12,  DIR=GPIO23
 };
 
-const double RADS_TO_STEPS =
-    (STEPS_PER_REVOLUTION * MICROSTEPPING * GEAR_RATIO) / (2.0 * M_PI);
+const double RADS_TO_STEPS = (STEPS_PER_REVOLUTION * MICROSTEPPING * GEAR_RATIO) / (2.0 * M_PI);
 
 static constexpr long DEFAULT_SPEED_HZ   = 4000;
 static constexpr long DEFAULT_ACCEL_HZ_S = 2000;
