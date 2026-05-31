@@ -8,13 +8,13 @@ This document describes the GPIO allocation for 5 stepper motors and provides cl
 
 The motor control component (`motor_control.cpp`) uses the following pins:
 
-| Motor | STEP (PULSE) | DIR  |
-|-------|--------------|------|
-| 0     | GPIO27       | GPIO26|
-| 1     | GPIO14       | GPIO33|
-| 2     | GPIO13       | GPIO19|
-| 3     | GPIO4        | GPIO18|
-| 4     | GPIO12       | GPIO23|
+| Motor | STEP (PULSE) | DIR    |
+|-------|--------------|--------|
+| 0     | GPIO13       | GPIO19 |
+| 1     | GPIO14       | GPIO33 |
+| 2     | GPIO4        | GPIO18 |
+| 3     | GPIO27       | GPIO26 |
+| 4     | GPIO12       | GPIO23 |
 
 > **Note:** No dedicated `ENABLE` pins are configured – the drivers stay enabled when power is applied. If you need enable control, assign an extra GPIO per motor and modify the code.
 

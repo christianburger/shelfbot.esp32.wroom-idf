@@ -1,25 +1,43 @@
 ESP32                                 TMC2209 Driver (x5)
 ------                                ------------------
+
 +-----------------+
-| GPIO27 (STEP0)  | --> STEP0
-| GPIO26 (DIR0)   | --> DIR0
-| GPIO14 (STEP1)  | --> STEP1
+| GPIO13 (STEP0)  | --> STEP0   (Motor M0)
+| GPIO19 (DIR0)   | --> DIR0
+|
+| GPIO14 (STEP1)  | --> STEP1   (Motor M1)
 | GPIO33 (DIR1)   | --> DIR1
-| GPIO13 (STEP2)  | --> STEP2
-| GPIO19 (DIR2)   | --> DIR2
-| GPIO4  (STEP3)  | --> STEP3
-| GPIO18 (DIR3)   | --> DIR3
-| GPIO12 (STEP4)  | --> STEP4
+|
+| GPIO4  (STEP2)  | --> STEP2   (Motor M2)
+| GPIO18 (DIR2)   | --> DIR2
+|
+| GPIO27 (STEP3)  | --> STEP3   (Motor M3)
+| GPIO26 (DIR3)   | --> DIR3
+|
+| GPIO12 (STEP4)  | --> STEP4   (Motor M4)
 | GPIO23 (DIR4)   | --> DIR4
-|                 |
+|
 | 3.3V            | ---> VIO (all drivers parallel)
 | GND             | ---> GND (logic ground)
 +-----------------+
        |
        | (common ground)
        v
+
 +-----------------+
 | Power Supply    |
 | 24V+  --> VM    |
 | GND   --> GND (power ground)
 +-----------------+
+
+
+Reference source (motor_control.cpp):
+
+static const int motorPins[NUM_MOTORS][2] = {
+    {13, 19},   // Motor 0: PULSE=GPIO13, DIR=GPIO19
+    {14, 33},   // Motor 1: PULSE=GPIO14, DIR=GPIO33
+    {4, 18},    // Motor 2: PULSE=GPIO4,  DIR=GPIO18
+    {27, 26},   // Motor 3: PULSE=GPIO27, DIR=GPIO26
+    {12, 23}    // Motor 4: PULSE=GPIO12, DIR=GPIO23
+};
+

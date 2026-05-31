@@ -1,5 +1,6 @@
 #pragma once
 #include <idf_c_includes.hpp>
+#include <array>
 
 struct LidarParsedPacket {
     bool valid;
@@ -12,7 +13,7 @@ struct LidarParsedPacket {
     uint8_t crc;
     uint8_t crc_calculated;
     bool crc_valid;
-    std::string json;
+    // No std::string – avoids heap allocation and exceptions
 };
 
 class LidarPacketParser {

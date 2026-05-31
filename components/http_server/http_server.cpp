@@ -321,7 +321,6 @@ esp_err_t HttpServer::motor_status_handler(httpd_req_t* req) {
 esp_err_t HttpServer::motor_set_handler(httpd_req_t* req) {
     add_cors_headers(req);
 
-    // Reject bodies that won't fit in our buffer before attempting to read
     static constexpr size_t MAX_BODY = 255;
     if (req->content_len > MAX_BODY) {
         return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "request body too large (max 255 bytes)");
@@ -486,7 +485,8 @@ esp_err_t HttpServer::lidar_handler(httpd_req_t* req) {
     cJSON_AddBoolToObject  (root, "timeout_occurred",       m.timeout_occurred);
 
     if (m.has_packet_points) {
-        cJSON_AddNumberToObject(root, "speed",     m.packet_speed);
+        // FIXED: use renamed field rotational_speed_rpm
+        cJSON_AddNumberToObject(root, "speed",     m.rotational_speed_rpm);
         cJSON_AddNumberToObject(root, "timestamp", m.packet_timestamp);
         cJSON_AddNumberToObject(root, "crc",       m.packet_crc);
         cJSON* points = cJSON_CreateArray();

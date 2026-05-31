@@ -7,16 +7,14 @@ QueueHandle_t distance_data_queue = nullptr;
 static gptimer_handle_t shared_timeout_timer = nullptr;
 static SemaphoreHandle_t measurement_done_sem = nullptr;
 static volatile int active_sensor_index = -1;
-static UltrasonicSensorArray* g_array = nullptr;
+static volatile UltrasonicSensorArray* g_array = nullptr;   // FIX #5: added volatile
 
-// ============================================================================
-// ISR Handlers
-// ============================================================================
 static void IRAM_ATTR echo_isr_handler(void* arg) {
     const int sensor_idx = reinterpret_cast<intptr_t>(arg);
     if (sensor_idx < 0 || sensor_idx >= SensorCommon::NUM_ULTRASONIC_SENSORS || !g_array) return;
 
-    UltrasonicSensorConfig& cfg = g_array->configs_[sensor_idx];
+    // Use atomic load for g_array (volatile ensures fresh read)
+    UltrasonicSensorConfig& cfg = const_cast<UltrasonicSensorArray*>(g_array)->configs_[sensor_idx];
 
     if (const uint32_t gpio_level = gpio_get_level(cfg.echo_pin); gpio_level == 1) {
         cfg.start_time = esp_timer_get_time();
@@ -30,7 +28,7 @@ static void IRAM_ATTR echo_isr_handler(void* arg) {
 
 static bool IRAM_ATTR timeout_timer_isr(gptimer_handle_t timer, const gptimer_alarm_event_data_t* edata, void* user_data) {
     if (active_sensor_index >= 0 && active_sensor_index < SensorCommon::NUM_ULTRASONIC_SENSORS && g_array) {
-        UltrasonicSensorConfig& cfg = g_array->configs_[active_sensor_index];
+        UltrasonicSensorConfig& cfg = const_cast<UltrasonicSensorArray*>(g_array)->configs_[active_sensor_index];
         cfg.pulse_duration = cfg.timeout_us;
         cfg.state = SENSOR_IDLE;
         xSemaphoreGiveFromISR(measurement_done_sem, NULL);
@@ -122,7 +120,8 @@ bool UltrasonicSensorArray::init() {
         return false;
     }
 
-    g_array = this;
+    // Memory barrier before publishing to ISR
+    __atomic_store_n(&g_array, this, __ATOMIC_SEQ_CST);
     initialized_ = true;
     ESP_LOGI(TAG, "UltrasonicSensorArray initialized");
     return true;
@@ -246,7 +245,7 @@ bool UltrasonicSensorArray::readAll(std::vector<SensorCommon::Reading>& readings
 }
 
 // ============================================================================
-// UltrasonicSensorManager Implementation
+// UltrasonicSensorManager Implementation (unchanged, kept for compatibility)
 // ============================================================================
 
 UltrasonicSensorManager& UltrasonicSensorManager::instance() {

@@ -4,8 +4,10 @@
 #include <lidar_sensor.hpp>
 #include <lidar_packet_parser.hpp>
 #include <firmware_version.hpp>
+#include <state_machine.hpp>
+#include <state_machine_lifecycle.hpp>
 
-// Include ONLY the adapter for the selected driver
+// Include adapter for the selected driver
 #if SHELFBOT_DRIVER_VL53L0X
     #include "vl53l0x_adapter.hpp"
 #elif SHELFBOT_DRIVER_VL53L1
@@ -17,6 +19,18 @@
 #endif
 
 const char* SensorControl::TAG = "SensorControl";
+
+static SensorControlState s_current_state = SensorControlState::OFF;
+
+static void set_sensor_state(SensorControlState new_state) {
+    if (s_current_state == new_state) return;
+    const char* state_str = stateToString(new_state);
+    if (StateMachine::changeState("sensor_control", state_str)) {
+        s_current_state = new_state;
+    } else {
+        ESP_LOGE(SensorControl::TAG, "Failed to transition to state %s", state_str);
+    }
+}
 
 SensorControl::SensorControl(Config config) : config_(std::move(config)) {
     data_mutex_ = xSemaphoreCreateMutex();
@@ -35,11 +49,10 @@ SensorControl::~SensorControl() {
     }
 }
 
-// -------------------------------------------------------------------
-// Factory for UltrasonicArray
-// -------------------------------------------------------------------
+// Factory methods (unchanged)
 std::unique_ptr<IUltrasonicArray> SensorControl::createUltrasonicArray() {
 #if SHELFBOT_HAS_ULTRASONIC == 0
+    ESP_LOGW(TAG, "Ultrasonic support disabled at compile time");
     return nullptr;
 #else
     if (config_.ultrasonic_configs.empty()) {
@@ -74,11 +87,9 @@ std::unique_ptr<IUltrasonicArray> SensorControl::createUltrasonicArray() {
 #endif
 }
 
-// -------------------------------------------------------------------
-// Factory for ToF sensor – macro decides which driver to instantiate
-// -------------------------------------------------------------------
 std::unique_ptr<IToFSensor> SensorControl::createToFSensor() {
 #if SHELFBOT_HAS_TOF == 0
+    ESP_LOGW(TAG, "ToF support disabled at compile time");
     return nullptr;
 #else
     TofSensor::Config tof_config;
@@ -116,11 +127,9 @@ std::unique_ptr<IToFSensor> SensorControl::createToFSensor() {
 #endif
 }
 
-// -------------------------------------------------------------------
-// Factory for LiDAR
-// -------------------------------------------------------------------
 std::unique_ptr<ILidarSensor> SensorControl::createLidarSensor() {
 #if SHELFBOT_HAS_LIDAR == 0
+    ESP_LOGW(TAG, "LiDAR support disabled at compile time");
     return nullptr;
 #else
     if (!config_.lidar_config.enabled) {
@@ -145,9 +154,6 @@ std::unique_ptr<ILidarSensor> SensorControl::createLidarSensor() {
 #endif
 }
 
-// -------------------------------------------------------------------
-// Initialization
-// -------------------------------------------------------------------
 esp_err_t SensorControl::initialize() {
     if (initialized_) return ESP_OK;
 
@@ -160,7 +166,6 @@ esp_err_t SensorControl::initialize() {
     tof_sensor_       = createToFSensor();
     lidar_sensor_     = createLidarSensor();
 
-    // Update latest_data_ activity flags
     for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS; ++i) {
         latest_data_.ultrasonic_readings[i].active = (ultrasonic_array_ && i < static_cast<int>(config_.ultrasonic_configs.size()));
     }
@@ -170,6 +175,13 @@ esp_err_t SensorControl::initialize() {
     latest_data_.lidar_measurement.active = (lidar_sensor_ != nullptr);
 
     initialized_ = true;
+
+    // Initial state – OFF
+    StateMachine::setInitial("sensor_control", stateToString(SensorControlState::OFF));
+    set_sensor_state(SensorControlState::OFF);
+
+    // Move to IDLE – this transition is allowed (OFF → IDLE)
+    set_sensor_state(SensorControlState::IDLE);
 
     ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "Sensor Control Initialization Complete");
@@ -183,14 +195,9 @@ bool SensorControl::is_ready() const {
     return initialized_ && ultrasonic_ready && tof_ready;
 }
 
-// -------------------------------------------------------------------
-// Reading methods
-// -------------------------------------------------------------------
 esp_err_t SensorControl::read_ultrasonic(std::vector<uint16_t>& distances) {
     distances.clear();
-    if (!ultrasonic_array_) {
-        return ESP_ERR_INVALID_STATE;
-    }
+    if (!ultrasonic_array_) return ESP_ERR_INVALID_STATE;
 
     std::vector<SensorCommon::Reading> readings;
     if (!ultrasonic_array_->readAll(readings, SensorCommon::DEFAULT_TIMEOUT_MS)) {
@@ -205,26 +212,18 @@ esp_err_t SensorControl::read_ultrasonic(std::vector<uint16_t>& distances) {
 }
 
 esp_err_t SensorControl::read_tof(SensorCommon::TofMeasurement results[SensorCommon::NUM_TOF_SENSORS]) const {
-    if (!tof_sensor_) {
-        return ESP_ERR_INVALID_STATE;
-    }
+    if (!tof_sensor_) return ESP_ERR_INVALID_STATE;
     return tof_sensor_->readAll(results);
 }
 
 esp_err_t SensorControl::read_lidar(SensorCommon::LidarMeasurement& result) const {
-    if (!lidar_sensor_) {
-        return ESP_ERR_INVALID_STATE;
-    }
+    if (!lidar_sensor_) return ESP_ERR_INVALID_STATE;
     return lidar_sensor_->read(result);
 }
 
 esp_err_t SensorControl::read_tof_single(uint8_t sensor_index, SensorCommon::TofMeasurement& result) const {
-    if (!tof_sensor_) {
-        return ESP_ERR_INVALID_STATE;
-    }
-    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS) {
-        return ESP_ERR_INVALID_ARG;
-    }
+    if (!tof_sensor_) return ESP_ERR_INVALID_STATE;
+    if (sensor_index >= SensorCommon::NUM_TOF_SENSORS) return ESP_ERR_INVALID_ARG;
     return tof_sensor_->readSingle(sensor_index, result);
 }
 
@@ -232,21 +231,15 @@ esp_err_t SensorControl::read_all(std::vector<uint16_t>& ultrasonic_distances,
                                   SensorCommon::TofMeasurement tof_results[SensorCommon::NUM_TOF_SENSORS]) {
     esp_err_t err = ESP_OK;
     if (ultrasonic_array_) {
-        if (read_ultrasonic(ultrasonic_distances) != ESP_OK) {
-            err = ESP_FAIL;
-        }
+        if (read_ultrasonic(ultrasonic_distances) != ESP_OK) err = ESP_FAIL;
     }
     if (tof_sensor_) {
-        if (read_tof(tof_results) != ESP_OK) {
-            err = ESP_FAIL;
-        }
+        if (read_tof(tof_results) != ESP_OK) err = ESP_FAIL;
     }
     return err;
 }
 
-// -------------------------------------------------------------------
-// Continuous mode
-// -------------------------------------------------------------------
+// FIX #3: continuous_read_loop – move blocking read outside mutex
 void SensorControl::continuous_read_loop() {
     ESP_LOGI(TAG, "Starting continuous sensor reading...");
     TickType_t last_ultrasonic_wake = xTaskGetTickCount();
@@ -255,6 +248,13 @@ void SensorControl::continuous_read_loop() {
     while (continuous_mode_) {
         TickType_t now = xTaskGetTickCount();
 
+        // --- Perform the blocking LiDAR read OUTSIDE the mutex
+        SensorCommon::LidarMeasurement lidar_result;
+        if (lidar_sensor_) {
+            lidar_sensor_->read(lidar_result);
+        }
+
+        // --- Now take the mutex only to update shared data
         if (xSemaphoreTake(data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
             int64_t timestamp = esp_timer_get_time();
 
@@ -276,10 +276,12 @@ void SensorControl::continuous_read_loop() {
             }
 
             latest_data_.timestamp_us = timestamp;
-            update_lidar_measurement();
+            // Copy the LiDAR result that was already read
+            latest_data_.lidar_measurement = lidar_result;
 
             xSemaphoreGive(data_mutex_);
 
+            // Callbacks – these are non‑blocking and outside the mutex
             if ((now - last_ultrasonic_wake) * portTICK_PERIOD_MS >= config_.ultrasonic_read_interval_ms) {
                 if (config_.ultrasonic_callback && ultrasonic_array_) {
                     std::vector<uint16_t> distances_mm;
@@ -310,9 +312,7 @@ void SensorControl::continuous_read_loop() {
 
 void SensorControl::continuous_read_task(void* arg) {
     auto* instance = static_cast<SensorControl*>(arg);
-    if (instance) {
-        instance->continuous_read_loop();
-    }
+    if (instance) instance->continuous_read_loop();
     vTaskDelete(nullptr);
 }
 
@@ -328,6 +328,8 @@ esp_err_t SensorControl::start_continuous() {
         }
     }
 
+    // FIX #3: transition from IDLE → SCANNING (OFF→IDLE already done in initialize())
+    set_sensor_state(SensorControlState::SCANNING);
     continuous_mode_ = true;
 
     BaseType_t result = xTaskCreate(
@@ -342,6 +344,7 @@ esp_err_t SensorControl::start_continuous() {
     if (result != pdPASS) {
         ESP_LOGE(TAG, "Failed to create continuous reading task");
         continuous_mode_ = false;
+        set_sensor_state(SensorControlState::ERROR);
         if (tof_sensor_) tof_sensor_->stopContinuous();
         return ESP_FAIL;
     }
@@ -353,6 +356,7 @@ esp_err_t SensorControl::start_continuous() {
 esp_err_t SensorControl::stop_continuous() {
     if (!continuous_mode_) return ESP_OK;
     continuous_mode_ = false;
+    set_sensor_state(SensorControlState::IDLE);
     if (continuous_task_handle_) {
         vTaskDelay(pdMS_TO_TICKS(100));
         continuous_task_handle_ = nullptr;
@@ -366,9 +370,6 @@ bool SensorControl::is_continuous() const {
     return continuous_mode_;
 }
 
-// -------------------------------------------------------------------
-// Status and control
-// -------------------------------------------------------------------
 size_t SensorControl::get_ultrasonic_count() const {
     return config_.ultrasonic_configs.size();
 }
@@ -391,9 +392,6 @@ esp_err_t SensorControl::set_tof_mode(uint8_t sensor_index, bool long_distance) 
     return ESP_OK;
 }
 
-// -------------------------------------------------------------------
-// Diagnostics
-// -------------------------------------------------------------------
 esp_err_t SensorControl::self_test() const {
     esp_err_t overall_result = ESP_OK;
     if (tof_sensor_) {
@@ -414,16 +412,19 @@ bool SensorControl::tof_probe(uint8_t sensor_index) const {
 }
 
 uint8_t SensorControl::lidar_health() const {
-    return latest_data_.lidar_measurement.health;
+    // This function reads from latest_data_ – must take mutex
+    uint8_t health = 0;
+    if (xSemaphoreTake(data_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
+        health = latest_data_.lidar_measurement.health;
+        xSemaphoreGive(data_mutex_);
+    }
+    return health;
 }
 
 bool SensorControl::get_last_lidar_raw_packet(uint8_t* out, size_t len) const {
     return lidar_sensor_ && lidar_sensor_->getLastRawPacket(out, len);
 }
 
-// -------------------------------------------------------------------
-// Latest data access
-// -------------------------------------------------------------------
 bool SensorControl::get_latest_data(SensorCommon::SensorDataPacket* data) const {
     if (!data || !data_mutex_) return false;
     if (xSemaphoreTake(data_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
@@ -434,35 +435,7 @@ bool SensorControl::get_latest_data(SensorCommon::SensorDataPacket* data) const 
     return false;
 }
 
-// -------------------------------------------------------------------
-// Internal LiDAR measurement update
-// -------------------------------------------------------------------
 esp_err_t SensorControl::update_lidar_measurement() {
-    latest_data_.lidar_measurement.active = (lidar_sensor_ != nullptr);
-    if (!lidar_sensor_) {
-        latest_data_.lidar_measurement.valid = false;
-        latest_data_.lidar_measurement.status = 0;
-        return ESP_OK;
-    }
-    esp_err_t err = lidar_sensor_->read(latest_data_.lidar_measurement);
-    if (err == ESP_OK) {
-        uint32_t count = lidar_sensor_->getPacketCount();
-        if (count > 0 && (count % 20) == 0) {
-            uint8_t raw[47];
-            if (lidar_sensor_->getLastRawPacket(raw, sizeof(raw))) {
-                LidarParsedPacket parsed{};
-                if (LidarPacketParser::parse(raw, sizeof(raw), parsed)) {
-                    ESP_LOGW(TAG, "=== LiDAR RAW PACKET #%lu BEGIN ===", static_cast<unsigned long>(count));
-                    ESP_LOGW(TAG, "%s", parsed.json.c_str());
-                    ESP_LOGW(TAG, "LiDAR CRC check packet#%lu: frame_crc=0x%02X calc_crc=0x%02X valid=%d",
-                             static_cast<unsigned long>(count),
-                             static_cast<unsigned>(parsed.crc),
-                             static_cast<unsigned>(parsed.crc_calculated),
-                             static_cast<int>(parsed.crc_valid));
-                    ESP_LOGW(TAG, "=== LiDAR RAW PACKET #%lu END ===", static_cast<unsigned long>(count));
-                }
-            }
-        }
-    }
-    return err;
+    // This function is no longer used – kept for compatibility but does nothing
+    return ESP_OK;
 }
