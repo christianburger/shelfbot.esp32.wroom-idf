@@ -1,5 +1,7 @@
 # Shelfbot ESP32 Firmware – Complete Hardware & Setup Guide
+
 ## 1. Environment Setup (ESP‑IDF + micro‑ROS + FastAccelStepper)
+
 ### 1.1 Install ESP‑IDF v5.3
 
 ```bash
@@ -60,7 +62,7 @@ rm -rf components/micro_ros_espidf_component/micro_ros_src \
        build
 ```
 
-### 1.8 Configure Flash Size (4 MB)
+### 1.8 Configure Flash Size (4 MB)
 
 ```bash
 idf.py menuconfig
@@ -95,8 +97,10 @@ idf.py monitor
 ### 1.11 Run micro‑ROS Agent (on host PC, UDP over IP)
 
 ```bash
-docker run -it --rm --net=host microros/micro-ros-agent:humble udp4 --port 8888 -v6
+docker run -it --rm --net=host microros/micro-ros-agent:humble udp4 --port 8888 --time -v6
 ```
+
+> **`--time` flag is required** for the agent to respond to `rmw_uros_sync_session()` requests from the firmware. Without it the agent silently ignores the time-sync sub-protocol and the firmware falls back to SNTP-only synchronisation, which takes several seconds longer.
 
 > The firmware uses `rmw_uros_options_set_udp_address(..., "8888", ...)`, so transport is **UDP/IP** (not serial).
 
@@ -117,13 +121,15 @@ idf.py build
 
 ### 2.1 GPIO Mapping (PULSE / DIR)
 
-| Motor | STEP (PULSE) | DIR  |
-|-------|--------------|------|
-| 0     | GPIO27       | GPIO26|
-| 1     | GPIO14       | GPIO33|
-| 2     | GPIO13       | GPIO19|
-| 3     | GPIO4        | GPIO18|
-| 4     | GPIO12       | GPIO23|
+Verified against `components/motor_control/motor_control.cpp`:
+
+| Motor | STEP (PULSE) | DIR   |
+|-------|-------------|-------|
+| 0     | GPIO13      | GPIO19|
+| 1     | GPIO14      | GPIO33|
+| 2     | GPIO4       | GPIO18|
+| 3     | GPIO27      | GPIO26|
+| 4     | GPIO12      | GPIO23|
 
 ### 2.2 TMC2209 Connections
 
@@ -152,14 +158,14 @@ idf.py build
 ```
 ESP32                                 TMC2209 (x5)
 ------                                -----------
-GPIO27 (STEP0)  --------------------> STEP0
-GPIO26 (DIR0)   --------------------> DIR0
+GPIO13 (STEP0)  --------------------> STEP0
+GPIO19 (DIR0)   --------------------> DIR0
 GPIO14 (STEP1)  --------------------> STEP1
 GPIO33 (DIR1)   --------------------> DIR1
-GPIO13 (STEP2)  --------------------> STEP2
-GPIO19 (DIR2)   --------------------> DIR2
-GPIO4  (STEP3)  --------------------> STEP3
-GPIO18 (DIR3)   --------------------> DIR3
+GPIO4  (STEP2)  --------------------> STEP2
+GPIO18 (DIR2)   --------------------> DIR2
+GPIO27 (STEP3)  --------------------> STEP3
+GPIO26 (DIR3)   --------------------> DIR3
 GPIO12 (STEP4)  --------------------> STEP4
 GPIO23 (DIR4)   --------------------> DIR4
 3.3V            --------------------> VIO (all)
@@ -178,14 +184,14 @@ GND             --------------------> GND (logic)
 
 | Peripheral       | Function        | GPIO   | Notes                          |
 |------------------|-----------------|--------|--------------------------------|
-| **Motor 0**      | STEP            | 27     | TMC2209 STEP0                  |
-|                  | DIR             | 26     | TMC2209 DIR0                   |
+| **Motor 0**      | STEP            | 13     | TMC2209 STEP0                  |
+|                  | DIR             | 19     | TMC2209 DIR0                   |
 | **Motor 1**      | STEP            | 14     |                                |
 |                  | DIR             | 33     |                                |
-| **Motor 2**      | STEP            | 13     |                                |
-|                  | DIR             | 19     |                                |
-| **Motor 3**      | STEP            | 4      |                                |
+| **Motor 2**      | STEP            | 4      |                                |
 |                  | DIR             | 18     |                                |
+| **Motor 3**      | STEP            | 27     |                                |
+|                  | DIR             | 26     |                                |
 | **Motor 4**      | STEP            | 12     |                                |
 |                  | DIR             | 23     |                                |
 | **Ultrasonic 0** | TRIG            | 25     | HC‑SR04 trigger                |
@@ -197,12 +203,12 @@ GND             --------------------> GND (logic)
 | **Ultrasonic 3** | TRIG            | 17     |                                |
 |                  | ECHO            | 39     | Input only                     |
 | **LiDAR**        | UART2 RX        | 3      | LYDSTO LDS02RR (RX only)       |
-|                  | UART2 TX        | -      | Not connected                  |
+|                  | UART2 TX        | —      | Not connected (TX-only sensor) |
 | **I2C (ToF)**    | SDA             | 21     | Disabled at compile time       |
 |                  | SCL             | 22     |                                |
 | **LED**          | (depends)       | ?      | See `led_control` component    |
-| **Power**        | 3.3V            | -      | To VIO of TMC2209              |
-|                  | GND             | -      | Common ground with motor PSU   |
+| **Power**        | 3.3V            | —      | To VIO of TMC2209              |
+|                  | GND             | —      | Common ground with motor PSU   |
 
 > **Important:** GPIO3 is also the default UART0 RX (console). If you need both the console and LiDAR, either move LiDAR to another UART (e.g., UART1 on GPIO9/10) or disable console on GPIO3.
 
@@ -222,19 +228,68 @@ GND             --------------------> GND (logic)
 
 ---
 
-## 5. ROS 2 Interface Verification (from firmware code)
+## 5. Clock Synchronisation
+
+The firmware uses a two-path strategy to set the POSIX wall clock before publishing any timestamped sensor messages.
+
+### How it works
+
+**Path A — micro-ROS agent time sync**
+When the XRCE-DDS session is established, the firmware calls `rmw_uros_sync_session()` (up to 3 attempts). The agent must be started with `--time` to respond. On success the ESP32 POSIX clock is updated via `settimeofday()`.
+
+**Path B — SNTP fallback**
+The moment the ESP32 obtains a DHCP address, `wifi_manager` automatically starts the SNTP client pointing at `pool.ntp.org` and `time.cloudflare.com`. If agent sync fails or is not available, the firmware polls until SNTP settles (up to 30 seconds).
+
+Both paths are checked by `ShelfbotTimestamp::isEpochValid()`, which verifies the POSIX clock is set to a sane date (after November 2023). The first path to succeed wins.
+
+### Effect on publishing
+
+| Topic | Publishes before sync? | Stamp source |
+|---|---|---|
+| `heartbeat` | ✅ Yes | No stamp in message |
+| `led_state` | ✅ Yes | No stamp in message |
+| `motor_positions` | ❌ Waits for sync | — |
+| `distance_sensors` | ❌ Waits for sync | — |
+| `tof_distance` | ❌ Waits for sync | — |
+| `laser_scan` | ❌ Waits for sync | `header.stamp` = wall clock (epoch) |
+
+If sync times out (30 s), the firmware proceeds with monotonic (boot-relative) timestamps for `laser_scan` and continues silently. All other timestamped topics remain gated until a sync source is available.
+
+### Startup sequence with time sync
+
+```
+1. Wi-Fi connects → DHCP obtains IP
+2. wifi_manager on_ip_event fires:
+     → SNTP client started (pool.ntp.org, time.cloudflare.com)
+     → WM_CONNECTED_BIT set
+3. microros_task WAITING_WIFI unblocks → state: DISCOVERING
+4. mDNS resolves agent host → state: INITIALIZING
+5. rcl_init + entities created → state: TIME_SYNC
+6. rmw_uros_sync_session attempted (needs agent --time flag)
+     → if OK and epoch valid: clock synced via agent
+     → else: poll isEpochValid() waiting for SNTP (≤30 s)
+7. time_synced = true → state: CONNECTED
+8. Sensor topics begin publishing with wall-clock stamps
+```
+
+---
+
+## 6. ROS 2 Interface Verification (from firmware code)
 
 Node name: `shelfbot_firmware`
 
 ### Publishers (ESP32 → ROS 2)
 
-| Topic | Type | Payload details |
-|---|---|---|
-| `shelfbot_firmware/heartbeat` | `std_msgs/msg/Int32` | Increments every 1 second |
-| `shelfbot_firmware/motor_positions` | `std_msgs/msg/Float32MultiArray` | **5 values** (radians), one per motor index 0..4 |
-| `shelfbot_firmware/distance_sensors` | `std_msgs/msg/Float32MultiArray` | Up to 6 values (cm): 4 ultrasonic + 1 ToF + 1 LiDAR (`-1.0` if invalid) |
-| `shelfbot_firmware/led_state` | `std_msgs/msg/Bool` | Current LED state |
-| `shelfbot_firmware/tof_distance` | `std_msgs/msg/Float32` | ToF[0] distance in cm (`-1.0` if invalid/unavailable) |
+| Topic | Type | Rate | Payload details |
+|---|---|---|---|
+| `shelfbot_firmware/heartbeat` | `std_msgs/msg/Int32` | 1 Hz | Incrementing counter; publishes immediately, before clock sync |
+| `shelfbot_firmware/motor_positions` | `std_msgs/msg/Float32MultiArray` | 10 Hz | **5 values** (radians), indices 0–4; published only after clock sync |
+| `shelfbot_firmware/distance_sensors` | `std_msgs/msg/Float32MultiArray` | 5 Hz | 6 values (cm): 4 ultrasonic + 1 ToF + 1 LiDAR min (`-1.0` = invalid); after sync |
+| `shelfbot_firmware/led_state` | `std_msgs/msg/Bool` | On change | Current LED state; publishes immediately |
+| `shelfbot_firmware/tof_distance` | `std_msgs/msg/Float32` | 5 Hz | ToF[0] distance in **metres** (`-1.0` = invalid/unavailable); after sync |
+| `shelfbot_firmware/laser_scan` | `sensor_msgs/msg/LaserScan` | 5 Hz | 12 points per packet; `angle_min`/`angle_max` from LiDAR packet; `range_min`=0.02 m, `range_max`=12 m; `frame_id`=`lidar_frame`; `header.stamp` = wall clock; after sync |
+
+> **QoS:** All publishers use `RELIABILITY_BEST_EFFORT`, `DURABILITY_VOLATILE` (matches the ROS 2 `SENSOR_DATA` profile). Subscribe on the host side with the same QoS or you will receive no messages.
 
 ### Subscriptions (ROS 2 → ESP32)
 
@@ -243,3 +298,12 @@ Node name: `shelfbot_firmware`
 | `shelfbot_firmware/motor_command` | `std_msgs/msg/Float32MultiArray` | Position commands in radians; consumes up to first 5 elements |
 | `shelfbot_firmware/set_speed` | `std_msgs/msg/Float32MultiArray` | Velocity commands in rad/s; consumes up to first 5 elements |
 | `shelfbot_firmware/led` | `std_msgs/msg/Bool` | `true` = LED ON, `false` = LED OFF |
+
+### mDNS services advertised by firmware
+
+| Service | Protocol | Port | Purpose |
+|---|---|---|---|
+| `_http` | `_tcp` | 80 | Web dashboard |
+| `_microros` | `_udp` | 8888 | micro-ROS agent discovery |
+
+Hostname: `shelfbot.local`

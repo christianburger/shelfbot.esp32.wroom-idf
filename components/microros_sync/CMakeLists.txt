@@ -9,6 +9,7 @@ idf_component_register(
         wifi_manager
         sensor_control
         state_machine
+        shelfbot_timestamp
     PRIV_REQUIRES
         firmware_version
 )
