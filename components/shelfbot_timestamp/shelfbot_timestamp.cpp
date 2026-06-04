@@ -47,4 +47,4 @@ FrameTimestamp ShelfbotTimestamp::capture(uint32_t sequence) {
     return ts;
 }
 
-} // namespace shelfbot
+}

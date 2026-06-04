@@ -4,9 +4,9 @@
 
 // Firmware Version Information – updated to v1.15.0
 #define FIRMWARE_VERSION_MAJOR 1
-#define FIRMWARE_VERSION_MINOR 15
+#define FIRMWARE_VERSION_MINOR 16
 #define FIRMWARE_VERSION_PATCH 0
-#define FIRMWARE_VERSION_BUILD 20260522
+#define FIRMWARE_VERSION_BUILD 20260604
 
 // Stringify macros
 #define STRINGIFY(x) #x

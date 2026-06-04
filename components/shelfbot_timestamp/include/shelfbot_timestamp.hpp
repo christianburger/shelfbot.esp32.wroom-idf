@@ -52,4 +52,4 @@ public:
     static FrameTimestamp capture(uint32_t sequence);
 };
 
-} // namespace shelfbot
+}
