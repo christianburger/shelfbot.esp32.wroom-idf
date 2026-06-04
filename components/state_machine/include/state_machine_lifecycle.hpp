@@ -33,6 +33,7 @@ enum class SensorControlState : uint8_t {
 enum class MicrorosState : uint8_t {
     OFF = 0,
     DISCOVERING,
+    TIME_SYNC,      ///< Agent reachable; waiting for clock synchronisation
     CONNECTED,
     ERROR,
     DISCONNECTED,
@@ -49,7 +50,7 @@ enum class WifiManagerState : uint8_t {
 };
 
 // ----------------------------------------------------------------------------
-// Convert enum to string (for logging / API)
+// Convert enum to string (for logging and state machine key)
 // ----------------------------------------------------------------------------
 inline const char* stateToString(ShelfbotState s) {
     switch(s) {
@@ -60,6 +61,7 @@ inline const char* stateToString(ShelfbotState s) {
         default:                       return "unknown";
     }
 }
+
 inline const char* stateToString(MotorControlState s) {
     switch(s) {
         case MotorControlState::OFF:      return "off";
@@ -70,6 +72,7 @@ inline const char* stateToString(MotorControlState s) {
         default:                          return "unknown";
     }
 }
+
 inline const char* stateToString(SensorControlState s) {
     switch(s) {
         case SensorControlState::OFF:      return "off";
@@ -80,16 +83,19 @@ inline const char* stateToString(SensorControlState s) {
         default:                           return "unknown";
     }
 }
+
 inline const char* stateToString(MicrorosState s) {
     switch(s) {
         case MicrorosState::OFF:          return "off";
         case MicrorosState::DISCOVERING:  return "discovering";
+        case MicrorosState::TIME_SYNC:    return "time_sync";
         case MicrorosState::CONNECTED:    return "connected";
         case MicrorosState::ERROR:        return "error";
         case MicrorosState::DISCONNECTED: return "disconnected";
         default:                          return "unknown";
     }
 }
+
 inline const char* stateToString(WifiManagerState s) {
     switch(s) {
         case WifiManagerState::OFF:          return "off";
@@ -102,48 +108,66 @@ inline const char* stateToString(WifiManagerState s) {
 }
 
 // ----------------------------------------------------------------------------
-// Transition matrices (N x N, where N = COUNT of states)
+// Transition matrices (informational — StateMachine does not enforce them yet)
+// Rows = FROM state, Columns = TO state, value = transition allowed
 // ----------------------------------------------------------------------------
-// Shelfbot (4 states)
-constexpr std::array<std::array<bool, static_cast<size_t>(ShelfbotState::COUNT)>, static_cast<size_t>(ShelfbotState::COUNT)> shelfbot_transitions = {{
-    /* FROM STARTING */    {{ false, true,  true,  false }}, // to RUNNING, ERROR
-    /* FROM RUNNING */     {{ false, false, true,  true  }}, // to ERROR, SHUTDOWN
-    /* FROM ERROR */       {{ false, false, false, true  }}, // to SHUTDOWN
-    /* FROM SHUTDOWN */    {{ false, false, false, false }}  // terminal
+
+// Shelfbot (4 states: STARTING, RUNNING, ERROR, SHUTDOWN)
+constexpr std::array<
+    std::array<bool, static_cast<size_t>(ShelfbotState::COUNT)>,
+    static_cast<size_t>(ShelfbotState::COUNT)>
+shelfbot_transitions = {{
+    /* STARTING */ {{ false, true,  true,  false }},
+    /* RUNNING  */ {{ false, false, true,  true  }},
+    /* ERROR    */ {{ false, false, false, true  }},
+    /* SHUTDOWN */ {{ false, false, false, false }}
 }};
 
-// MotorControl (5 states)
-constexpr std::array<std::array<bool, static_cast<size_t>(MotorControlState::COUNT)>, static_cast<size_t>(MotorControlState::COUNT)> motor_control_transitions = {{
-    /* OFF     */ {{ false, true,  false, false, false }}, // to IDLE
-    /* IDLE    */ {{ true,  false, true,  true,  false }}, // to OFF, MOVING, ERROR
-    /* MOVING  */ {{ false, true,  false, true,  false }}, // to IDLE, ERROR
-    /* ERROR   */ {{ false, false, false, false, true  }}, // to DISABLED
-    /* DISABLED*/ {{ false, false, false, false, false }}
+// MotorControl (5 states: OFF, IDLE, MOVING, ERROR, DISABLED)
+constexpr std::array<
+    std::array<bool, static_cast<size_t>(MotorControlState::COUNT)>,
+    static_cast<size_t>(MotorControlState::COUNT)>
+motor_control_transitions = {{
+    /* OFF      */ {{ false, true,  false, false, false }},
+    /* IDLE     */ {{ true,  false, true,  true,  false }},
+    /* MOVING   */ {{ false, true,  false, true,  false }},
+    /* ERROR    */ {{ false, false, false, false, true  }},
+    /* DISABLED */ {{ false, false, false, false, false }}
 }};
 
-// SensorControl (5 states)
-constexpr std::array<std::array<bool, static_cast<size_t>(SensorControlState::COUNT)>, static_cast<size_t>(SensorControlState::COUNT)> sensor_control_transitions = {{
-    /* OFF     */ {{ false, true,  false, false, false }}, // to IDLE
-    /* IDLE    */ {{ true,  false, true,  true,  false }}, // to OFF, SCANNING, ERROR
-    /* SCANNING*/ {{ false, true,  false, true,  false }}, // to IDLE, ERROR
-    /* ERROR   */ {{ false, false, false, false, true  }}, // to DISABLED
-    /* DISABLED*/ {{ false, false, false, false, false }}
+// SensorControl (5 states: OFF, IDLE, SCANNING, ERROR, DISABLED)
+constexpr std::array<
+    std::array<bool, static_cast<size_t>(SensorControlState::COUNT)>,
+    static_cast<size_t>(SensorControlState::COUNT)>
+sensor_control_transitions = {{
+    /* OFF      */ {{ false, true,  false, false, false }},
+    /* IDLE     */ {{ true,  false, true,  true,  false }},
+    /* SCANNING */ {{ false, true,  false, true,  false }},
+    /* ERROR    */ {{ false, false, false, false, true  }},
+    /* DISABLED */ {{ false, false, false, false, false }}
 }};
 
-// Microros (5 states)
-constexpr std::array<std::array<bool, static_cast<size_t>(MicrorosState::COUNT)>, static_cast<size_t>(MicrorosState::COUNT)> microros_transitions = {{
-    /* OFF         */ {{ false, true,  false, false, false }}, // to DISCOVERING
-    /* DISCOVERING */ {{ false, false, true,  true,  true  }}, // to CONNECTED, ERROR, DISCONNECTED
-    /* CONNECTED   */ {{ false, false, false, true,  true  }}, // to ERROR, DISCONNECTED
-    /* ERROR       */ {{ true,  true,  false, false, false }}, // to OFF, DISCOVERING
-    /* DISCONNECTED*/ {{ false, true,  false, false, false }}  // to DISCOVERING
+// MicrorosSync (6 states: OFF, DISCOVERING, TIME_SYNC, CONNECTED, ERROR, DISCONNECTED)
+constexpr std::array<
+    std::array<bool, static_cast<size_t>(MicrorosState::COUNT)>,
+    static_cast<size_t>(MicrorosState::COUNT)>
+microros_transitions = {{
+    /* OFF          */ {{ false, true,  false, false, false, false }},
+    /* DISCOVERING  */ {{ false, false, true,  true,  true,  true  }},
+    /* TIME_SYNC    */ {{ false, false, false, true,  true,  true  }},
+    /* CONNECTED    */ {{ false, false, false, false, true,  true  }},
+    /* ERROR        */ {{ true,  true,  false, false, false, false }},
+    /* DISCONNECTED */ {{ false, true,  false, false, false, false }}
 }};
 
-// WifiManager (5 states)
-constexpr std::array<std::array<bool, static_cast<size_t>(WifiManagerState::COUNT)>, static_cast<size_t>(WifiManagerState::COUNT)> wifi_manager_transitions = {{
-    /* OFF         */ {{ false, true,  false, false, false }}, // to CONNECTING
-    /* CONNECTING  */ {{ false, false, true,  true,  true  }}, // to CONNECTED, ERROR, DISCONNECTED
-    /* CONNECTED   */ {{ false, false, false, true,  true  }}, // to ERROR, DISCONNECTED
-    /* ERROR       */ {{ true,  false, false, false, false }}, // to OFF
-    /* DISCONNECTED*/ {{ false, true,  false, false, false }}  // to CONNECTING
+// WifiManager (5 states: OFF, CONNECTING, CONNECTED, ERROR, DISCONNECTED)
+constexpr std::array<
+    std::array<bool, static_cast<size_t>(WifiManagerState::COUNT)>,
+    static_cast<size_t>(WifiManagerState::COUNT)>
+wifi_manager_transitions = {{
+    /* OFF          */ {{ false, true,  false, false, false }},
+    /* CONNECTING   */ {{ false, false, true,  true,  true  }},
+    /* CONNECTED    */ {{ false, false, false, true,  true  }},
+    /* ERROR        */ {{ true,  false, false, false, false }},
+    /* DISCONNECTED */ {{ false, true,  false, false, false }}
 }};
