@@ -24,32 +24,40 @@
 static const char* TAG = "MicrorosSync";
 
 // ---------------------------------------------------------------------------
-// Logging macros
+// Logging helpers
+//
+// RCL_LOG         — logs an RCL error and resets it; does NOT affect control flow.
+//                   Use only inside teardown paths where we must continue regardless.
+// RCL_LOG_RMW     — same but for RMW return codes (rmw_ret_t).
 // ---------------------------------------------------------------------------
-#define ROS_CHECK(call, msg) do { \
-    rcl_ret_t _ret = (call); \
-    if (_ret != RCL_RET_OK) { \
-        ESP_LOGE(TAG, "%s failed: %ld (%s)", msg, (long)_ret, \
+#define RCL_LOG(call, msg) do { \
+    const rcl_ret_t _r = (call); \
+    if (_r != RCL_RET_OK) { \
+        ESP_LOGE(TAG, "%s failed: %ld (%s)", (msg), (long)_r, \
                  rcl_get_error_string().str); \
         rcl_reset_error(); \
+    } else { \
+        ESP_LOGD(TAG, "%s OK", (msg)); \
     } \
 } while(0)
 
-#define ROS_CHECK_OR_FALSE(call, msg) do { \
-    rcl_ret_t _ret = (call); \
-    if (_ret != RCL_RET_OK) { \
-        ESP_LOGE(TAG, "%s failed: %ld (%s)", msg, (long)_ret, \
-                 rcl_get_error_string().str); \
-        rcl_reset_error(); \
-        return false; \
+#define RCL_LOG_RMW(call, msg) do { \
+    const rmw_ret_t _r = (call); \
+    if (_r != RMW_RET_OK) { \
+        ESP_LOGE(TAG, "%s failed: %d", (msg), (int)_r); \
+    } else { \
+        ESP_LOGD(TAG, "%s OK", (msg)); \
     } \
 } while(0)
 
-static constexpr int32_t  SYNC_TIMEOUT_MS       = 5000;
-static constexpr uint32_t EPOCH_WAIT_TIMEOUT_MS  = 30000;
-static constexpr uint32_t EPOCH_POLL_MS          = 200;
-static constexpr uint8_t  SPIN_FAIL_THRESHOLD    = 15;
-static constexpr uint8_t  SPIN_RECOVERY_CREDIT   = 5;
+static constexpr int32_t  SYNC_TIMEOUT_MS            = 5000;
+static constexpr uint32_t EPOCH_WAIT_TIMEOUT_MS       = 30000;
+static constexpr uint32_t EPOCH_POLL_MS               = 200;
+static constexpr uint8_t  SPIN_FAIL_THRESHOLD         = 15;
+static constexpr uint8_t  SPIN_RECOVERY_CREDIT        = 5;
+// If this many rcl_publish calls fail in one CONNECTED cycle, treat it as a
+// broken connection even if spin_some itself succeeds.
+static constexpr uint32_t PUB_FAIL_RECONNECT_THRESHOLD = 30;
 
 // ---------------------------------------------------------------------------
 // MicrorosSyncImpl
@@ -96,9 +104,12 @@ struct MicrorosSyncImpl {
     static std_msgs__msg__MultiArrayDimension motor_dim[1];
     static std_msgs__msg__MultiArrayDimension distance_dim[1];
 
-    // Guarded by mutex:
+    // All fields below are guarded by mutex when accessed from outside the task.
     bool              entities_created = false;
     bool              time_synced      = false;
+    // Incremented by publish helpers on failure; reset to 0 on reconnect.
+    // The spin loop checks this to detect a broken DDS writer.
+    uint32_t          pub_fail_count   = 0;
 
     TaskHandle_t      task_handle      = nullptr;
     MicrorosState     current_state    = MicrorosState::OFF;
@@ -116,10 +127,11 @@ std_msgs__msg__MultiArrayDimension MicrorosSyncImpl::distance_dim[1];
 static MicrorosSyncImpl* g_impl = nullptr;
 
 static bool lock_impl() {
-    return g_impl && xSemaphoreTake(g_impl->mutex, pdMS_TO_TICKS(100)) == pdTRUE;
+    return g_impl && g_impl->mutex &&
+           xSemaphoreTake(g_impl->mutex, pdMS_TO_TICKS(100)) == pdTRUE;
 }
 static void unlock_impl() {
-    if (g_impl) xSemaphoreGive(g_impl->mutex);
+    if (g_impl && g_impl->mutex) xSemaphoreGive(g_impl->mutex);
 }
 
 // ---------------------------------------------------------------------------
@@ -202,6 +214,8 @@ MicrorosSyncImpl::MicrorosSyncImpl()
     laser_scan_msg.header.frame_id.capacity = sizeof(frame_id_str);
 
     mutex = xSemaphoreCreateMutex();
+    // If heap is exhausted here the system is fatally broken; assert hard.
+    configASSERT(mutex != nullptr);
 }
 
 MicrorosSyncImpl::~MicrorosSyncImpl() {
@@ -232,14 +246,65 @@ void MicrorosSyncImpl::fillStamp(int32_t& sec_out, uint32_t& nanosec_out) const 
 }
 
 // ---------------------------------------------------------------------------
-// Publish helpers — called only while mutex is held and entities_created==true
+// Publish helpers
+//
+// Each increments pub_fail_count on failure so the spin loop can trigger
+// a reconnect if publishing is persistently broken even when spin succeeds.
+// Called only while mutex is held and entities_created==true.
 // ---------------------------------------------------------------------------
-static void _pub_heartbeat()        { ROS_CHECK(rcl_publish(&g_impl->heartbeat_pub,        &g_impl->heartbeat_msg,        NULL), "heartbeat publish"); }
-static void _pub_motor_positions()  { ROS_CHECK(rcl_publish(&g_impl->motor_positions_pub,  &g_impl->motor_positions_msg,  NULL), "motor_positions publish"); }
-static void _pub_distance_sensors() { ROS_CHECK(rcl_publish(&g_impl->distance_sensors_pub, &g_impl->distance_sensors_msg, NULL), "distance_sensors publish"); }
-static void _pub_led_state()        { ROS_CHECK(rcl_publish(&g_impl->led_state_pub,        &g_impl->led_state_msg,        NULL), "led_state publish"); }
-static void _pub_tof_distance()     { ROS_CHECK(rcl_publish(&g_impl->tof_distance_pub,     &g_impl->tof_distance_msg,     NULL), "tof_distance publish"); }
-static void _pub_laser_scan()       { ROS_CHECK(rcl_publish(&g_impl->laser_scan_pub,       &g_impl->laser_scan_msg,       NULL), "laser_scan publish"); }
+static void _pub_heartbeat() {
+    const rcl_ret_t r = rcl_publish(&g_impl->heartbeat_pub, &g_impl->heartbeat_msg, NULL);
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "heartbeat publish failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+        rcl_reset_error();
+        ++g_impl->pub_fail_count;
+    }
+}
+
+static void _pub_motor_positions() {
+    const rcl_ret_t r = rcl_publish(&g_impl->motor_positions_pub, &g_impl->motor_positions_msg, NULL);
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "motor_positions publish failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+        rcl_reset_error();
+        ++g_impl->pub_fail_count;
+    }
+}
+
+static void _pub_distance_sensors() {
+    const rcl_ret_t r = rcl_publish(&g_impl->distance_sensors_pub, &g_impl->distance_sensors_msg, NULL);
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "distance_sensors publish failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+        rcl_reset_error();
+        ++g_impl->pub_fail_count;
+    }
+}
+
+static void _pub_led_state() {
+    const rcl_ret_t r = rcl_publish(&g_impl->led_state_pub, &g_impl->led_state_msg, NULL);
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "led_state publish failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+        rcl_reset_error();
+        ++g_impl->pub_fail_count;
+    }
+}
+
+static void _pub_tof_distance() {
+    const rcl_ret_t r = rcl_publish(&g_impl->tof_distance_pub, &g_impl->tof_distance_msg, NULL);
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "tof_distance publish failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+        rcl_reset_error();
+        ++g_impl->pub_fail_count;
+    }
+}
+
+static void _pub_laser_scan() {
+    const rcl_ret_t r = rcl_publish(&g_impl->laser_scan_pub, &g_impl->laser_scan_msg, NULL);
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "laser_scan publish failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+        rcl_reset_error();
+        ++g_impl->pub_fail_count;
+    }
+}
 
 // ---------------------------------------------------------------------------
 // Timer callbacks
@@ -287,9 +352,11 @@ static void sensor_control_timer_cb(rcl_timer_t* /*timer*/, int64_t /*last_call_
 
     float distances[SensorCommon::NUM_SENSORS];
     size_t idx = 0;
-    for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS && idx < (size_t)SensorCommon::NUM_SENSORS; ++i, ++idx)
+    for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS &&
+         idx < (size_t)SensorCommon::NUM_SENSORS; ++i, ++idx)
         distances[idx] = data.ultrasonic_readings[i].distance_cm;
-    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS && idx < (size_t)SensorCommon::NUM_SENSORS; ++i, ++idx)
+    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS &&
+         idx < (size_t)SensorCommon::NUM_SENSORS; ++i, ++idx)
         distances[idx] = data.tof_measurements[i].distance_mm / 10.0f;
     if (idx < (size_t)SensorCommon::NUM_SENSORS) {
         distances[idx] = data.lidar_measurement.valid
@@ -365,9 +432,9 @@ static void led_cb(const void* msg) {
 }
 
 // ---------------------------------------------------------------------------
-// Entity handle reset — zero-initialises all RCL handles.
-// Must be called AFTER destroy_entities() or after a failed create_entities().
-// Does NOT touch impl.support — call safe_destroy_support() for that.
+// reset_entity_handles — zero-initialises all RCL entity handles.
+// Call AFTER destroy_entities() or after a failed create_entities().
+// Does NOT touch impl.support.
 // ---------------------------------------------------------------------------
 static void reset_entity_handles(MicrorosSyncImpl& impl) {
     impl.node                 = rcl_get_zero_initialized_node();
@@ -388,28 +455,111 @@ static void reset_entity_handles(MicrorosSyncImpl& impl) {
 
 // ---------------------------------------------------------------------------
 // safe_destroy_support — finis rclc_support and zeroes the struct.
+// Returns true if fini succeeded, false if it reported an error.
 // Only call when support_initialized==true.
 // ---------------------------------------------------------------------------
-static void safe_destroy_support(MicrorosSyncImpl& impl) {
-    ROS_CHECK(rclc_support_fini(&impl.support), "support fini");
+static bool safe_destroy_support(MicrorosSyncImpl& impl) {
+    const rcl_ret_t r = rclc_support_fini(&impl.support);
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "support fini failed: %ld (%s)", (long)r,
+                 rcl_get_error_string().str);
+        rcl_reset_error();
+    } else {
+        ESP_LOGD(TAG, "support fini OK");
+    }
     memset(&impl.support, 0, sizeof(impl.support));
+    // Return true even on error — the struct is zeroed so the next init is safe.
+    // The caller logs the return value but always proceeds.
+    return (r == RCL_RET_OK);
+}
+
+// ---------------------------------------------------------------------------
+// destroy_entities — tears down all RCL entities in correct teardown order.
+// Returns true only if every single fini call succeeded.
+// Only call when entities_created==true.
+// Does NOT fini support — call safe_destroy_support() separately after this.
+// ---------------------------------------------------------------------------
+static bool destroy_entities(MicrorosSyncImpl& impl) {
+    ESP_LOGI(TAG, "Destroying micro-ROS entities");
+    bool all_ok = true;
+    rcl_ret_t r;
+
+    // Executor first — stops callbacks referencing the handles below
+    r = rclc_executor_fini(&impl.executor);
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "executor fini failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+        rcl_reset_error(); all_ok = false;
+    }
+
+    // Publishers
+    r = rcl_publisher_fini(&impl.heartbeat_pub, &impl.node);
+    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "heartbeat pub fini failed: %ld (%s)", (long)r, rcl_get_error_string().str); rcl_reset_error(); all_ok = false; }
+
+    r = rcl_publisher_fini(&impl.motor_positions_pub, &impl.node);
+    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "motor_positions pub fini failed: %ld (%s)", (long)r, rcl_get_error_string().str); rcl_reset_error(); all_ok = false; }
+
+    r = rcl_publisher_fini(&impl.distance_sensors_pub, &impl.node);
+    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "distance_sensors pub fini failed: %ld (%s)", (long)r, rcl_get_error_string().str); rcl_reset_error(); all_ok = false; }
+
+    r = rcl_publisher_fini(&impl.led_state_pub, &impl.node);
+    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "led_state pub fini failed: %ld (%s)", (long)r, rcl_get_error_string().str); rcl_reset_error(); all_ok = false; }
+
+    r = rcl_publisher_fini(&impl.tof_distance_pub, &impl.node);
+    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "tof_distance pub fini failed: %ld (%s)", (long)r, rcl_get_error_string().str); rcl_reset_error(); all_ok = false; }
+
+    r = rcl_publisher_fini(&impl.laser_scan_pub, &impl.node);
+    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "laser_scan pub fini failed: %ld (%s)", (long)r, rcl_get_error_string().str); rcl_reset_error(); all_ok = false; }
+
+    // Subscriptions
+    r = rcl_subscription_fini(&impl.motor_command_sub, &impl.node);
+    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "motor_command sub fini failed: %ld (%s)", (long)r, rcl_get_error_string().str); rcl_reset_error(); all_ok = false; }
+
+    r = rcl_subscription_fini(&impl.set_speed_sub, &impl.node);
+    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "set_speed sub fini failed: %ld (%s)", (long)r, rcl_get_error_string().str); rcl_reset_error(); all_ok = false; }
+
+    r = rcl_subscription_fini(&impl.led_sub, &impl.node);
+    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "led sub fini failed: %ld (%s)", (long)r, rcl_get_error_string().str); rcl_reset_error(); all_ok = false; }
+
+    // Timers
+    r = rcl_timer_fini(&impl.heartbeat_timer);
+    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "heartbeat timer fini failed: %ld (%s)", (long)r, rcl_get_error_string().str); rcl_reset_error(); all_ok = false; }
+
+    r = rcl_timer_fini(&impl.motor_position_timer);
+    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "motor_position timer fini failed: %ld (%s)", (long)r, rcl_get_error_string().str); rcl_reset_error(); all_ok = false; }
+
+    r = rcl_timer_fini(&impl.sensor_control_timer);
+    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "sensor_control timer fini failed: %ld (%s)", (long)r, rcl_get_error_string().str); rcl_reset_error(); all_ok = false; }
+
+    // Node last — support is finalized separately
+    r = rcl_node_fini(&impl.node);
+    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "node fini failed: %ld (%s)", (long)r, rcl_get_error_string().str); rcl_reset_error(); all_ok = false; }
+
+    if (all_ok) {
+        ESP_LOGI(TAG, "destroy_entities: all fini calls succeeded");
+    } else {
+        ESP_LOGW(TAG, "destroy_entities: one or more fini calls failed (see above)");
+    }
+    return all_ok;
 }
 
 // ---------------------------------------------------------------------------
 // create_entities — creates all RCL entities after session is established.
 //
-// On partial failure:
-//   - Only rcl_node is guaranteed to be initialized; we fini just the node.
-//   - All other handles are reset to zero so destroy_entities() is safe
-//     if called later (entities_created was never set to true in this path).
-//   - support is left intact — the caller decides whether to fini it.
+// On any failure:
+//   - The node (always the first thing initialised) is finalized.
+//   - Every handle is reset to zero so a later destroy_entities() is safe if
+//     somehow called (entities_created is never set true on this path).
+//   - support is left intact; caller decides whether to fini it.
+// Returns true only if all entities were created successfully.
 // ---------------------------------------------------------------------------
 static bool create_entities(MicrorosSyncImpl& impl) {
     ESP_LOGI(TAG, "Creating micro-ROS entities");
 
-    // Node must succeed first — everything else depends on it
-    if (rclc_node_init_default(&impl.node, "shelfbot_firmware", "", &impl.support) != RCL_RET_OK) {
-        ESP_LOGE(TAG, "node init failed: %s", rcl_get_error_string().str);
+    // Node must come first — all other entities depend on it.
+    rcl_ret_t r = rclc_node_init_default(
+        &impl.node, "shelfbot_firmware", "", &impl.support);
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "node init failed: %ld (%s)", (long)r, rcl_get_error_string().str);
         rcl_reset_error();
         impl.node = rcl_get_zero_initialized_node();
         return false;
@@ -418,138 +568,207 @@ static bool create_entities(MicrorosSyncImpl& impl) {
     bool ok = true;
 
     // --- Publishers ---
-    if (ok && rclc_publisher_init_best_effort(
-            &impl.heartbeat_pub, &impl.node,
-            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-            "shelfbot_firmware/heartbeat") != RCL_RET_OK) {
-        ESP_LOGE(TAG, "heartbeat pub failed: %s", rcl_get_error_string().str);
+    r = rclc_publisher_init_best_effort(
+        &impl.heartbeat_pub, &impl.node,
+        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+        "shelfbot_firmware/heartbeat");
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "heartbeat pub failed: %ld (%s)", (long)r, rcl_get_error_string().str);
         rcl_reset_error(); ok = false;
     }
-    if (ok && rclc_publisher_init_best_effort(
+
+    if (ok) {
+        r = rclc_publisher_init_best_effort(
             &impl.motor_positions_pub, &impl.node,
             ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-            "shelfbot_firmware/motor_positions") != RCL_RET_OK) {
-        ESP_LOGE(TAG, "motor_positions pub failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+            "shelfbot_firmware/motor_positions");
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "motor_positions pub failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
-    if (ok && rclc_publisher_init_best_effort(
+
+    if (ok) {
+        r = rclc_publisher_init_best_effort(
             &impl.distance_sensors_pub, &impl.node,
             ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-            "shelfbot_firmware/distance_sensors") != RCL_RET_OK) {
-        ESP_LOGE(TAG, "distance_sensors pub failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+            "shelfbot_firmware/distance_sensors");
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "distance_sensors pub failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
-    if (ok && rclc_publisher_init_best_effort(
+
+    if (ok) {
+        r = rclc_publisher_init_best_effort(
             &impl.led_state_pub, &impl.node,
             ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-            "shelfbot_firmware/led_state") != RCL_RET_OK) {
-        ESP_LOGE(TAG, "led_state pub failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+            "shelfbot_firmware/led_state");
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "led_state pub failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
-    if (ok && rclc_publisher_init_best_effort(
+
+    if (ok) {
+        r = rclc_publisher_init_best_effort(
             &impl.tof_distance_pub, &impl.node,
             ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-            "shelfbot_firmware/tof_distance") != RCL_RET_OK) {
-        ESP_LOGE(TAG, "tof_distance pub failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+            "shelfbot_firmware/tof_distance");
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "tof_distance pub failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
-    if (ok && rclc_publisher_init_default(
+
+    if (ok) {
+        r = rclc_publisher_init_default(
             &impl.laser_scan_pub, &impl.node,
             ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, LaserScan),
-            "shelfbot_firmware/laser_scan") != RCL_RET_OK) {
-        ESP_LOGE(TAG, "laser_scan pub failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+            "shelfbot_firmware/laser_scan");
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "laser_scan pub failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
 
     // --- Subscriptions ---
-    if (ok && rclc_subscription_init_default(
+    if (ok) {
+        r = rclc_subscription_init_default(
             &impl.motor_command_sub, &impl.node,
             ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-            "shelfbot_firmware/motor_command") != RCL_RET_OK) {
-        ESP_LOGE(TAG, "motor_command sub failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+            "shelfbot_firmware/motor_command");
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "motor_command sub failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
-    if (ok && rclc_subscription_init_default(
+
+    if (ok) {
+        r = rclc_subscription_init_default(
             &impl.set_speed_sub, &impl.node,
             ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-            "shelfbot_firmware/set_speed") != RCL_RET_OK) {
-        ESP_LOGE(TAG, "set_speed sub failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+            "shelfbot_firmware/set_speed");
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "set_speed sub failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
-    if (ok && rclc_subscription_init_default(
+
+    if (ok) {
+        r = rclc_subscription_init_default(
             &impl.led_sub, &impl.node,
             ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-            "shelfbot_firmware/led") != RCL_RET_OK) {
-        ESP_LOGE(TAG, "led sub failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+            "shelfbot_firmware/led");
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "led sub failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
 
     // --- Timers ---
-    if (ok && rclc_timer_init_default(
+    if (ok) {
+        r = rclc_timer_init_default(
             &impl.heartbeat_timer, &impl.support,
-            RCL_MS_TO_NS(1000), heartbeat_timer_cb) != RCL_RET_OK) {
-        ESP_LOGE(TAG, "heartbeat timer failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
-    }
-    if (ok && rclc_timer_init_default(
-            &impl.motor_position_timer, &impl.support,
-            RCL_MS_TO_NS(100), motor_position_timer_cb) != RCL_RET_OK) {
-        ESP_LOGE(TAG, "motor_position timer failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
-    }
-    if (ok && rclc_timer_init_default(
-            &impl.sensor_control_timer, &impl.support,
-            RCL_MS_TO_NS(200), sensor_control_timer_cb) != RCL_RET_OK) {
-        ESP_LOGE(TAG, "sensor_control timer failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+            RCL_MS_TO_NS(1000), heartbeat_timer_cb);
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "heartbeat timer failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
 
-    // --- Executor (6 handles: 3 timers + 3 subscriptions) ---
-    if (ok && rclc_executor_init(
-            &impl.executor, &impl.support.context, 6,
-            &impl.allocator) != RCL_RET_OK) {
-        ESP_LOGE(TAG, "executor init failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+    if (ok) {
+        r = rclc_timer_init_default(
+            &impl.motor_position_timer, &impl.support,
+            RCL_MS_TO_NS(100), motor_position_timer_cb);
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "motor_position timer failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
-    if (ok && rclc_executor_add_timer(
-            &impl.executor, &impl.heartbeat_timer) != RCL_RET_OK) {
-        ESP_LOGE(TAG, "add heartbeat timer failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+
+    if (ok) {
+        r = rclc_timer_init_default(
+            &impl.sensor_control_timer, &impl.support,
+            RCL_MS_TO_NS(200), sensor_control_timer_cb);
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "sensor_control timer failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
-    if (ok && rclc_executor_add_timer(
-            &impl.executor, &impl.motor_position_timer) != RCL_RET_OK) {
-        ESP_LOGE(TAG, "add motor_position timer failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+
+    // --- Executor (3 timers + 3 subscriptions = 6 handles) ---
+    if (ok) {
+        r = rclc_executor_init(&impl.executor, &impl.support.context, 6, &impl.allocator);
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "executor init failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
-    if (ok && rclc_executor_add_timer(
-            &impl.executor, &impl.sensor_control_timer) != RCL_RET_OK) {
-        ESP_LOGE(TAG, "add sensor_control timer failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+
+    if (ok) {
+        r = rclc_executor_add_timer(&impl.executor, &impl.heartbeat_timer);
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "add heartbeat timer failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
-    if (ok && rclc_executor_add_subscription(
+
+    if (ok) {
+        r = rclc_executor_add_timer(&impl.executor, &impl.motor_position_timer);
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "add motor_position timer failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
+    }
+
+    if (ok) {
+        r = rclc_executor_add_timer(&impl.executor, &impl.sensor_control_timer);
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "add sensor_control timer failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
+    }
+
+    if (ok) {
+        r = rclc_executor_add_subscription(
             &impl.executor, &impl.motor_command_sub,
-            &impl.motor_command_msg, motor_command_cb, ON_NEW_DATA) != RCL_RET_OK) {
-        ESP_LOGE(TAG, "add motor_command sub failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+            &impl.motor_command_msg, motor_command_cb, ON_NEW_DATA);
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "add motor_command sub failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
-    if (ok && rclc_executor_add_subscription(
+
+    if (ok) {
+        r = rclc_executor_add_subscription(
             &impl.executor, &impl.set_speed_sub,
-            &impl.set_speed_msg, set_speed_cb, ON_NEW_DATA) != RCL_RET_OK) {
-        ESP_LOGE(TAG, "add set_speed sub failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+            &impl.set_speed_msg, set_speed_cb, ON_NEW_DATA);
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "add set_speed sub failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
-    if (ok && rclc_executor_add_subscription(
+
+    if (ok) {
+        r = rclc_executor_add_subscription(
             &impl.executor, &impl.led_sub,
-            &impl.led_msg, led_cb, ON_NEW_DATA) != RCL_RET_OK) {
-        ESP_LOGE(TAG, "add led sub failed: %s", rcl_get_error_string().str);
-        rcl_reset_error(); ok = false;
+            &impl.led_msg, led_cb, ON_NEW_DATA);
+        if (r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "add led sub failed: %ld (%s)", (long)r, rcl_get_error_string().str);
+            rcl_reset_error(); ok = false;
+        }
     }
 
     if (!ok) {
-        // Node was initialized; fini it. Everything else is still zero from
-        // reset_entity_handles() that the caller must have run, or was never
-        // reached. Reset all handles so a stray destroy_entities() is safe.
-        rcl_node_fini(&impl.node);
+        // Node was definitely initialized. Fini it and check the result.
+        const rcl_ret_t fini_r = rcl_node_fini(&impl.node);
+        if (fini_r != RCL_RET_OK) {
+            ESP_LOGE(TAG, "node fini (on create failure) failed: %ld (%s)",
+                     (long)fini_r, rcl_get_error_string().str);
+            rcl_reset_error();
+        }
+        // Reset every handle so a stray destroy_entities() cannot fini garbage.
         impl.node     = rcl_get_zero_initialized_node();
         impl.executor = rclc_executor_get_zero_initialized_executor();
         impl.heartbeat_pub        = rcl_get_zero_initialized_publisher();
@@ -567,41 +786,8 @@ static bool create_entities(MicrorosSyncImpl& impl) {
         return false;
     }
 
-    ESP_LOGI(TAG, "Entities created OK");
+    ESP_LOGI(TAG, "create_entities: all entities created successfully");
     return true;
-}
-
-// ---------------------------------------------------------------------------
-// destroy_entities — tears down all RCL entities in correct order.
-// Only call when entities_created==true.
-// Does NOT fini support — call safe_destroy_support() after this.
-// ---------------------------------------------------------------------------
-static void destroy_entities(MicrorosSyncImpl& impl) {
-    ESP_LOGI(TAG, "Destroying micro-ROS entities");
-
-    // Executor first — stops callbacks referencing the handles below
-    ROS_CHECK(rclc_executor_fini(&impl.executor), "executor fini");
-
-    // Publishers
-    ROS_CHECK(rcl_publisher_fini(&impl.heartbeat_pub,        &impl.node), "heartbeat pub fini");
-    ROS_CHECK(rcl_publisher_fini(&impl.motor_positions_pub,  &impl.node), "motor_positions pub fini");
-    ROS_CHECK(rcl_publisher_fini(&impl.distance_sensors_pub, &impl.node), "distance_sensors pub fini");
-    ROS_CHECK(rcl_publisher_fini(&impl.led_state_pub,        &impl.node), "led_state pub fini");
-    ROS_CHECK(rcl_publisher_fini(&impl.tof_distance_pub,     &impl.node), "tof_distance pub fini");
-    ROS_CHECK(rcl_publisher_fini(&impl.laser_scan_pub,       &impl.node), "laser_scan pub fini");
-
-    // Subscriptions
-    ROS_CHECK(rcl_subscription_fini(&impl.motor_command_sub, &impl.node), "motor_command sub fini");
-    ROS_CHECK(rcl_subscription_fini(&impl.set_speed_sub,     &impl.node), "set_speed sub fini");
-    ROS_CHECK(rcl_subscription_fini(&impl.led_sub,           &impl.node), "led sub fini");
-
-    // Timers
-    ROS_CHECK(rcl_timer_fini(&impl.heartbeat_timer),      "heartbeat timer fini");
-    ROS_CHECK(rcl_timer_fini(&impl.motor_position_timer), "motor_position timer fini");
-    ROS_CHECK(rcl_timer_fini(&impl.sensor_control_timer), "sensor_control timer fini");
-
-    // Node last — support is NOT finalized here, see safe_destroy_support()
-    ROS_CHECK(rcl_node_fini(&impl.node), "node fini");
 }
 
 // ---------------------------------------------------------------------------
@@ -613,8 +799,8 @@ static bool query_mdns_host(const char* host_name, char* out_ip, size_t len) {
     addr.addr = 0;
     const esp_err_t err = mdns_query_a(host_name, 2000, &addr);
     if (err != ESP_OK) {
-        if (err == ESP_ERR_NOT_FOUND) ESP_LOGW(TAG, "Host not found");
-        else                          ESP_LOGE(TAG, "mDNS query failed: %d", err);
+        if (err == ESP_ERR_NOT_FOUND) ESP_LOGW(TAG, "mDNS host not found");
+        else ESP_LOGE(TAG, "mDNS query failed: %s", esp_err_to_name(err));
         return false;
     }
     snprintf(out_ip, len, IPSTR, IP2STR(&addr));
@@ -632,10 +818,7 @@ static bool is_network_service_ready() {
 }
 
 // ---------------------------------------------------------------------------
-// SNTP clock sync — waits up to EPOCH_WAIT_TIMEOUT_MS for a valid wall clock.
-// Non-blocking in the sense that it does not hold any mutex.
-// Returns false and logs a warning if timeout expires; caller continues with
-// monotonic timestamps in that case.
+// SNTP clock sync
 // ---------------------------------------------------------------------------
 static bool sync_time() {
     ESP_LOGI(TAG, "Waiting for SNTP to provide valid wall clock (timeout %lu ms)",
@@ -662,28 +845,6 @@ static bool sync_time() {
 
 // ---------------------------------------------------------------------------
 // microros_task
-//
-// Internal task states and their corresponding microros_sync SM states:
-//
-//   WAITING_WIFI       → OFF          (no Wi-Fi, nothing to do)
-//   WAITING_WIFI_RETRY → OFF          (Wi-Fi dropped mid-session, waiting for reconnect)
-//   DISCOVER_AGENT     → DISCOVERING  (mDNS query loop)
-//   INITIALIZING       → DISCOVERING  (support_init + ping — still verifying agent)
-//   CONNECTING         → TIME_SYNC    (rmw_uros_sync_session)
-//   TIME_SYNCING       → TIME_SYNC    (SNTP wait)
-//   CREATE_ENTITIES    → TIME_SYNC    (publisher/sub/timer/executor setup)
-//   CONNECTED          → CONNECTED   (spin loop)
-//   BACKING_OFF        → DISCONNECTED (exponential delay before next attempt)
-//
-// Failure invariants:
-//   - entities_created is cleared inside the mutex before any teardown.
-//   - destroy_entities() is only ever called when entities_created==true.
-//   - safe_destroy_support() is only ever called when support_initialized==true.
-//   - reset_entity_handles() is always called after destroy_entities() or
-//     after a failed create_entities(), so handles are zero before the next
-//     create_entities() attempt.
-//   - Wi-Fi loss is detected at the top of every non-idle state so the ROS
-//     stack is torn down immediately rather than grinding through spin errors.
 // ---------------------------------------------------------------------------
 static void microros_task(void* arg) {
     auto* impl = static_cast<MicrorosSyncImpl*>(arg);
@@ -701,46 +862,63 @@ static void microros_task(void* arg) {
         BACKING_OFF
     } state = TaskState::WAITING_WIFI;
 
-    uint32_t backoff_ms          = 250;
-    constexpr uint32_t MAX_BACKOFF_MS          = 5000;
-    uint32_t discover_backoff_ms = 500;
+    uint32_t backoff_ms               = 250;
+    constexpr uint32_t MAX_BACKOFF_MS = 5000;
+    uint32_t discover_backoff_ms      = 500;
     constexpr uint32_t MAX_DISCOVER_BACKOFF_MS = 4000;
 
-    uint8_t consecutive_spin_failures = 0;
-    bool    support_initialized       = false;
-    char    agent_ip[16]              = {};
-    rcl_init_options_t init_options   = rcl_get_zero_initialized_init_options();
+    uint8_t  consecutive_spin_failures = 0;
+    bool     support_initialized       = false;
+    char     agent_ip[16]              = {};
+    rcl_init_options_t init_options    = rcl_get_zero_initialized_init_options();
+    bool     init_options_initialized  = false;
 
     // ------------------------------------------------------------------
-    // full_cleanup — tears down the entire ROS stack from any point.
-    // Safe to call whether entities are created or not, and whether
-    // support is initialised or not; uses the local support_initialized flag.
-    // Must be called WITHOUT holding the mutex (it acquires it internally).
+    // full_cleanup — tears down the entire ROS stack safely from any point.
+    // Checks entities_created and support_initialized before acting.
+    // Must be called WITHOUT holding the mutex.
     // ------------------------------------------------------------------
     auto full_cleanup = [&](const char* reason) {
         ESP_LOGW(TAG, "full_cleanup: %s", reason);
+
         if (lock_impl()) {
             if (impl->entities_created) {
-                // Release mutex before destroy_entities — it can block briefly
-                // and the timer callbacks also try to lock. Clearing the flag
-                // first ensures no publish fires during teardown.
+                // Clear flag first — prevents callbacks from publishing
+                // during the teardown window.
                 impl->entities_created = false;
                 impl->time_synced      = false;
+                impl->pub_fail_count   = 0;
                 unlock_impl();
-                destroy_entities(*impl);
+                const bool de_ok = destroy_entities(*impl);
+                if (!de_ok) {
+                    ESP_LOGW(TAG, "full_cleanup: destroy_entities had errors (proceeding)");
+                }
                 reset_entity_handles(*impl);
             } else {
-                impl->time_synced = false;
+                impl->time_synced    = false;
+                impl->pub_fail_count = 0;
                 unlock_impl();
-                // Handles may be partially initialized from a failed
-                // create_entities(); reset them to be safe.
+                // Handles may be partially set from a failed create_entities.
                 reset_entity_handles(*impl);
             }
         }
+
         if (support_initialized) {
-            safe_destroy_support(*impl);
+            const bool sup_ok = safe_destroy_support(*impl);
+            if (!sup_ok) {
+                ESP_LOGW(TAG, "full_cleanup: safe_destroy_support had errors (proceeding)");
+            }
             support_initialized = false;
         }
+
+        // Clean up init_options if they were left initialised (e.g. if
+        // rclc_support_init_with_options failed after options were inited).
+        if (init_options_initialized) {
+            RCL_LOG(rcl_init_options_fini(&init_options), "init_options fini (cleanup)");
+            init_options_initialized = false;
+            init_options = rcl_get_zero_initialized_init_options();
+        }
+
         if (lock_impl()) {
             impl->setState(MicrorosState::DISCONNECTED);
             unlock_impl();
@@ -749,9 +927,7 @@ static void microros_task(void* arg) {
 
     while (true) {
         // ------------------------------------------------------------------
-        // Wi-Fi watchdog — checked at the top of every active state.
-        // If Wi-Fi drops while we're anywhere in the ROS stack, tear down
-        // immediately so we don't burn time on doomed ping/spin attempts.
+        // Wi-Fi watchdog — top of every active state.
         // ------------------------------------------------------------------
         if (state != TaskState::WAITING_WIFI &&
             state != TaskState::WAITING_WIFI_RETRY &&
@@ -783,9 +959,6 @@ static void microros_task(void* arg) {
                 break;
             }
 
-            // --------------------------------------------------------------
-            // Wi-Fi dropped while already in the ROS stack.
-            // Wait here (cheap) rather than looping through mDNS + ping.
             // --------------------------------------------------------------
             case TaskState::WAITING_WIFI_RETRY: {
                 ESP_LOGI(TAG, "Wi-Fi gone — waiting for reconnect...");
@@ -828,54 +1001,86 @@ static void microros_task(void* arg) {
 
             // --------------------------------------------------------------
             case TaskState::INITIALIZING: {
-                // Paranoia: support must be clean on entry
+                // Paranoia guard — support must be clean on entry
                 if (support_initialized) {
                     ESP_LOGE(TAG, "BUG: support still live entering INITIALIZING — cleaning up");
-                    safe_destroy_support(*impl);
+                    if (!safe_destroy_support(*impl)) {
+                        ESP_LOGW(TAG, "support fini on paranoia path had errors");
+                    }
                     support_initialized = false;
                 }
 
                 init_options = rcl_get_zero_initialized_init_options();
-                if (rcl_init_options_init(&init_options, impl->allocator) != RCL_RET_OK) {
-                    ESP_LOGE(TAG, "rcl_init_options_init failed: %s",
-                             rcl_get_error_string().str);
+                init_options_initialized = false;
+
+                rcl_ret_t r = rcl_init_options_init(&init_options, impl->allocator);
+                if (r != RCL_RET_OK) {
+                    ESP_LOGE(TAG, "rcl_init_options_init failed: %ld (%s)",
+                             (long)r, rcl_get_error_string().str);
                     rcl_reset_error();
                     state = TaskState::BACKING_OFF;
                     break;
                 }
+                init_options_initialized = true;
 
-                rmw_uros_options_set_udp_address(
+                const rmw_ret_t rmw_r = rmw_uros_options_set_udp_address(
                     agent_ip, "8888",
                     rcl_init_options_get_rmw_init_options(&init_options));
+                if (rmw_r != RMW_RET_OK) {
+                    ESP_LOGE(TAG, "rmw_uros_options_set_udp_address failed: %d", (int)rmw_r);
+                    RCL_LOG(rcl_init_options_fini(&init_options), "init_options fini (addr fail)");
+                    init_options_initialized = false;
+                    init_options = rcl_get_zero_initialized_init_options();
+                    state = TaskState::BACKING_OFF;
+                    break;
+                }
 
                 const rcl_ret_t support_ret = rclc_support_init_with_options(
                     &impl->support, 0, nullptr, &init_options, &impl->allocator);
-                ROS_CHECK(rcl_init_options_fini(&init_options), "init_options fini");
+
+                // Always fini init_options — they've been consumed by support_init
+                r = rcl_init_options_fini(&init_options);
+                if (r != RCL_RET_OK) {
+                    ESP_LOGE(TAG, "init_options fini failed: %ld (%s)",
+                             (long)r, rcl_get_error_string().str);
+                    rcl_reset_error();
+                    // Non-fatal: continue and check support_ret below
+                }
+                init_options_initialized = false;
+                init_options = rcl_get_zero_initialized_init_options();
 
                 if (support_ret != RCL_RET_OK) {
-                    ESP_LOGE(TAG, "rclc_support_init failed: %s",
-                             rcl_get_error_string().str);
+                    ESP_LOGE(TAG, "rclc_support_init failed: %ld (%s)",
+                             (long)support_ret, rcl_get_error_string().str);
                     rcl_reset_error();
                     // support may be partially initialised — always fini it
-                    safe_destroy_support(*impl);
+                    if (!safe_destroy_support(*impl)) {
+                        ESP_LOGW(TAG, "support fini after init failure had errors");
+                    }
                     support_initialized = false;
                     state = TaskState::BACKING_OFF;
                     break;
                 }
                 support_initialized = true;
+                ESP_LOGI(TAG, "rclc_support_init OK");
 
                 vTaskDelay(pdMS_TO_TICKS(200));
 
-                // Verify the agent is genuinely reachable before advancing
-                if (rmw_uros_ping_agent(500, 3) != RMW_RET_OK) {
-                    ESP_LOGE(TAG, "Agent ping failed after support init — agent down or wrong port");
-                    safe_destroy_support(*impl);
+                // Verify the agent is genuinely reachable
+                const rmw_ret_t ping_r = rmw_uros_ping_agent(500, 3);
+                if (ping_r != RMW_RET_OK) {
+                    ESP_LOGE(TAG, "Agent ping failed (rmw=%d) — agent down or wrong port",
+                             (int)ping_r);
+                    if (!safe_destroy_support(*impl)) {
+                        ESP_LOGW(TAG, "support fini after ping failure had errors");
+                    }
                     support_initialized = false;
                     discover_backoff_ms = std::min(MAX_DISCOVER_BACKOFF_MS,
                                                    discover_backoff_ms * 2);
                     state = TaskState::BACKING_OFF;
                     break;
                 }
+                ESP_LOGI(TAG, "Agent ping OK");
 
                 if (lock_impl()) { impl->setState(MicrorosState::TIME_SYNC); unlock_impl(); }
                 state = TaskState::CONNECTING;
@@ -885,16 +1090,16 @@ static void microros_task(void* arg) {
             // --------------------------------------------------------------
             case TaskState::CONNECTING: {
                 ESP_LOGI(TAG, "Establishing micro-ROS session (rmw_uros_sync_session)...");
-                const rmw_ret_t ret = rmw_uros_sync_session(SYNC_TIMEOUT_MS);
-                if (ret != RMW_RET_OK) {
+                const rmw_ret_t r = rmw_uros_sync_session(SYNC_TIMEOUT_MS);
+                if (r != RMW_RET_OK) {
                     ESP_LOGE(TAG, "rmw_uros_sync_session failed: %d — agent crashed or restarted?",
-                             static_cast<int>(ret));
+                             (int)r);
                     full_cleanup("session sync failed");
                     support_initialized = false;
                     state = TaskState::BACKING_OFF;
                     break;
                 }
-                ESP_LOGI(TAG, "Session established – synchronising clock via SNTP");
+                ESP_LOGI(TAG, "Session established — synchronising clock via SNTP");
                 state = TaskState::TIME_SYNCING;
                 break;
             }
@@ -916,8 +1121,9 @@ static void microros_task(void* arg) {
             // --------------------------------------------------------------
             case TaskState::CREATE_ENTITIES: {
                 // Ping once more — agent could have restarted during SNTP wait
-                if (rmw_uros_ping_agent(300, 2) != RMW_RET_OK) {
-                    ESP_LOGE(TAG, "Agent gone before entity creation");
+                const rmw_ret_t ping_r = rmw_uros_ping_agent(300, 2);
+                if (ping_r != RMW_RET_OK) {
+                    ESP_LOGE(TAG, "Agent gone before entity creation (rmw=%d)", (int)ping_r);
                     full_cleanup("agent gone before entity creation");
                     support_initialized = false;
                     state = TaskState::BACKING_OFF;
@@ -926,14 +1132,16 @@ static void microros_task(void* arg) {
 
                 if (!create_entities(*impl)) {
                     ESP_LOGE(TAG, "create_entities failed — cleaning up");
-                    // create_entities already reset all handles on failure;
-                    // just fini support and update state.
+                    // create_entities already reset all handles on failure.
                     if (lock_impl()) {
                         impl->entities_created = false;
                         impl->time_synced      = false;
+                        impl->pub_fail_count   = 0;
                         unlock_impl();
                     }
-                    safe_destroy_support(*impl);
+                    if (!safe_destroy_support(*impl)) {
+                        ESP_LOGW(TAG, "support fini after create_entities failure had errors");
+                    }
                     support_initialized = false;
                     if (lock_impl()) { impl->setState(MicrorosState::DISCONNECTED); unlock_impl(); }
                     state = TaskState::BACKING_OFF;
@@ -942,6 +1150,7 @@ static void microros_task(void* arg) {
 
                 if (lock_impl()) {
                     impl->entities_created = true;
+                    impl->pub_fail_count   = 0;
                     impl->setState(MicrorosState::CONNECTED);
                     unlock_impl();
                 }
@@ -956,6 +1165,8 @@ static void microros_task(void* arg) {
                 const rcl_ret_t spin_ret =
                     rclc_executor_spin_some(&impl->executor, RCL_MS_TO_NS(100));
 
+                bool need_reconnect = false;
+
                 if (spin_ret != RCL_RET_OK) {
                     ++consecutive_spin_failures;
                     if ((consecutive_spin_failures % 5) == 0) {
@@ -965,20 +1176,40 @@ static void microros_task(void* arg) {
                     if (consecutive_spin_failures >= SPIN_FAIL_THRESHOLD) {
                         ESP_LOGW(TAG,
                                  "Spin failure threshold reached — agent crashed or network lost");
-                        full_cleanup("spin failure threshold");
-                        support_initialized       = false;
-                        consecutive_spin_failures = 0;
-                        state = TaskState::BACKING_OFF;
-                        break;
+                        need_reconnect = true;
                     }
                 } else {
-                    backoff_ms = 250;
-                    if (consecutive_spin_failures > 0) {
-                        consecutive_spin_failures =
-                            (consecutive_spin_failures > SPIN_RECOVERY_CREDIT)
-                            ? consecutive_spin_failures - SPIN_RECOVERY_CREDIT : 0;
+                    // Spin succeeded — check publish failure counter
+                    uint32_t pub_fails = 0;
+                    if (lock_impl()) {
+                        pub_fails = impl->pub_fail_count;
+                        unlock_impl();
+                    }
+                    if (pub_fails >= PUB_FAIL_RECONNECT_THRESHOLD) {
+                        ESP_LOGW(TAG,
+                                 "Publish failure count %lu >= %lu — DDS writer broken, reconnecting",
+                                 (unsigned long)pub_fails,
+                                 (unsigned long)PUB_FAIL_RECONNECT_THRESHOLD);
+                        need_reconnect = true;
+                    } else {
+                        // Healthy spin — decay counters
+                        backoff_ms = 250;
+                        if (consecutive_spin_failures > 0) {
+                            consecutive_spin_failures =
+                                (consecutive_spin_failures > SPIN_RECOVERY_CREDIT)
+                                ? consecutive_spin_failures - SPIN_RECOVERY_CREDIT : 0;
+                        }
                     }
                 }
+
+                if (need_reconnect) {
+                    full_cleanup("spin/publish failure threshold");
+                    support_initialized       = false;
+                    consecutive_spin_failures = 0;
+                    state = TaskState::BACKING_OFF;
+                    break;
+                }
+
                 vTaskDelay(pdMS_TO_TICKS(10));
                 break;
             }
@@ -990,18 +1221,13 @@ static void microros_task(void* arg) {
                 vTaskDelay(pdMS_TO_TICKS(backoff_ms));
                 backoff_ms = std::min(MAX_BACKOFF_MS, backoff_ms * 2);
 
-                // After the delay, check Wi-Fi — if it's gone, sit in the
-                // retry state rather than burning mDNS queries in the dark.
-                {
-                    const EventBits_t bits =
-                        xEventGroupGetBits(wifi_manager_get_event_group());
-                    if (!(bits & WM_CONNECTED_BIT)) {
-                        ESP_LOGW(TAG, "No Wi-Fi at end of backoff — waiting for reconnect");
-                        state = TaskState::WAITING_WIFI_RETRY;
-                    } else {
-                        if (lock_impl()) { impl->setState(MicrorosState::DISCOVERING); unlock_impl(); }
-                        state = TaskState::DISCOVER_AGENT;
-                    }
+                const EventBits_t bits = xEventGroupGetBits(wifi_manager_get_event_group());
+                if (!(bits & WM_CONNECTED_BIT)) {
+                    ESP_LOGW(TAG, "No Wi-Fi at end of backoff — waiting for reconnect");
+                    state = TaskState::WAITING_WIFI_RETRY;
+                } else {
+                    if (lock_impl()) { impl->setState(MicrorosState::DISCOVERING); unlock_impl(); }
+                    state = TaskState::DISCOVER_AGENT;
                 }
                 break;
             }
@@ -1030,7 +1256,13 @@ bool MicrorosSync::init() {
 
 void MicrorosSync::start() {
     if (!g_impl || g_impl->task_handle) return;
-    xTaskCreate(microros_task, "microros_task", 16000, g_impl, 5, &g_impl->task_handle);
+    const BaseType_t r = xTaskCreate(
+        microros_task, "microros_task", 16000, g_impl, 5, &g_impl->task_handle);
+    if (r != pdPASS) {
+        ESP_LOGE(TAG, "xTaskCreate for microros_task failed (out of memory?)");
+        g_impl->task_handle = nullptr;
+        return;
+    }
     ESP_LOGI(TAG, "MicrorosSync task started");
 }
 
