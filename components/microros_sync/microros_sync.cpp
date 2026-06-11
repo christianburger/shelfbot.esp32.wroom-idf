@@ -380,83 +380,220 @@ static void reset_entity_handles(MicrorosSyncImpl& impl) {
     memset(&impl.support, 0, sizeof(impl.support));
 }
 
-// ---------------------------------------------------------------------------
-// Entity creation (called ONLY after session sync and time sync)
-// ---------------------------------------------------------------------------
+
 static bool create_entities(MicrorosSyncImpl& impl) {
     ESP_LOGI(TAG, "Creating micro-ROS entities");
 
-    ROS_CHECK_OR_FALSE(rclc_node_init_default(&impl.node, "shelfbot_firmware", "", &impl.support), "node init");
+    // Node must succeed first — everything else depends on it
+    if (rclc_node_init_default(&impl.node, "shelfbot_firmware", "", &impl.support) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "node init failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        impl.node = rcl_get_zero_initialized_node();
+        return false;
+    }
 
-    ROS_CHECK_OR_FALSE(rclc_publisher_init_best_effort(&impl.heartbeat_pub, &impl.node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
-        "shelfbot_firmware/heartbeat"), "heartbeat pub");
+    bool ok = true;
 
-    ROS_CHECK_OR_FALSE(rclc_publisher_init_best_effort(&impl.motor_positions_pub, &impl.node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-        "shelfbot_firmware/motor_positions"), "motor_positions pub");
+    // --- Publishers ---
+    if (ok && rclc_publisher_init_best_effort(
+            &impl.heartbeat_pub, &impl.node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
+            "shelfbot_firmware/heartbeat") != RCL_RET_OK) {
+        ESP_LOGE(TAG, "heartbeat pub failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_publisher_init_best_effort(
+            &impl.motor_positions_pub, &impl.node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+            "shelfbot_firmware/motor_positions") != RCL_RET_OK) {
+        ESP_LOGE(TAG, "motor_positions pub failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_publisher_init_best_effort(
+            &impl.distance_sensors_pub, &impl.node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+            "shelfbot_firmware/distance_sensors") != RCL_RET_OK) {
+        ESP_LOGE(TAG, "distance_sensors pub failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_publisher_init_best_effort(
+            &impl.led_state_pub, &impl.node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+            "shelfbot_firmware/led_state") != RCL_RET_OK) {
+        ESP_LOGE(TAG, "led_state pub failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_publisher_init_best_effort(
+            &impl.tof_distance_pub, &impl.node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
+            "shelfbot_firmware/tof_distance") != RCL_RET_OK) {
+        ESP_LOGE(TAG, "tof_distance pub failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_publisher_init_default(
+            &impl.laser_scan_pub, &impl.node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, LaserScan),
+            "shelfbot_firmware/laser_scan") != RCL_RET_OK) {
+        ESP_LOGE(TAG, "laser_scan pub failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
 
-    ROS_CHECK_OR_FALSE(rclc_publisher_init_best_effort(&impl.distance_sensors_pub, &impl.node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-        "shelfbot_firmware/distance_sensors"), "distance_sensors pub");
+    // --- Subscriptions ---
+    if (ok && rclc_subscription_init_default(
+            &impl.motor_command_sub, &impl.node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+            "shelfbot_firmware/motor_command") != RCL_RET_OK) {
+        ESP_LOGE(TAG, "motor_command sub failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_subscription_init_default(
+            &impl.set_speed_sub, &impl.node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
+            "shelfbot_firmware/set_speed") != RCL_RET_OK) {
+        ESP_LOGE(TAG, "set_speed sub failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_subscription_init_default(
+            &impl.led_sub, &impl.node,
+            ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
+            "shelfbot_firmware/led") != RCL_RET_OK) {
+        ESP_LOGE(TAG, "led sub failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
 
-    ROS_CHECK_OR_FALSE(rclc_publisher_init_best_effort(&impl.led_state_pub, &impl.node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-        "shelfbot_firmware/led_state"), "led_state pub");
+    // --- Timers ---
+    if (ok && rclc_timer_init_default(
+            &impl.heartbeat_timer, &impl.support,
+            RCL_MS_TO_NS(1000), heartbeat_timer_cb) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "heartbeat timer failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_timer_init_default(
+            &impl.motor_position_timer, &impl.support,
+            RCL_MS_TO_NS(100), motor_position_timer_cb) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "motor_position timer failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_timer_init_default(
+            &impl.sensor_control_timer, &impl.support,
+            RCL_MS_TO_NS(200), sensor_control_timer_cb) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "sensor_control timer failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
 
-    ROS_CHECK_OR_FALSE(rclc_publisher_init_best_effort(&impl.tof_distance_pub, &impl.node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
-        "shelfbot_firmware/tof_distance"), "tof_distance pub");
+    // --- Executor ---
+    if (ok && rclc_executor_init(
+            &impl.executor, &impl.support.context, 6,
+            &impl.allocator) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "executor init failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_executor_add_timer(
+            &impl.executor, &impl.heartbeat_timer) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "add heartbeat timer failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_executor_add_timer(
+            &impl.executor, &impl.motor_position_timer) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "add motor_position timer failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_executor_add_timer(
+            &impl.executor, &impl.sensor_control_timer) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "add sensor_control timer failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_executor_add_subscription(
+            &impl.executor, &impl.motor_command_sub,
+            &impl.motor_command_msg, motor_command_cb, ON_NEW_DATA) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "add motor_command sub failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_executor_add_subscription(
+            &impl.executor, &impl.set_speed_sub,
+            &impl.set_speed_msg, set_speed_cb, ON_NEW_DATA) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "add set_speed sub failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
+    if (ok && rclc_executor_add_subscription(
+            &impl.executor, &impl.led_sub,
+            &impl.led_msg, led_cb, ON_NEW_DATA) != RCL_RET_OK) {
+        ESP_LOGE(TAG, "add led sub failed: %s", rcl_get_error_string().str);
+        rcl_reset_error();
+        ok = false;
+    }
 
-    ROS_CHECK_OR_FALSE(rclc_publisher_init_default(&impl.laser_scan_pub, &impl.node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, LaserScan),
-        "shelfbot_firmware/laser_scan"), "laser_scan pub");
-
-    ROS_CHECK_OR_FALSE(rclc_subscription_init_default(&impl.motor_command_sub, &impl.node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-        "shelfbot_firmware/motor_command"), "motor_command sub");
-
-    ROS_CHECK_OR_FALSE(rclc_subscription_init_default(&impl.set_speed_sub, &impl.node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
-        "shelfbot_firmware/set_speed"), "set_speed sub");
-
-    ROS_CHECK_OR_FALSE(rclc_subscription_init_default(&impl.led_sub, &impl.node,
-        ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
-        "shelfbot_firmware/led"), "led sub");
-
-    ROS_CHECK_OR_FALSE(rclc_timer_init_default(&impl.heartbeat_timer,      &impl.support, RCL_MS_TO_NS(1000), heartbeat_timer_cb),      "heartbeat timer");
-    ROS_CHECK_OR_FALSE(rclc_timer_init_default(&impl.motor_position_timer, &impl.support, RCL_MS_TO_NS(100),  motor_position_timer_cb), "motor_position timer");
-    ROS_CHECK_OR_FALSE(rclc_timer_init_default(&impl.sensor_control_timer, &impl.support, RCL_MS_TO_NS(200),  sensor_control_timer_cb), "sensor_control timer");
-
-    ROS_CHECK_OR_FALSE(rclc_executor_init(&impl.executor, &impl.support.context, 6, &impl.allocator), "executor init");
-    ROS_CHECK_OR_FALSE(rclc_executor_add_timer(&impl.executor, &impl.heartbeat_timer),      "add heartbeat timer");
-    ROS_CHECK_OR_FALSE(rclc_executor_add_timer(&impl.executor, &impl.motor_position_timer), "add motor_position timer");
-    ROS_CHECK_OR_FALSE(rclc_executor_add_timer(&impl.executor, &impl.sensor_control_timer), "add sensor_control timer");
-    ROS_CHECK_OR_FALSE(rclc_executor_add_subscription(&impl.executor, &impl.motor_command_sub, &impl.motor_command_msg, motor_command_cb, ON_NEW_DATA), "add motor_command sub");
-    ROS_CHECK_OR_FALSE(rclc_executor_add_subscription(&impl.executor, &impl.set_speed_sub,     &impl.set_speed_msg,     set_speed_cb,     ON_NEW_DATA), "add set_speed sub");
-    ROS_CHECK_OR_FALSE(rclc_executor_add_subscription(&impl.executor, &impl.led_sub,           &impl.led_msg,           led_cb,           ON_NEW_DATA), "add led sub");
+    if (!ok) {
+        // Only the node was guaranteed to be initialized; fini it cleanly.
+        // The support/session remains intact for the next attempt.
+        rcl_node_fini(&impl.node);
+        impl.node = rcl_get_zero_initialized_node();
+        // Reset all other handles so destroy_entities is safe if called later
+        impl.executor             = rclc_executor_get_zero_initialized_executor();
+        impl.heartbeat_pub        = rcl_get_zero_initialized_publisher();
+        impl.motor_positions_pub  = rcl_get_zero_initialized_publisher();
+        impl.distance_sensors_pub = rcl_get_zero_initialized_publisher();
+        impl.led_state_pub        = rcl_get_zero_initialized_publisher();
+        impl.tof_distance_pub     = rcl_get_zero_initialized_publisher();
+        impl.laser_scan_pub       = rcl_get_zero_initialized_publisher();
+        impl.motor_command_sub    = rcl_get_zero_initialized_subscription();
+        impl.set_speed_sub        = rcl_get_zero_initialized_subscription();
+        impl.led_sub              = rcl_get_zero_initialized_subscription();
+        impl.heartbeat_timer      = rcl_get_zero_initialized_timer();
+        impl.motor_position_timer = rcl_get_zero_initialized_timer();
+        impl.sensor_control_timer = rcl_get_zero_initialized_timer();
+        return false;
+    }
 
     ESP_LOGI(TAG, "Entities created OK");
     return true;
 }
 
 static void destroy_entities(MicrorosSyncImpl& impl) {
-    ESP_LOGI(TAG, "Destroying micro-ROS entities");
-    ROS_CHECK(rcl_publisher_fini(&impl.heartbeat_pub,        &impl.node), "heartbeat pub fini");
-    ROS_CHECK(rcl_publisher_fini(&impl.motor_positions_pub,  &impl.node), "motor_positions pub fini");
-    ROS_CHECK(rcl_publisher_fini(&impl.distance_sensors_pub, &impl.node), "distance_sensors pub fini");
-    ROS_CHECK(rcl_publisher_fini(&impl.led_state_pub,        &impl.node), "led_state pub fini");
-    ROS_CHECK(rcl_publisher_fini(&impl.tof_distance_pub,     &impl.node), "tof_distance pub fini");
-    ROS_CHECK(rcl_publisher_fini(&impl.laser_scan_pub,       &impl.node), "laser_scan pub fini");
-    ROS_CHECK(rcl_subscription_fini(&impl.motor_command_sub, &impl.node), "motor_command sub fini");
-    ROS_CHECK(rcl_subscription_fini(&impl.set_speed_sub,     &impl.node), "set_speed sub fini");
-    ROS_CHECK(rcl_subscription_fini(&impl.led_sub,           &impl.node), "led sub fini");
-    ROS_CHECK(rcl_timer_fini(&impl.heartbeat_timer),      "heartbeat timer fini");
-    ROS_CHECK(rcl_timer_fini(&impl.motor_position_timer), "motor_position timer fini");
-    ROS_CHECK(rcl_timer_fini(&impl.sensor_control_timer), "sensor_control timer fini");
-    ROS_CHECK(rclc_executor_fini(&impl.executor), "executor fini");
-    ROS_CHECK(rcl_node_fini(&impl.node),          "node fini");
-    ROS_CHECK(rclc_support_fini(&impl.support),   "support fini");
+  ESP_LOGI(TAG, "Destroying micro-ROS entities");
+
+  // Fini executor first — stops callbacks referencing the handles below
+  ROS_CHECK(rclc_executor_fini(&impl.executor), "executor fini");
+
+  // Publishers
+  ROS_CHECK(rcl_publisher_fini(&impl.heartbeat_pub,        &impl.node), "heartbeat pub fini");
+  ROS_CHECK(rcl_publisher_fini(&impl.motor_positions_pub,  &impl.node), "motor_positions pub fini");
+  ROS_CHECK(rcl_publisher_fini(&impl.distance_sensors_pub, &impl.node), "distance_sensors pub fini");
+  ROS_CHECK(rcl_publisher_fini(&impl.led_state_pub,        &impl.node), "led_state pub fini");
+  ROS_CHECK(rcl_publisher_fini(&impl.tof_distance_pub,     &impl.node), "tof_distance pub fini");
+  ROS_CHECK(rcl_publisher_fini(&impl.laser_scan_pub,       &impl.node), "laser_scan pub fini");
+
+  // Subscriptions
+  ROS_CHECK(rcl_subscription_fini(&impl.motor_command_sub, &impl.node), "motor_command sub fini");
+  ROS_CHECK(rcl_subscription_fini(&impl.set_speed_sub,     &impl.node), "set_speed sub fini");
+  ROS_CHECK(rcl_subscription_fini(&impl.led_sub,           &impl.node), "led sub fini");
+
+  // Timers
+  ROS_CHECK(rcl_timer_fini(&impl.heartbeat_timer),      "heartbeat timer fini");
+  ROS_CHECK(rcl_timer_fini(&impl.motor_position_timer), "motor_position timer fini");
+  ROS_CHECK(rcl_timer_fini(&impl.sensor_control_timer), "sensor_control timer fini");
+
+  // Node and support last
+  ROS_CHECK(rcl_node_fini(&impl.node),        "node fini");
+  ROS_CHECK(rclc_support_fini(&impl.support), "support fini");
 }
 
 // ---------------------------------------------------------------------------
