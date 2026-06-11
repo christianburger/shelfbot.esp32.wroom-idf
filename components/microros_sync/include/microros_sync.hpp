@@ -1,5 +1,4 @@
 #pragma once
-
 #include <cstddef>
 #include <cstdint>
 #include <sensor_common.hpp>
@@ -7,7 +6,6 @@
 class MicrorosSync {
 public:
     static MicrorosSync& getInstance();
-
     bool init();
     void start();
 
