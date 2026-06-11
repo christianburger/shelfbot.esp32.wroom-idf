@@ -11,7 +11,7 @@ static void log_hex_preview(const char* prefix, const uint8_t* data, const size_
         if (wrote <= 0) break;
         off += static_cast<size_t>(wrote);
     }
-    ESP_LOGW(TAG, "%s (%uB): %s", prefix, static_cast<unsigned>(len), line);
+    //ESP_LOGW(TAG, "%s (%uB): %s", prefix, static_cast<unsigned>(len), line);
 }
 
 static uint8_t crc8_poly4d(const uint8_t* data, size_t len) {

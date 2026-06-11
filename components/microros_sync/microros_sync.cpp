@@ -19,6 +19,8 @@
 #include <sensor_msgs/msg/laser_scan.h>
 #include <builtin_interfaces/msg/time.h>
 
+#include <sys/time.h>
+
 static const char* TAG = "MicrorosSync";
 
 #define ROS_CHECK(call, msg) do { \
@@ -30,13 +32,21 @@ static const char* TAG = "MicrorosSync";
     } \
 } while(0)
 
-// ---------------------------------------------------------------------------
-// Time-sync configuration
-// ---------------------------------------------------------------------------
-static constexpr int32_t  TIME_SYNC_TIMEOUT_MS  = 5000;
-static constexpr uint8_t  TIME_SYNC_MAX_ATTEMPTS = 3;
-static constexpr uint32_t EPOCH_WAIT_TIMEOUT_MS  = 30000;
-static constexpr uint32_t EPOCH_POLL_MS          = 200;
+#define ROS_CHECK_OR_FALSE(call, msg) do { \
+    rcl_ret_t _ret = (call); \
+    if (_ret != RCL_RET_OK) { \
+        ESP_LOGE(TAG, "%s failed: %ld (%s)", msg, (long)_ret, \
+                 rcl_get_error_string().str); \
+        rcl_reset_error(); \
+        return false; \
+    } \
+} while(0)
+
+static constexpr int32_t  SYNC_TIMEOUT_MS = 5000;
+static constexpr uint32_t EPOCH_WAIT_TIMEOUT_MS = 30000;
+static constexpr uint32_t EPOCH_POLL_MS = 200;
+static constexpr uint8_t  SPIN_FAIL_THRESHOLD    = 15;
+static constexpr uint8_t  SPIN_RECOVERY_CREDIT   = 5;
 
 // ---------------------------------------------------------------------------
 // MicrorosSyncImpl
@@ -89,111 +99,10 @@ struct MicrorosSyncImpl {
     MicrorosState     current_state    = MicrorosState::OFF;
     SemaphoreHandle_t mutex            = nullptr;
 
-    MicrorosSyncImpl()
-        : node(rcl_get_zero_initialized_node()),
-          allocator(rcl_get_default_allocator()),
-          support(),
-          executor(rclc_executor_get_zero_initialized_executor()),
-          heartbeat_pub(rcl_get_zero_initialized_publisher()),
-          motor_positions_pub(rcl_get_zero_initialized_publisher()),
-          distance_sensors_pub(rcl_get_zero_initialized_publisher()),
-          led_state_pub(rcl_get_zero_initialized_publisher()),
-          tof_distance_pub(rcl_get_zero_initialized_publisher()),
-          laser_scan_pub(rcl_get_zero_initialized_publisher()),
-          motor_command_sub(rcl_get_zero_initialized_subscription()),
-          set_speed_sub(rcl_get_zero_initialized_subscription()),
-          led_sub(rcl_get_zero_initialized_subscription()),
-          heartbeat_timer(rcl_get_zero_initialized_timer()),
-          motor_position_timer(rcl_get_zero_initialized_timer()),
-          sensor_control_timer(rcl_get_zero_initialized_timer())
-    {
-        std_msgs__msg__Int32__init(&heartbeat_msg);
-        std_msgs__msg__Float32MultiArray__init(&motor_positions_msg);
-        std_msgs__msg__Float32MultiArray__init(&distance_sensors_msg);
-        std_msgs__msg__Bool__init(&led_state_msg);
-        std_msgs__msg__Float32__init(&tof_distance_msg);
-        sensor_msgs__msg__LaserScan__init(&laser_scan_msg);
-        std_msgs__msg__Float32MultiArray__init(&motor_command_msg);
-        std_msgs__msg__Float32MultiArray__init(&set_speed_msg);
-        std_msgs__msg__Bool__init(&led_msg);
-
-        motor_dim[0].label.data     = const_cast<char*>("");
-        motor_dim[0].label.size     = 0;
-        motor_dim[0].label.capacity = 1;
-        motor_dim[0].size           = NUM_MOTORS;
-        motor_dim[0].stride         = NUM_MOTORS;
-        motor_positions_msg.layout.dim.data   = motor_dim;
-        motor_positions_msg.layout.dim.size   = 1;
-        motor_positions_msg.layout.data_offset = 0;
-
-        distance_dim[0].label.data     = const_cast<char*>("");
-        distance_dim[0].label.size     = 0;
-        distance_dim[0].label.capacity = 1;
-        distance_dim[0].size           = SensorCommon::NUM_SENSORS;
-        distance_dim[0].stride         = SensorCommon::NUM_SENSORS;
-        distance_sensors_msg.layout.dim.data   = distance_dim;
-        distance_sensors_msg.layout.dim.size   = 1;
-        distance_sensors_msg.layout.data_offset = 0;
-
-        motor_positions_msg.data.data     = motor_positions_data;
-        motor_positions_msg.data.capacity = NUM_MOTORS;
-        motor_positions_msg.data.size     = 0;
-
-        distance_sensors_msg.data.data     = distance_sensors_data;
-        distance_sensors_msg.data.capacity = SensorCommon::NUM_SENSORS;
-        distance_sensors_msg.data.size     = 0;
-
-        motor_command_msg.data.data     = motor_cmd_data;
-        motor_command_msg.data.capacity = NUM_MOTORS;
-        set_speed_msg.data.data         = set_speed_data;
-        set_speed_msg.data.capacity     = NUM_MOTORS;
-
-        laser_scan_msg.ranges.data          = ranges_data;
-        laser_scan_msg.ranges.capacity      = 12;
-        laser_scan_msg.ranges.size          = 0;
-        laser_scan_msg.intensities.data     = intensities_data;
-        laser_scan_msg.intensities.capacity = 12;
-        laser_scan_msg.intensities.size     = 0;
-
-        laser_scan_msg.range_min      = 0.02f;
-        laser_scan_msg.range_max      = 12.0f;
-        laser_scan_msg.time_increment = 0.0f;
-        laser_scan_msg.scan_time      = 0.1f;
-
-        static char frame_id_str[] = "lidar_frame";
-        laser_scan_msg.header.frame_id.data     = frame_id_str;
-        laser_scan_msg.header.frame_id.size     = sizeof(frame_id_str) - 1;
-        laser_scan_msg.header.frame_id.capacity = sizeof(frame_id_str);
-
-        mutex = xSemaphoreCreateMutex();
-    }
-
-    ~MicrorosSyncImpl() {
-        if (mutex)       vSemaphoreDelete(mutex);
-        if (task_handle) vTaskDelete(task_handle);
-    }
-
-    void setState(MicrorosState new_state) {
-        if (current_state == new_state) return;
-        const char* state_str = stateToString(new_state);
-        if (StateMachine::changeState("microros_sync", state_str)) {
-            current_state = new_state;
-        } else {
-            ESP_LOGE(TAG, "Failed to transition to state %s", state_str);
-        }
-    }
-
-    void fillStamp(int32_t& sec_out, uint32_t& nanosec_out) const {
-        if (time_synced) {
-            shelfbot::ShelfbotTimestamp::toRosTime(
-                shelfbot::ShelfbotTimestamp::epochMicros(),
-                sec_out, nanosec_out);
-        } else {
-            const int64_t mono_us = shelfbot::ShelfbotTimestamp::monotonicMicros();
-            sec_out     = static_cast<int32_t>(mono_us / 1000000LL);
-            nanosec_out = static_cast<uint32_t>((mono_us % 1000000LL) * 1000LL);
-        }
-    }
+    MicrorosSyncImpl();
+    ~MicrorosSyncImpl();
+    void setState(MicrorosState new_state);
+    void fillStamp(int32_t& sec_out, uint32_t& nanosec_out) const;
 };
 
 std_msgs__msg__MultiArrayDimension MicrorosSyncImpl::motor_dim[1];
@@ -209,7 +118,116 @@ static void unlock_impl() {
 }
 
 // ---------------------------------------------------------------------------
-// Unlocked publish helpers
+// Constructor / Destructor
+// ---------------------------------------------------------------------------
+MicrorosSyncImpl::MicrorosSyncImpl()
+    : node(rcl_get_zero_initialized_node()),
+      allocator(rcl_get_default_allocator()),
+      support(),
+      executor(rclc_executor_get_zero_initialized_executor()),
+      heartbeat_pub(rcl_get_zero_initialized_publisher()),
+      motor_positions_pub(rcl_get_zero_initialized_publisher()),
+      distance_sensors_pub(rcl_get_zero_initialized_publisher()),
+      led_state_pub(rcl_get_zero_initialized_publisher()),
+      tof_distance_pub(rcl_get_zero_initialized_publisher()),
+      laser_scan_pub(rcl_get_zero_initialized_publisher()),
+      motor_command_sub(rcl_get_zero_initialized_subscription()),
+      set_speed_sub(rcl_get_zero_initialized_subscription()),
+      led_sub(rcl_get_zero_initialized_subscription()),
+      heartbeat_timer(rcl_get_zero_initialized_timer()),
+      motor_position_timer(rcl_get_zero_initialized_timer()),
+      sensor_control_timer(rcl_get_zero_initialized_timer())
+{
+    std_msgs__msg__Int32__init(&heartbeat_msg);
+    std_msgs__msg__Float32MultiArray__init(&motor_positions_msg);
+    std_msgs__msg__Float32MultiArray__init(&distance_sensors_msg);
+    std_msgs__msg__Bool__init(&led_state_msg);
+    std_msgs__msg__Float32__init(&tof_distance_msg);
+    sensor_msgs__msg__LaserScan__init(&laser_scan_msg);
+    std_msgs__msg__Float32MultiArray__init(&motor_command_msg);
+    std_msgs__msg__Float32MultiArray__init(&set_speed_msg);
+    std_msgs__msg__Bool__init(&led_msg);
+
+    motor_dim[0].label.data     = const_cast<char*>("");
+    motor_dim[0].label.size     = 0;
+    motor_dim[0].label.capacity = 1;
+    motor_dim[0].size           = NUM_MOTORS;
+    motor_dim[0].stride         = NUM_MOTORS;
+    motor_positions_msg.layout.dim.data    = motor_dim;
+    motor_positions_msg.layout.dim.size    = 1;
+    motor_positions_msg.layout.data_offset = 0;
+
+    distance_dim[0].label.data     = const_cast<char*>("");
+    distance_dim[0].label.size     = 0;
+    distance_dim[0].label.capacity = 1;
+    distance_dim[0].size           = SensorCommon::NUM_SENSORS;
+    distance_dim[0].stride         = SensorCommon::NUM_SENSORS;
+    distance_sensors_msg.layout.dim.data    = distance_dim;
+    distance_sensors_msg.layout.dim.size    = 1;
+    distance_sensors_msg.layout.data_offset = 0;
+
+    motor_positions_msg.data.data     = motor_positions_data;
+    motor_positions_msg.data.capacity = NUM_MOTORS;
+    motor_positions_msg.data.size     = 0;
+
+    distance_sensors_msg.data.data     = distance_sensors_data;
+    distance_sensors_msg.data.capacity = SensorCommon::NUM_SENSORS;
+    distance_sensors_msg.data.size     = 0;
+
+    motor_command_msg.data.data     = motor_cmd_data;
+    motor_command_msg.data.capacity = NUM_MOTORS;
+    set_speed_msg.data.data         = set_speed_data;
+    set_speed_msg.data.capacity     = NUM_MOTORS;
+
+    laser_scan_msg.ranges.data          = ranges_data;
+    laser_scan_msg.ranges.capacity      = 12;
+    laser_scan_msg.ranges.size          = 0;
+    laser_scan_msg.intensities.data     = intensities_data;
+    laser_scan_msg.intensities.capacity = 12;
+    laser_scan_msg.intensities.size     = 0;
+
+    laser_scan_msg.range_min      = 0.02f;
+    laser_scan_msg.range_max      = 12.0f;
+    laser_scan_msg.time_increment = 0.0f;
+    laser_scan_msg.scan_time      = 0.1f;
+
+    static char frame_id_str[] = "lidar_frame";
+    laser_scan_msg.header.frame_id.data     = frame_id_str;
+    laser_scan_msg.header.frame_id.size     = sizeof(frame_id_str) - 1;
+    laser_scan_msg.header.frame_id.capacity = sizeof(frame_id_str);
+
+    mutex = xSemaphoreCreateMutex();
+}
+
+MicrorosSyncImpl::~MicrorosSyncImpl() {
+    if (mutex)       vSemaphoreDelete(mutex);
+    if (task_handle) vTaskDelete(task_handle);
+}
+
+void MicrorosSyncImpl::setState(MicrorosState new_state) {
+    if (current_state == new_state) return;
+    const char* state_str = stateToString(new_state);
+    if (StateMachine::changeState("microros_sync", state_str)) {
+        current_state = new_state;
+    } else {
+        ESP_LOGE(TAG, "Failed to transition to state %s", state_str);
+    }
+}
+
+void MicrorosSyncImpl::fillStamp(int32_t& sec_out, uint32_t& nanosec_out) const {
+    if (time_synced) {
+        shelfbot::ShelfbotTimestamp::toRosTime(
+            shelfbot::ShelfbotTimestamp::epochMicros(),
+            sec_out, nanosec_out);
+    } else {
+        const int64_t mono_us = shelfbot::ShelfbotTimestamp::monotonicMicros();
+        sec_out     = static_cast<int32_t>(mono_us / 1000000LL);
+        nanosec_out = static_cast<uint32_t>((mono_us % 1000000LL) * 1000LL);
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Publish helpers
 // ---------------------------------------------------------------------------
 static void _pub_heartbeat()        { ROS_CHECK(rcl_publish(&g_impl->heartbeat_pub,        &g_impl->heartbeat_msg,        NULL), "heartbeat publish"); }
 static void _pub_motor_positions()  { ROS_CHECK(rcl_publish(&g_impl->motor_positions_pub,  &g_impl->motor_positions_msg,  NULL), "motor_positions publish"); }
@@ -262,7 +280,6 @@ static void sensor_control_timer_cb(rcl_timer_t* /*timer*/, int64_t /*last_call_
         return;
     }
 
-    // Distance array
     float distances[SensorCommon::NUM_SENSORS];
     size_t idx = 0;
     for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS && idx < (size_t)SensorCommon::NUM_SENSORS; ++i, ++idx)
@@ -280,12 +297,10 @@ static void sensor_control_timer_cb(rcl_timer_t* /*timer*/, int64_t /*last_call_
     g_impl->distance_sensors_msg.data.size = copy;
     _pub_distance_sensors();
 
-    // ToF scalar
     g_impl->tof_distance_msg.data = data.tof_measurements[0].valid
         ? (data.tof_measurements[0].distance_mm / 1000.0f) : -1.0f;
     _pub_tof_distance();
 
-    // LaserScan
     const auto& m = data.lidar_measurement;
     if (m.valid && m.has_packet_points) {
         const float start_rad = m.start_angle_deg * static_cast<float>(M_PI) / 180.0f;
@@ -345,87 +360,84 @@ static void led_cb(const void* msg) {
 }
 
 // ---------------------------------------------------------------------------
-// Entity creation
-//
-// QoS assignment rationale (verified against live ros2 topic info --verbose):
-//
-//   BEST_EFFORT (rclc_publisher_init_best_effort):
-//     heartbeat        — no subscriber; diagnostic counter, loss acceptable
-//     motor_positions  — shelfbot_hardware_interface_microros_node subscribes
-//                        BEST_EFFORT; MUST match or data is silently dropped
-//     distance_sensors — no subscriber; sensor data, loss acceptable
-//     led_state        — no subscriber; feedback, loss acceptable
-//     tof_distance     — no subscriber; sensor data, loss acceptable
-//
-//   RELIABLE (rclc_publisher_init_default):
-//     laser_scan       — lidar_relay_node subscribes RELIABLE/VOLATILE;
-//                        a BEST_EFFORT publisher with a RELIABLE subscriber is
-//                        incompatible under DDS — data would be silently dropped.
-//                        Must stay RELIABLE to match the existing subscriber.
-//
-//   Subscriptions (rclc_subscription_init_default = RELIABLE):
-//     motor_command    — published by hardware_interface at RELIABLE ✓
-//     set_speed        — published by hardware_interface at RELIABLE ✓
-//     led              — published at RELIABLE ✓
+// Entity handle reset
 // ---------------------------------------------------------------------------
-static void create_entities(MicrorosSyncImpl& impl) {
-    ESP_LOGI(TAG, "Creating micro-ROS entities");
-    ROS_CHECK(rclc_node_init_default(&impl.node, "shelfbot_firmware", "", &impl.support), "node init");
+static void reset_entity_handles(MicrorosSyncImpl& impl) {
+    impl.node                 = rcl_get_zero_initialized_node();
+    impl.executor             = rclc_executor_get_zero_initialized_executor();
+    impl.heartbeat_pub        = rcl_get_zero_initialized_publisher();
+    impl.motor_positions_pub  = rcl_get_zero_initialized_publisher();
+    impl.distance_sensors_pub = rcl_get_zero_initialized_publisher();
+    impl.led_state_pub        = rcl_get_zero_initialized_publisher();
+    impl.tof_distance_pub     = rcl_get_zero_initialized_publisher();
+    impl.laser_scan_pub       = rcl_get_zero_initialized_publisher();
+    impl.motor_command_sub    = rcl_get_zero_initialized_subscription();
+    impl.set_speed_sub        = rcl_get_zero_initialized_subscription();
+    impl.led_sub              = rcl_get_zero_initialized_subscription();
+    impl.heartbeat_timer      = rcl_get_zero_initialized_timer();
+    impl.motor_position_timer = rcl_get_zero_initialized_timer();
+    impl.sensor_control_timer = rcl_get_zero_initialized_timer();
+    memset(&impl.support, 0, sizeof(impl.support));
+}
 
-    // ---- BEST_EFFORT publishers ----
-    ROS_CHECK(rclc_publisher_init_best_effort(&impl.heartbeat_pub, &impl.node,
+// ---------------------------------------------------------------------------
+// Entity creation (called ONLY after session sync and time sync)
+// ---------------------------------------------------------------------------
+static bool create_entities(MicrorosSyncImpl& impl) {
+    ESP_LOGI(TAG, "Creating micro-ROS entities");
+
+    ROS_CHECK_OR_FALSE(rclc_node_init_default(&impl.node, "shelfbot_firmware", "", &impl.support), "node init");
+
+    ROS_CHECK_OR_FALSE(rclc_publisher_init_best_effort(&impl.heartbeat_pub, &impl.node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
         "shelfbot_firmware/heartbeat"), "heartbeat pub");
 
-    ROS_CHECK(rclc_publisher_init_best_effort(&impl.motor_positions_pub, &impl.node,
+    ROS_CHECK_OR_FALSE(rclc_publisher_init_best_effort(&impl.motor_positions_pub, &impl.node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
         "shelfbot_firmware/motor_positions"), "motor_positions pub");
 
-    ROS_CHECK(rclc_publisher_init_best_effort(&impl.distance_sensors_pub, &impl.node,
+    ROS_CHECK_OR_FALSE(rclc_publisher_init_best_effort(&impl.distance_sensors_pub, &impl.node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
         "shelfbot_firmware/distance_sensors"), "distance_sensors pub");
 
-    ROS_CHECK(rclc_publisher_init_best_effort(&impl.led_state_pub, &impl.node,
+    ROS_CHECK_OR_FALSE(rclc_publisher_init_best_effort(&impl.led_state_pub, &impl.node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
         "shelfbot_firmware/led_state"), "led_state pub");
 
-    ROS_CHECK(rclc_publisher_init_best_effort(&impl.tof_distance_pub, &impl.node,
+    ROS_CHECK_OR_FALSE(rclc_publisher_init_best_effort(&impl.tof_distance_pub, &impl.node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
         "shelfbot_firmware/tof_distance"), "tof_distance pub");
 
-    // ---- RELIABLE publisher (must match lidar_relay_node subscriber) ----
-    ROS_CHECK(rclc_publisher_init_default(&impl.laser_scan_pub, &impl.node,
+    ROS_CHECK_OR_FALSE(rclc_publisher_init_default(&impl.laser_scan_pub, &impl.node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(sensor_msgs, msg, LaserScan),
         "shelfbot_firmware/laser_scan"), "laser_scan pub");
 
-    // ---- RELIABLE subscriptions (hardware_interface publishes RELIABLE) ----
-    ROS_CHECK(rclc_subscription_init_default(&impl.motor_command_sub, &impl.node,
+    ROS_CHECK_OR_FALSE(rclc_subscription_init_default(&impl.motor_command_sub, &impl.node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
         "shelfbot_firmware/motor_command"), "motor_command sub");
 
-    ROS_CHECK(rclc_subscription_init_default(&impl.set_speed_sub, &impl.node,
+    ROS_CHECK_OR_FALSE(rclc_subscription_init_default(&impl.set_speed_sub, &impl.node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
         "shelfbot_firmware/set_speed"), "set_speed sub");
 
-    ROS_CHECK(rclc_subscription_init_default(&impl.led_sub, &impl.node,
+    ROS_CHECK_OR_FALSE(rclc_subscription_init_default(&impl.led_sub, &impl.node,
         ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Bool),
         "shelfbot_firmware/led"), "led sub");
 
-    // ---- timers ----
-    ROS_CHECK(rclc_timer_init_default(&impl.heartbeat_timer,      &impl.support, RCL_MS_TO_NS(1000), heartbeat_timer_cb),      "heartbeat timer");
-    ROS_CHECK(rclc_timer_init_default(&impl.motor_position_timer, &impl.support, RCL_MS_TO_NS(100),  motor_position_timer_cb), "motor_position timer");
-    ROS_CHECK(rclc_timer_init_default(&impl.sensor_control_timer, &impl.support, RCL_MS_TO_NS(200),  sensor_control_timer_cb), "sensor_control timer");
+    ROS_CHECK_OR_FALSE(rclc_timer_init_default(&impl.heartbeat_timer,      &impl.support, RCL_MS_TO_NS(1000), heartbeat_timer_cb),      "heartbeat timer");
+    ROS_CHECK_OR_FALSE(rclc_timer_init_default(&impl.motor_position_timer, &impl.support, RCL_MS_TO_NS(100),  motor_position_timer_cb), "motor_position timer");
+    ROS_CHECK_OR_FALSE(rclc_timer_init_default(&impl.sensor_control_timer, &impl.support, RCL_MS_TO_NS(200),  sensor_control_timer_cb), "sensor_control timer");
 
-    // ---- executor: 3 timers + 3 subscriptions = 6 handles ----
-    ROS_CHECK(rclc_executor_init(&impl.executor, &impl.support.context, 6, &impl.allocator), "executor init");
-    ROS_CHECK(rclc_executor_add_timer(&impl.executor, &impl.heartbeat_timer),      "add heartbeat timer");
-    ROS_CHECK(rclc_executor_add_timer(&impl.executor, &impl.motor_position_timer), "add motor_position timer");
-    ROS_CHECK(rclc_executor_add_timer(&impl.executor, &impl.sensor_control_timer), "add sensor_control timer");
-    ROS_CHECK(rclc_executor_add_subscription(&impl.executor, &impl.motor_command_sub, &impl.motor_command_msg, motor_command_cb, ON_NEW_DATA), "add motor_command sub");
-    ROS_CHECK(rclc_executor_add_subscription(&impl.executor, &impl.set_speed_sub,     &impl.set_speed_msg,     set_speed_cb,     ON_NEW_DATA), "add set_speed sub");
-    ROS_CHECK(rclc_executor_add_subscription(&impl.executor, &impl.led_sub,           &impl.led_msg,           led_cb,           ON_NEW_DATA), "add led sub");
+    ROS_CHECK_OR_FALSE(rclc_executor_init(&impl.executor, &impl.support.context, 6, &impl.allocator), "executor init");
+    ROS_CHECK_OR_FALSE(rclc_executor_add_timer(&impl.executor, &impl.heartbeat_timer),      "add heartbeat timer");
+    ROS_CHECK_OR_FALSE(rclc_executor_add_timer(&impl.executor, &impl.motor_position_timer), "add motor_position timer");
+    ROS_CHECK_OR_FALSE(rclc_executor_add_timer(&impl.executor, &impl.sensor_control_timer), "add sensor_control timer");
+    ROS_CHECK_OR_FALSE(rclc_executor_add_subscription(&impl.executor, &impl.motor_command_sub, &impl.motor_command_msg, motor_command_cb, ON_NEW_DATA), "add motor_command sub");
+    ROS_CHECK_OR_FALSE(rclc_executor_add_subscription(&impl.executor, &impl.set_speed_sub,     &impl.set_speed_msg,     set_speed_cb,     ON_NEW_DATA), "add set_speed sub");
+    ROS_CHECK_OR_FALSE(rclc_executor_add_subscription(&impl.executor, &impl.led_sub,           &impl.led_msg,           led_cb,           ON_NEW_DATA), "add led sub");
 
     ESP_LOGI(TAG, "Entities created OK");
+    return true;
 }
 
 static void destroy_entities(MicrorosSyncImpl& impl) {
@@ -466,43 +478,19 @@ static bool query_mdns_host(const char* host_name, char* out_ip, size_t len) {
 }
 
 // ---------------------------------------------------------------------------
-// Clock synchronisation (Path A: agent, Path B: SNTP)
+// Network service readiness
 // ---------------------------------------------------------------------------
-static bool try_agent_sync() {
-    const rmw_ret_t ping = rmw_uros_ping_agent(200, 20);
-    if (ping != RMW_RET_OK) {
-        ESP_LOGW(TAG, "Agent ping failed — skipping rmw time sync");
-        return false;
-    }
-    ESP_LOGI(TAG, "Agent ping OK — attempting rmw_uros_sync_session");
-    for (uint8_t i = 1; i <= TIME_SYNC_MAX_ATTEMPTS; ++i) {
-        const rmw_ret_t ret = rmw_uros_sync_session(TIME_SYNC_TIMEOUT_MS);
-        if (ret != RMW_RET_OK) {
-            ESP_LOGW(TAG, "rmw_uros_sync_session attempt %u/%u failed: %d",
-                     i, TIME_SYNC_MAX_ATTEMPTS, (int)ret);
-            vTaskDelay(pdMS_TO_TICKS(500));
-            continue;
-        }
-        if (shelfbot::ShelfbotTimestamp::isEpochValid()) {
-            int32_t sec; uint32_t ns;
-            shelfbot::ShelfbotTimestamp::toRosTime(
-                shelfbot::ShelfbotTimestamp::epochMicros(), sec, ns);
-            ESP_LOGI(TAG, "Clock synced via micro-ROS agent — wall time %ld.%09lu",
-                     (long)sec, (unsigned long)ns);
-            return true;
-        }
-        ESP_LOGW(TAG, "rmw_uros_sync_session OK but epoch still invalid (raw=%" PRId64 " us) "
-                      "— agent may need --time flag",
-                 shelfbot::ShelfbotTimestamp::epochMicros());
-        vTaskDelay(pdMS_TO_TICKS(500));
-    }
-    return false;
+static bool is_network_service_ready() {
+    const std::string state = StateMachine::getState("network_service");
+    return (state == stateToString(NetworkServiceState::MDNS_READY) ||
+            state == stateToString(NetworkServiceState::HTTP_RUNNING));
 }
 
+// ---------------------------------------------------------------------------
+// Clock synchronisation using ONLY SNTP (no agent clock)
+// ---------------------------------------------------------------------------
 static bool sync_time() {
-    ESP_LOGI(TAG, "Starting clock sync (agent first, then SNTP fallback)");
-    if (try_agent_sync()) return true;
-    ESP_LOGI(TAG, "Agent sync did not produce valid epoch — polling for SNTP (timeout %lu ms)",
+    ESP_LOGI(TAG, "Waiting for SNTP to provide valid wall clock (timeout %lu ms)",
              (unsigned long)EPOCH_WAIT_TIMEOUT_MS);
     const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(EPOCH_WAIT_TIMEOUT_MS);
     uint32_t polls = 0;
@@ -520,7 +508,7 @@ static bool sync_time() {
                      (unsigned long)(polls * EPOCH_POLL_MS));
         vTaskDelay(pdMS_TO_TICKS(EPOCH_POLL_MS));
     }
-    ESP_LOGE(TAG, "Clock sync timed out — will use monotonic timestamps");
+    ESP_LOGE(TAG, "SNTP sync timed out — will use monotonic timestamps");
     return false;
 }
 
@@ -532,11 +520,14 @@ static void microros_task(void* arg) {
     if (!impl) { vTaskDelete(nullptr); return; }
 
     enum class TaskState {
-        WAITING_WIFI, DISCOVER_AGENT, INITIALIZING, TIME_SYNCING, CONNECTED, BACKING_OFF
+        WAITING_WIFI, DISCOVER_AGENT, INITIALIZING, CONNECTING, TIME_SYNCING, CREATE_ENTITIES, CONNECTED, BACKING_OFF
     } state = TaskState::WAITING_WIFI;
 
     uint32_t backoff_ms = 250;
-    constexpr uint32_t MAX_BACKOFF = 5000;
+    constexpr uint32_t MAX_BACKOFF_MS = 5000;
+    uint32_t discover_backoff_ms = 500;
+    constexpr uint32_t MAX_DISCOVER_BACKOFF_MS = 4000;
+
     uint8_t consecutive_spin_failures = 0;
     char agent_ip[16] = {};
     rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
@@ -550,15 +541,25 @@ static void microros_task(void* arg) {
                                     WM_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
                 ESP_LOGI(TAG, "Wi-Fi ready");
                 if (lock_impl()) { impl->setState(MicrorosState::DISCOVERING); unlock_impl(); }
+                discover_backoff_ms = 500;
                 state = TaskState::DISCOVER_AGENT;
                 break;
             }
 
             case TaskState::DISCOVER_AGENT: {
-                if (query_mdns_host(CONFIG_MICROROS_AGENT_MDNS_HOST, agent_ip, sizeof(agent_ip)))
+                if (!is_network_service_ready()) {
+                    ESP_LOGD(TAG, "Waiting for network service...");
+                    vTaskDelay(pdMS_TO_TICKS(500));
+                    break;
+                }
+                if (query_mdns_host(CONFIG_MICROROS_AGENT_MDNS_HOST, agent_ip, sizeof(agent_ip))) {
+                    discover_backoff_ms = 500;
                     state = TaskState::INITIALIZING;
-                else
-                    vTaskDelay(pdMS_TO_TICKS(100));
+                } else {
+                    vTaskDelay(pdMS_TO_TICKS(discover_backoff_ms));
+                    discover_backoff_ms = std::min(MAX_DISCOVER_BACKOFF_MS,
+                                                   discover_backoff_ms * 2);
+                }
                 break;
             }
 
@@ -566,42 +567,85 @@ static void microros_task(void* arg) {
                 init_options = rcl_get_zero_initialized_init_options();
                 rcl_ret_t ret = rcl_init_options_init(&init_options, impl->allocator);
                 if (ret != RCL_RET_OK) {
-                    ESP_LOGE(TAG, "rcl_init_options_init failed: %ld (%s)",
-                             (long)ret, rcl_get_error_string().str);
+                    ESP_LOGE(TAG, "rcl_init_options_init failed");
                     rcl_reset_error();
-                    state = TaskState::BACKING_OFF; break;
+                    state = TaskState::BACKING_OFF;
+                    break;
                 }
                 rmw_uros_options_set_udp_address(agent_ip, "8888",
                     rcl_init_options_get_rmw_init_options(&init_options));
-                ret = rclc_support_init_with_options(
-                    &impl->support, 0, NULL, &init_options, &impl->allocator);
+                ret = rclc_support_init_with_options(&impl->support, 0, NULL,
+                                                     &init_options, &impl->allocator);
                 ROS_CHECK(rcl_init_options_fini(&init_options), "init_options fini");
                 if (ret != RCL_RET_OK) {
-                    ESP_LOGE(TAG, "rclc_support_init_with_options failed: %ld (%s)",
-                             (long)ret, rcl_get_error_string().str);
+                    ESP_LOGE(TAG, "rclc_support_init_with_options failed");
                     rcl_reset_error();
-                    state = TaskState::BACKING_OFF; break;
+                    state = TaskState::BACKING_OFF;
+                    break;
                 }
-                create_entities(*impl);
-                if (lock_impl()) {
-                    impl->entities_created = true;
-                    impl->time_synced      = false;
-                    impl->setState(MicrorosState::TIME_SYNC);
-                    unlock_impl();
+                vTaskDelay(pdMS_TO_TICKS(200));
+                if (rmw_uros_ping_agent(500, 3) != RMW_RET_OK) {
+                    ESP_LOGE(TAG, "Agent ping failed after support init");
+                    ROS_CHECK(rclc_support_fini(&impl->support), "support fini");
+                    reset_entity_handles(*impl);
+                    state = TaskState::BACKING_OFF;
+                    break;
                 }
-                consecutive_spin_failures = 0;
-                backoff_ms = 250;
+                if (lock_impl()) { impl->setState(MicrorosState::TIME_SYNC); unlock_impl(); }
+                state = TaskState::CONNECTING;
+                break;
+            }
+
+            // Establish the micro-ROS session (handshake only, no clock sync)
+            case TaskState::CONNECTING: {
+                ESP_LOGI(TAG, "Establishing micro-ROS session (rmw_uros_sync_session)...");
+                const rmw_ret_t ret = rmw_uros_sync_session(SYNC_TIMEOUT_MS);
+                if (ret != RMW_RET_OK) {
+                    ESP_LOGE(TAG, "rmw_uros_sync_session failed: %d", (int)ret);
+                    ROS_CHECK(rclc_support_fini(&impl->support), "support fini");
+                    reset_entity_handles(*impl);
+                    state = TaskState::BACKING_OFF;
+                    break;
+                }
+                ESP_LOGI(TAG, "Session established – now synchronising clock via SNTP");
                 state = TaskState::TIME_SYNCING;
                 break;
             }
 
+            // Wait for SNTP to set the wall clock
             case TaskState::TIME_SYNCING: {
                 const bool synced = sync_time();
-                if (lock_impl()) { impl->time_synced = synced; unlock_impl(); }
-                if (!synced)
-                    ESP_LOGW(TAG, "Proceeding without valid epoch — sensor topics gated until next sync");
-                if (lock_impl()) { impl->setState(MicrorosState::CONNECTED); unlock_impl(); }
-                ESP_LOGI(TAG, "micro-ROS ready (time_synced=%s)", synced ? "yes" : "no");
+                if (lock_impl()) {
+                    impl->time_synced = synced;
+                    unlock_impl();
+                }
+                if (!synced) {
+                    ESP_LOGW(TAG, "No SNTP time – continuing with monotonic timestamps");
+                }
+                state = TaskState::CREATE_ENTITIES;
+                break;
+            }
+
+            case TaskState::CREATE_ENTITIES: {
+                if (!create_entities(*impl)) {
+                    ESP_LOGE(TAG, "create_entities failed – cleaning up");
+                    destroy_entities(*impl);
+                    reset_entity_handles(*impl);
+                    if (lock_impl()) {
+                        impl->entities_created = false;
+                        impl->time_synced = false;
+                        unlock_impl();
+                    }
+                    state = TaskState::BACKING_OFF;
+                    break;
+                }
+                if (lock_impl()) {
+                    impl->entities_created = true;
+                    impl->setState(MicrorosState::CONNECTED);
+                    unlock_impl();
+                }
+                consecutive_spin_failures = 0;
+                ESP_LOGI(TAG, "micro-ROS fully connected and ready");
                 state = TaskState::CONNECTED;
                 break;
             }
@@ -610,19 +654,26 @@ static void microros_task(void* arg) {
                 const rcl_ret_t spin_ret =
                     rclc_executor_spin_some(&impl->executor, RCL_MS_TO_NS(100));
                 if (spin_ret != RCL_RET_OK) {
-                    if (++consecutive_spin_failures >= 3) {
-                        ESP_LOGW(TAG, "3 consecutive spin failures — disconnecting");
+                    if (++consecutive_spin_failures >= SPIN_FAIL_THRESHOLD) {
+                        ESP_LOGW(TAG, "%d consecutive spin failures – disconnecting",
+                                 SPIN_FAIL_THRESHOLD);
                         destroy_entities(*impl);
+                        reset_entity_handles(*impl);
                         if (lock_impl()) {
                             impl->entities_created = false;
-                            impl->time_synced      = false;
+                            impl->time_synced = false;
                             impl->setState(MicrorosState::DISCONNECTED);
                             unlock_impl();
                         }
                         state = TaskState::BACKING_OFF;
                     }
                 } else {
-                    consecutive_spin_failures = 0;
+                    backoff_ms = 250;
+                    if (consecutive_spin_failures > 0) {
+                        consecutive_spin_failures =
+                            (consecutive_spin_failures > SPIN_RECOVERY_CREDIT)
+                            ? consecutive_spin_failures - SPIN_RECOVERY_CREDIT : 0;
+                    }
                 }
                 vTaskDelay(pdMS_TO_TICKS(10));
                 break;
@@ -631,7 +682,7 @@ static void microros_task(void* arg) {
             case TaskState::BACKING_OFF: {
                 ESP_LOGW(TAG, "Backing off for %lu ms", (unsigned long)backoff_ms);
                 vTaskDelay(pdMS_TO_TICKS(backoff_ms));
-                backoff_ms = std::min(MAX_BACKOFF, backoff_ms * 2);
+                backoff_ms = std::min(MAX_BACKOFF_MS, backoff_ms * 2);
                 if (lock_impl()) { impl->setState(MicrorosState::DISCOVERING); unlock_impl(); }
                 state = TaskState::DISCOVER_AGENT;
                 break;
@@ -723,5 +774,5 @@ void MicrorosSync::publishTofDistance(float distance_m) {
 }
 
 void MicrorosSync::publishLidarScan(const SensorCommon::LidarMeasurement& m) {
-    (void)m; // publishing handled by sensor_control_timer_cb
+    (void)m;
 }

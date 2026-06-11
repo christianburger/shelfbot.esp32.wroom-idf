@@ -22,8 +22,9 @@ Shelfbot& Shelfbot::get_instance() {
 // Network services task
 // Starts after Wi-Fi is connected (waits on WM_CONNECTED_BIT).
 // Responsibilities:
-//  - mDNS hostname / service advertisement (once, idempotent)
-//  - HTTP server start
+//  - Register itself in the state machine.
+//  - Initialise mDNS (once, idempotent)
+//  - Start HTTP server
 //
 // SNTP is now started by wifi_manager's on_ip_event handler the moment we
 // obtain an IP address, giving it the maximum possible time to settle before
@@ -33,17 +34,24 @@ static void network_services_task(void* arg) {
     EventGroupHandle_t wifi_evt = wifi_manager_get_event_group();
     xEventGroupWaitBits(wifi_evt, WM_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
 
-    // mDNS — must be initialised here (after Wi-Fi stack is up and we have an
-    // IP) because mdns_init() needs the TCP/IP stack running.
-    // microros_sync's task previously also called mdns_init(); that call has
-    // been removed from there since we do it authoritatively here.
-    mdns_init();
+    // Register this module and announce we are starting
+    StateMachine::setInitial("network_service", stateToString(NetworkServiceState::STARTING));
+
+    // mDNS initialisation
+    esp_err_t err = mdns_init();
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "mdns_init failed: %s", esp_err_to_name(err));
+        StateMachine::changeState("network_service", stateToString(NetworkServiceState::ERROR));
+        while (true) vTaskDelay(pdMS_TO_TICKS(60000));
+    }
     mdns_hostname_set("shelfbot");
     mdns_instance_name_set("Shelfbot ESP32 Client");
-    // Advertise the micro-ROS UDP service so the agent can discover us too
     mdns_service_add(nullptr, "_microros", "_udp", 8888, nullptr, 0);
+    StateMachine::changeState("network_service", stateToString(NetworkServiceState::MDNS_READY));
 
+    // HTTP server
     HttpServer::get_instance().start();
+    StateMachine::changeState("network_service", stateToString(NetworkServiceState::HTTP_RUNNING));
 
     while (true) vTaskDelay(pdMS_TO_TICKS(60000));
 }

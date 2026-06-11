@@ -48,20 +48,19 @@ static_assert((EVT_DISCONNECTED & (WM_CONNECTED_BIT | WM_DISCONNECTED_BIT)) == 0
 static_assert(EVT_GOT_IP != EVT_DISCONNECTED);
 
 // ---------------------------------------------------------------------------
-// SNTP — started once when we first obtain an IP address.
-// esp_sntp_* is idempotent: repeated calls after the first are safe.
-// We call it here (in the IP event) rather than in a later task so that SNTP
-// has maximum time to settle before microros_sync reaches TIME_SYNCING.
+// SNTP
 // ---------------------------------------------------------------------------
 static bool s_sntp_started = false;
 
-static void start_sntp_once() {
-    if (s_sntp_started) return;
-    s_sntp_started = true;
+static void start_or_restart_sntp() {
+    if (s_sntp_started) {
+        esp_sntp_stop();
+    }
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
     esp_sntp_setservername(1, "time.cloudflare.com");
     esp_sntp_init();
+    s_sntp_started = true;
     ESP_LOGI(TAG, "SNTP client started (pool.ntp.org, time.cloudflare.com)");
 }
 
@@ -79,7 +78,7 @@ static uint32_t s_reconnects      = 0;
 static int      s_degrade_streak  = 0;
 
 // ---------------------------------------------------------------------------
-// State machine integration
+// State machine integration (using global stateToString from lifecycle)
 // ---------------------------------------------------------------------------
 static void set_wifi_state(WifiManagerState new_state) {
     const char* state_str = stateToString(new_state);
@@ -137,12 +136,7 @@ static void on_ip_event(void *arg, esp_event_base_t base, int32_t id, const void
         xEventGroupClearBits(s_evt, WM_DISCONNECTED_BIT | EVT_DISCONNECTED);
         xEventGroupSetBits(s_evt, WM_CONNECTED_BIT | EVT_GOT_IP);
         set_wifi_state(WifiManagerState::CONNECTED);
-
-        // Start SNTP immediately when we have a route to the internet.
-        // This gives it maximum time to settle before microros_sync's
-        // TIME_SYNCING state begins polling ShelfbotTimestamp::isEpochValid().
-        // safe to call on every reconnect — idempotent.
-        start_sntp_once();
+        start_or_restart_sntp();
     }
 }
 

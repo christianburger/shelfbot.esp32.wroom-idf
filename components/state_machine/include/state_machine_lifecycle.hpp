@@ -49,6 +49,16 @@ enum class WifiManagerState : uint8_t {
     COUNT
 };
 
+// New state for the network services task (mDNS + HTTP)
+enum class NetworkServiceState : uint8_t {
+    OFF = 0,
+    STARTING,
+    MDNS_READY,
+    HTTP_RUNNING,
+    ERROR,
+    COUNT
+};
+
 // ----------------------------------------------------------------------------
 // Convert enum to string (for logging and state machine key)
 // ----------------------------------------------------------------------------
@@ -107,9 +117,19 @@ inline const char* stateToString(WifiManagerState s) {
     }
 }
 
+inline const char* stateToString(NetworkServiceState s) {
+    switch(s) {
+        case NetworkServiceState::OFF:          return "off";
+        case NetworkServiceState::STARTING:     return "starting";
+        case NetworkServiceState::MDNS_READY:   return "mdns_ready";
+        case NetworkServiceState::HTTP_RUNNING: return "http_running";
+        case NetworkServiceState::ERROR:        return "error";
+        default:                                return "unknown";
+    }
+}
+
 // ----------------------------------------------------------------------------
 // Transition matrices (informational — StateMachine does not enforce them yet)
-// Rows = FROM state, Columns = TO state, value = transition allowed
 // ----------------------------------------------------------------------------
 
 // Shelfbot (4 states: STARTING, RUNNING, ERROR, SHUTDOWN)
@@ -170,4 +190,16 @@ wifi_manager_transitions = {{
     /* CONNECTED    */ {{ false, false, false, true,  true  }},
     /* ERROR        */ {{ true,  false, false, false, false }},
     /* DISCONNECTED */ {{ false, true,  false, false, false }}
+}};
+
+// NetworkService (5 states: OFF, STARTING, MDNS_READY, HTTP_RUNNING, ERROR)
+constexpr std::array<
+    std::array<bool, static_cast<size_t>(NetworkServiceState::COUNT)>,
+    static_cast<size_t>(NetworkServiceState::COUNT)>
+network_service_transitions = {{
+    /* OFF         */ {{ false, true,  false, false, false }},
+    /* STARTING    */ {{ false, false, true,  true,  true  }},
+    /* MDNS_READY  */ {{ false, false, false, true,  true  }},
+    /* HTTP_RUNNING*/ {{ false, false, false, false, true  }},
+    /* ERROR       */ {{ false, false, false, false, false }}
 }};
