@@ -98,7 +98,7 @@ struct MicrorosSyncImpl {
     static std_msgs__msg__MultiArrayDimension motor_dim[1];
     static std_msgs__msg__MultiArrayDimension distance_dim[1];
 
-    uint32_t          pub_fail_count   = 0;
+    volatile uint32_t pub_fail_count   = 0;   // atomic via __sync_add_and_fetch
     TaskHandle_t      task_handle      = nullptr;
     SemaphoreHandle_t mutex            = nullptr;
 
@@ -121,7 +121,7 @@ static void unlock_impl() {
 }
 
 // ---------------------------------------------------------------------------
-// Constructor / Destructor (unchanged)
+// Constructor / Destructor
 // ---------------------------------------------------------------------------
 MicrorosSyncImpl::MicrorosSyncImpl()
     : node(rcl_get_zero_initialized_node()),
@@ -141,6 +141,7 @@ MicrorosSyncImpl::MicrorosSyncImpl()
       motor_position_timer(rcl_get_zero_initialized_timer()),
       sensor_control_timer(rcl_get_zero_initialized_timer())
 {
+    // Full initialisation (same as original)
     std_msgs__msg__Int32__init(&heartbeat_msg);
     std_msgs__msg__Float32MultiArray__init(&motor_positions_msg);
     std_msgs__msg__Float32MultiArray__init(&distance_sensors_msg);
@@ -221,7 +222,8 @@ void MicrorosSyncImpl::fillStamp(int32_t& sec_out, uint32_t& nanosec_out) const 
 }
 
 // ---------------------------------------------------------------------------
-// Publish helpers – all check state machine
+// Publish helpers – no mutex (only called from timer callbacks, which are
+// already serialised within the same task). The pub_fail_count is atomic.
 // ---------------------------------------------------------------------------
 static void _pub_heartbeat() {
     if (!StateMachine::isAtLeast("microros_sync", "connected")) return;
@@ -229,7 +231,7 @@ static void _pub_heartbeat() {
     if (r != RCL_RET_OK) {
         ESP_LOGE(TAG, "heartbeat publish failed: %ld (%s)", (long)r, rcl_get_error_string().str);
         rcl_reset_error();
-        if (lock_impl()) { ++g_impl->pub_fail_count; unlock_impl(); }
+        __sync_add_and_fetch(&g_impl->pub_fail_count, 1);
     }
 }
 
@@ -240,7 +242,7 @@ static void _pub_motor_positions() {
     if (r != RCL_RET_OK) {
         ESP_LOGE(TAG, "motor_positions publish failed: %ld (%s)", (long)r, rcl_get_error_string().str);
         rcl_reset_error();
-        if (lock_impl()) { ++g_impl->pub_fail_count; unlock_impl(); }
+        __sync_add_and_fetch(&g_impl->pub_fail_count, 1);
     }
 }
 
@@ -251,7 +253,7 @@ static void _pub_distance_sensors() {
     if (r != RCL_RET_OK) {
         ESP_LOGE(TAG, "distance_sensors publish failed: %ld (%s)", (long)r, rcl_get_error_string().str);
         rcl_reset_error();
-        if (lock_impl()) { ++g_impl->pub_fail_count; unlock_impl(); }
+        __sync_add_and_fetch(&g_impl->pub_fail_count, 1);
     }
 }
 
@@ -261,7 +263,7 @@ static void _pub_led_state() {
     if (r != RCL_RET_OK) {
         ESP_LOGE(TAG, "led_state publish failed: %ld (%s)", (long)r, rcl_get_error_string().str);
         rcl_reset_error();
-        if (lock_impl()) { ++g_impl->pub_fail_count; unlock_impl(); }
+        __sync_add_and_fetch(&g_impl->pub_fail_count, 1);
     }
 }
 
@@ -272,7 +274,7 @@ static void _pub_tof_distance() {
     if (r != RCL_RET_OK) {
         ESP_LOGE(TAG, "tof_distance publish failed: %ld (%s)", (long)r, rcl_get_error_string().str);
         rcl_reset_error();
-        if (lock_impl()) { ++g_impl->pub_fail_count; unlock_impl(); }
+        __sync_add_and_fetch(&g_impl->pub_fail_count, 1);
     }
 }
 
@@ -283,25 +285,22 @@ static void _pub_laser_scan() {
     if (r != RCL_RET_OK) {
         ESP_LOGE(TAG, "laser_scan publish failed: %ld (%s)", (long)r, rcl_get_error_string().str);
         rcl_reset_error();
-        if (lock_impl()) { ++g_impl->pub_fail_count; unlock_impl(); }
+        __sync_add_and_fetch(&g_impl->pub_fail_count, 1);
     }
 }
 
 // ---------------------------------------------------------------------------
-// Timer callbacks
+// Timer callbacks – no mutex, they run in the micro-ROS executor task only
 // ---------------------------------------------------------------------------
 static void heartbeat_timer_cb(rcl_timer_t* /*timer*/, int64_t /*last_call_time*/) {
     static int32_t counter = 0;
-    if (!lock_impl()) return;
     if (StateMachine::isAtLeast("microros_sync", "connected")) {
         g_impl->heartbeat_msg.data = ++counter;
         _pub_heartbeat();
     }
-    unlock_impl();
 }
 
 static void motor_position_timer_cb(rcl_timer_t* /*timer*/, int64_t /*last_call_time*/) {
-    if (!lock_impl()) return;
     if (StateMachine::isAtLeast("microros_sync", "connected") &&
         StateMachine::isAtLeast("time_sync", "synced")) {
         for (uint8_t i = 0; i < NUM_MOTORS; ++i)
@@ -310,11 +309,9 @@ static void motor_position_timer_cb(rcl_timer_t* /*timer*/, int64_t /*last_call_
         g_impl->motor_positions_msg.data.size = NUM_MOTORS;
         _pub_motor_positions();
     }
-    unlock_impl();
 }
 
 static void sensor_control_timer_cb(rcl_timer_t* /*timer*/, int64_t /*last_call_time*/) {
-    if (!lock_impl()) return;
     if (!StateMachine::isAtLeast("microros_sync", "connected") ||
         !StateMachine::isAtLeast("time_sync", "synced")) {
         static uint32_t skip_count = 0;
@@ -322,14 +319,12 @@ static void sensor_control_timer_cb(rcl_timer_t* /*timer*/, int64_t /*last_call_
             ESP_LOGW(TAG, "sensor_control_timer: waiting for time sync (%lu skips)",
                      (unsigned long)skip_count);
         }
-        unlock_impl();
         return;
     }
 
     SensorCommon::SensorDataPacket data;
     if (!SensorManager::get_instance().get_latest_data(data)) {
         ESP_LOGW(TAG, "Failed to get latest sensor data");
-        unlock_impl();
         return;
     }
 
@@ -381,12 +376,10 @@ static void sensor_control_timer_cb(rcl_timer_t* /*timer*/, int64_t /*last_call_
         if (skip_counter++ % 100 == 0)
             ESP_LOGW(TAG, "No valid LiDAR packet with points, skipping LaserScan publish");
     }
-
-    unlock_impl();
 }
 
 // ---------------------------------------------------------------------------
-// Subscription callbacks
+// Subscription callbacks (unchanged)
 // ---------------------------------------------------------------------------
 static void motor_command_cb(const void* msg) {
     const auto* cmd    = static_cast<const std_msgs__msg__Float32MultiArray*>(msg);
@@ -405,17 +398,14 @@ static void set_speed_cb(const void* msg) {
 static void led_cb(const void* msg) {
     const auto* led = static_cast<const std_msgs__msg__Bool*>(msg);
     led_control_set(led->data);
-    if (lock_impl()) {
-        if (StateMachine::isAtLeast("microros_sync", "connected")) {
-            g_impl->led_state_msg.data = led->data;
-            _pub_led_state();
-        }
-        unlock_impl();
+    if (StateMachine::isAtLeast("microros_sync", "connected")) {
+        g_impl->led_state_msg.data = led->data;
+        _pub_led_state();
     }
 }
 
 // ---------------------------------------------------------------------------
-// Entity management functions
+// Entity management functions (unchanged)
 // ---------------------------------------------------------------------------
 static void reset_entity_handles(MicrorosSyncImpl& impl) {
     impl.node                 = rcl_get_zero_initialized_node();
@@ -667,18 +657,18 @@ static bool sync_time() {
                      (unsigned long)(polls * EPOCH_POLL_MS));
         vTaskDelay(pdMS_TO_TICKS(EPOCH_POLL_MS));
     }
-    ESP_LOGW(TAG, "SNTP sync timed out — will use monotonic timestamps");
+    ESP_LOGW(TAG, "SNTP sync timed out — will not proceed to entity creation");
     return false;
 }
 
 // ---------------------------------------------------------------------------
-// microros_task – with full state machine integration and agent tracking
+// microros_task – full state machine with mandatory time sync and safe retry
 // ---------------------------------------------------------------------------
 static void microros_task(void* arg) {
     auto* impl = static_cast<MicrorosSyncImpl*>(arg);
     if (!impl) { vTaskDelete(nullptr); return; }
 
-    // Register agent module with ordered states from AgentState enum
+    // Register agent module with ordered states
     StateMachine::setInitial("agent", stateToString(AgentState::OFFLINE),
                              {stateToString(AgentState::OFFLINE),
                               stateToString(AgentState::DISCOVERED),
@@ -691,13 +681,14 @@ static void microros_task(void* arg) {
     // Prerequisites for microros_sync using agent states
     StateMachine::Prerequisite wifi_prereq{"wifi_manager", stateToString(WifiManagerState::CONNECTED)};
     StateMachine::Prerequisite mdns_prereq{"network_service", stateToString(NetworkServiceState::MDNS_READY)};
+    StateMachine::Prerequisite safe_state_prereq{"microros_sync", "disconnected"}; // must be in safe state
     StateMachine::registerPrerequisite("microros_sync", "discovering", wifi_prereq);
     StateMachine::registerPrerequisite("microros_sync", "discovering", mdns_prereq);
+    StateMachine::registerPrerequisite("microros_sync", "discovering", safe_state_prereq);
 
     StateMachine::Prerequisite agent_discovered{"agent", stateToString(AgentState::DISCOVERED)};
     StateMachine::Prerequisite agent_ping_ok{"agent", stateToString(AgentState::PING_OK)};
     StateMachine::Prerequisite agent_session_synced{"agent", stateToString(AgentState::SESSION_SYNCED)};
-    StateMachine::registerPrerequisite("microros_sync", "time_sync", agent_discovered);
     StateMachine::registerPrerequisite("microros_sync", "creating_entities", agent_ping_ok);
     StateMachine::registerPrerequisite("microros_sync", "creating_entities", StateMachine::Prerequisite{"time_sync", "synced"});
     StateMachine::registerPrerequisite("microros_sync", "connected", agent_session_synced);
@@ -706,8 +697,14 @@ static void microros_task(void* arg) {
     rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
     bool init_options_inited = false;
 
+    uint32_t error_backoff_ms = 1000;
+    const uint32_t ERROR_BACKOFF_MAX_MS = 10000;
+    uint8_t consecutive_failures = 0;
+    const uint8_t MAX_CONSECUTIVE_FAILURES = 10;
+
+    StateMachine::changeState("microros_sync", "disconnected", true);
+
     while (true) {
-        // Wait for Wi-Fi
         xEventGroupWaitBits(wifi_manager_get_event_group(), WM_CONNECTED_BIT, pdFALSE, pdFALSE, portMAX_DELAY);
 
         if (!StateMachine::waitForPrerequisites("microros_sync", "discovering", 30000, 500)) {
@@ -717,25 +714,51 @@ static void microros_task(void* arg) {
         }
         StateMachine::changeState("microros_sync", "discovering");
 
-        // mDNS lookup
         if (!query_mdns_host(CONFIG_MICROROS_AGENT_MDNS_HOST, agent_ip, sizeof(agent_ip))) {
             ESP_LOGW(TAG, "Agent mDNS not found");
             StateMachine::changeState("microros_sync", "disconnected");
             StateMachine::changeState("agent", stateToString(AgentState::OFFLINE));
             vTaskDelay(pdMS_TO_TICKS(2000));
+            consecutive_failures = 0;
             continue;
         }
         StateMachine::changeState("agent", stateToString(AgentState::DISCOVERED));
-        StateMachine::changeState("microros_sync", "time_sync");
 
-        // Initialise support
+        if (!sync_time()) {
+            ESP_LOGE(TAG, "Time sync failed");
+            StateMachine::changeState("microros_sync", "disconnected");
+            StateMachine::changeState("agent", stateToString(AgentState::OFFLINE));
+            vTaskDelay(pdMS_TO_TICKS(error_backoff_ms));
+            error_backoff_ms = std::min(ERROR_BACKOFF_MAX_MS, error_backoff_ms * 2);
+            consecutive_failures++;
+            if (consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
+                ESP_LOGE(TAG, "%d consecutive failures – rebooting", consecutive_failures);
+                esp_restart();
+            }
+            continue;
+        }
+
+        // Reset init_options
+        if (init_options_inited) {
+            rcl_ret_t fini_r = rcl_init_options_fini(&init_options);
+            if (fini_r != RCL_RET_OK) ESP_LOGE(TAG, "init_options fini failed: %ld", (long)fini_r);
+            init_options_inited = false;
+        }
+        memset(&init_options, 0, sizeof(init_options));
+
         rcl_ret_t r = rcl_init_options_init(&init_options, impl->allocator);
         if (r != RCL_RET_OK) {
             ESP_LOGE(TAG, "rcl_init_options_init failed");
             rcl_reset_error();
-            StateMachine::changeState("microros_sync", "error");
-            StateMachine::changeState("agent", stateToString(AgentState::ERROR));
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            StateMachine::changeState("microros_sync", "disconnected");
+            StateMachine::changeState("agent", stateToString(AgentState::OFFLINE));
+            vTaskDelay(pdMS_TO_TICKS(error_backoff_ms));
+            error_backoff_ms = std::min(ERROR_BACKOFF_MAX_MS, error_backoff_ms * 2);
+            consecutive_failures++;
+            if (consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
+                ESP_LOGE(TAG, "%d consecutive failures – rebooting", consecutive_failures);
+                esp_restart();
+            }
             continue;
         }
         init_options_inited = true;
@@ -749,9 +772,15 @@ static void microros_task(void* arg) {
                 if (fini_r != RCL_RET_OK) ESP_LOGE(TAG, "init_options fini failed");
                 init_options_inited = false;
             }
-            StateMachine::changeState("microros_sync", "error");
-            StateMachine::changeState("agent", stateToString(AgentState::ERROR));
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            StateMachine::changeState("microros_sync", "disconnected");
+            StateMachine::changeState("agent", stateToString(AgentState::OFFLINE));
+            vTaskDelay(pdMS_TO_TICKS(error_backoff_ms));
+            error_backoff_ms = std::min(ERROR_BACKOFF_MAX_MS, error_backoff_ms * 2);
+            consecutive_failures++;
+            if (consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
+                ESP_LOGE(TAG, "%d consecutive failures – rebooting", consecutive_failures);
+                esp_restart();
+            }
             continue;
         }
 
@@ -764,9 +793,15 @@ static void microros_task(void* arg) {
         if (r != RCL_RET_OK) {
             ESP_LOGE(TAG, "rclc_support_init failed");
             rcl_reset_error();
-            StateMachine::changeState("microros_sync", "error");
-            StateMachine::changeState("agent", stateToString(AgentState::ERROR));
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            StateMachine::changeState("microros_sync", "disconnected");
+            StateMachine::changeState("agent", stateToString(AgentState::OFFLINE));
+            vTaskDelay(pdMS_TO_TICKS(error_backoff_ms));
+            error_backoff_ms = std::min(ERROR_BACKOFF_MAX_MS, error_backoff_ms * 2);
+            consecutive_failures++;
+            if (consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
+                ESP_LOGE(TAG, "%d consecutive failures – rebooting", consecutive_failures);
+                esp_restart();
+            }
             continue;
         }
 
@@ -776,7 +811,9 @@ static void microros_task(void* arg) {
             safe_destroy_support(*impl);
             StateMachine::changeState("microros_sync", "disconnected");
             StateMachine::changeState("agent", stateToString(AgentState::OFFLINE));
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            vTaskDelay(pdMS_TO_TICKS(error_backoff_ms));
+            error_backoff_ms = std::min(ERROR_BACKOFF_MAX_MS, error_backoff_ms * 2);
+            consecutive_failures = 0;
             continue;
         }
         StateMachine::changeState("agent", stateToString(AgentState::PING_OK));
@@ -786,31 +823,50 @@ static void microros_task(void* arg) {
             safe_destroy_support(*impl);
             StateMachine::changeState("microros_sync", "disconnected");
             StateMachine::changeState("agent", stateToString(AgentState::OFFLINE));
-            vTaskDelay(pdMS_TO_TICKS(2000));
+            vTaskDelay(pdMS_TO_TICKS(error_backoff_ms));
+            error_backoff_ms = std::min(ERROR_BACKOFF_MAX_MS, error_backoff_ms * 2);
+            consecutive_failures = 0;
             continue;
         }
         StateMachine::changeState("agent", stateToString(AgentState::SESSION_SYNCED));
 
-        // Wait for time sync
-        if (!StateMachine::waitForPrerequisites("microros_sync", "creating_entities", EPOCH_WAIT_TIMEOUT_MS, EPOCH_POLL_MS)) {
-            ESP_LOGW(TAG, "Time sync prerequisite not met – continuing");
+        if (!StateMachine::canTransition("microros_sync", "creating_entities")) {
+            ESP_LOGE(TAG, "Cannot transition to creating_entities");
+            safe_destroy_support(*impl);
+            StateMachine::changeState("microros_sync", "disconnected");
+            StateMachine::changeState("agent", stateToString(AgentState::OFFLINE));
+            vTaskDelay(pdMS_TO_TICKS(error_backoff_ms));
+            error_backoff_ms = std::min(ERROR_BACKOFF_MAX_MS, error_backoff_ms * 2);
+            consecutive_failures++;
+            if (consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
+                ESP_LOGE(TAG, "%d consecutive failures – rebooting", consecutive_failures);
+                esp_restart();
+            }
+            continue;
         }
-        (void)sync_time();  // sets time_sync state
 
         StateMachine::changeState("microros_sync", "creating_entities");
         if (!create_entities(*impl)) {
             ESP_LOGE(TAG, "create_entities failed");
             safe_destroy_support(*impl);
-            StateMachine::changeState("microros_sync", "error");
-            StateMachine::changeState("agent", stateToString(AgentState::ERROR));
-            vTaskDelay(pdMS_TO_TICKS(5000));
+            StateMachine::changeState("microros_sync", "disconnected");
+            StateMachine::changeState("agent", stateToString(AgentState::OFFLINE));
+            vTaskDelay(pdMS_TO_TICKS(error_backoff_ms));
+            error_backoff_ms = std::min(ERROR_BACKOFF_MAX_MS, error_backoff_ms * 2);
+            consecutive_failures++;
+            if (consecutive_failures >= MAX_CONSECUTIVE_FAILURES) {
+                ESP_LOGE(TAG, "%d consecutive failures – rebooting", consecutive_failures);
+                esp_restart();
+            }
             continue;
         }
         StateMachine::changeState("agent", stateToString(AgentState::ENTITIES_CREATED));
         StateMachine::changeState("microros_sync", "connected");
         StateMachine::changeState("agent", stateToString(AgentState::CONNECTED));
 
-        // Main spin loop
+        error_backoff_ms = 1000;
+        consecutive_failures = 0;
+
         uint8_t consecutive_spin_failures = 0;
         while (true) {
             if (!(xEventGroupGetBits(wifi_manager_get_event_group()) & WM_CONNECTED_BIT)) {
@@ -823,15 +879,14 @@ static void microros_task(void* arg) {
                 if (++consecutive_spin_failures >= SPIN_FAIL_THRESHOLD) need_reconnect = true;
             } else {
                 consecutive_spin_failures = std::max(0, consecutive_spin_failures - SPIN_RECOVERY_CREDIT);
-                uint32_t pub_fails = 0;
-                if (lock_impl()) { pub_fails = impl->pub_fail_count; unlock_impl(); }
+                volatile uint32_t pub_fails = __sync_lock_test_and_set(&impl->pub_fail_count, 0);
                 if (pub_fails >= PUB_FAIL_RECONNECT_THRESHOLD) need_reconnect = true;
+                impl->pub_fail_count = 0; // reset after reading
             }
             if (need_reconnect) break;
             vTaskDelay(pdMS_TO_TICKS(10));
         }
 
-        // Teardown
         destroy_entities(*impl);
         reset_entity_handles(*impl);
         safe_destroy_support(*impl);
@@ -842,7 +897,7 @@ static void microros_task(void* arg) {
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// Public API – mutex is used here only
 // ---------------------------------------------------------------------------
 MicrorosSync::MicrorosSync()  { g_impl = new MicrorosSyncImpl(); }
 MicrorosSync::~MicrorosSync() { delete g_impl; g_impl = nullptr; }
@@ -854,8 +909,8 @@ MicrorosSync& MicrorosSync::getInstance() {
 
 bool MicrorosSync::init() {
     FirmwareVersion::print_version(TAG);
-    std::vector<std::string> ordered = {"off", "discovering", "time_sync", "creating_entities", "connected", "error", "disconnected"};
-    StateMachine::setInitial("microros_sync", stateToString(MicrorosState::OFF), ordered);
+    std::vector<std::string> ordered = {"off", "discovering", "creating_entities", "connected", "error", "disconnected"};
+    StateMachine::setInitial("microros_sync", "disconnected", ordered);
     StateMachine::setInitial("time_sync", "unsynced", {"unsynced", "synced"});
     ESP_LOGI(TAG, "MicrorosSync initialised");
     return true;
@@ -863,15 +918,15 @@ bool MicrorosSync::init() {
 
 void MicrorosSync::start() {
     if (!g_impl || g_impl->task_handle) return;
-    xTaskCreate(microros_task, "microros_task", 16000, g_impl, 5, &g_impl->task_handle);
+    xTaskCreate(microros_task, "microros_task", 24576, g_impl, 5, &g_impl->task_handle);
     ESP_LOGI(TAG, "MicrorosSync task started");
 }
 
 void MicrorosSync::publishHeartbeat(int32_t value) {
     if (lock_impl()) {
         g_impl->heartbeat_msg.data = value;
-        _pub_heartbeat();
         unlock_impl();
+        _pub_heartbeat();
     }
 }
 
@@ -881,8 +936,8 @@ void MicrorosSync::publishMotorPositions(const float* positions, size_t count) {
         for (size_t i = 0; i < copy; ++i)
             g_impl->motor_positions_data[i] = positions[i];
         g_impl->motor_positions_msg.data.size = copy;
-        _pub_motor_positions();
         unlock_impl();
+        _pub_motor_positions();
     }
 }
 
@@ -892,24 +947,24 @@ void MicrorosSync::publishDistanceSensors(const float* distances, size_t count) 
         for (size_t i = 0; i < copy; ++i)
             g_impl->distance_sensors_data[i] = distances[i];
         g_impl->distance_sensors_msg.data.size = copy;
-        _pub_distance_sensors();
         unlock_impl();
+        _pub_distance_sensors();
     }
 }
 
 void MicrorosSync::publishLedState(bool led_state) {
     if (lock_impl()) {
         g_impl->led_state_msg.data = led_state;
-        _pub_led_state();
         unlock_impl();
+        _pub_led_state();
     }
 }
 
 void MicrorosSync::publishTofDistance(float distance_m) {
     if (lock_impl()) {
         g_impl->tof_distance_msg.data = distance_m;
-        _pub_tof_distance();
         unlock_impl();
+        _pub_tof_distance();
     }
 }
 

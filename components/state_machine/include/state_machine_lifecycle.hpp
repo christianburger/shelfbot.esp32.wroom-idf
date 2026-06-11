@@ -4,20 +4,22 @@
 enum class ShelfbotState : uint8_t { STARTING = 0, RUNNING, ERROR, SHUTDOWN, COUNT };
 enum class MotorControlState : uint8_t { OFF = 0, IDLE, MOVING, ERROR, DISABLED, COUNT };
 enum class SensorControlState : uint8_t { OFF = 0, IDLE, SCANNING, ERROR, DISABLED, COUNT };
+
+// MicrorosState: removed TIME_SYNC because we now synchronise time directly without a dedicated state
 enum class MicrorosState : uint8_t {
     OFF = 0,
     DISCOVERING,
-    TIME_SYNC,
     CREATING_ENTITIES,
     CONNECTED,
     ERROR,
     DISCONNECTED,
     COUNT
 };
+
 enum class WifiManagerState : uint8_t { OFF = 0, CONNECTING, CONNECTED, ERROR, DISCONNECTED, COUNT };
 enum class NetworkServiceState : uint8_t { OFF = 0, STARTING, MDNS_READY, HTTP_RUNNING, ERROR, COUNT };
 
-// New: micro-ROS agent states (remote host)
+// micro-ROS agent states (remote host)
 enum class AgentState : uint8_t {
     OFFLINE = 0,
     DISCOVERED,
@@ -68,7 +70,6 @@ inline const char* stateToString(MicrorosState s) {
     switch(s) {
         case MicrorosState::OFF:              return "off";
         case MicrorosState::DISCOVERING:      return "discovering";
-        case MicrorosState::TIME_SYNC:        return "time_sync";
         case MicrorosState::CREATING_ENTITIES:return "creating_entities";
         case MicrorosState::CONNECTED:        return "connected";
         case MicrorosState::ERROR:            return "error";
