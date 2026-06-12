@@ -158,7 +158,7 @@ MicrorosSyncImpl::MicrorosSyncImpl()
     laser_scan_msg.time_increment       = 0.0f;
     laser_scan_msg.scan_time            = 0.1f;
 
-    static char frame_id[] = "lidar_frame";
+    static char frame_id[] = "laser_link";
     laser_scan_msg.header.frame_id = { frame_id, sizeof(frame_id) - 1, sizeof(frame_id) };
 
     mutex = xSemaphoreCreateMutex();
@@ -186,9 +186,9 @@ void MicrorosSyncImpl::fillStamp(int32_t& sec, uint32_t& ns) const {
 // Publish helpers
 // ---------------------------------------------------------------------------
 static bool is_connected() {
-    return StateMachine::isAtLeast("microros_sync",
-                                   stateToString(MicrorosState::CONNECTED));
+  return StateMachine::isInState("microros_sync", stateToString(MicrorosState::CONNECTED));
 }
+
 static bool is_time_synced() {
     return StateMachine::isAtLeast("time_sync",
                                    stateToString(TimeSyncState::SYNCED));
@@ -437,7 +437,7 @@ static bool create_entities(MicrorosSyncImpl& impl) {
     PUB_BE (heartbeat_pub,        std_msgs, Int32,            "shelfbot_firmware/heartbeat")
     PUB_BE (motor_positions_pub,  std_msgs, Float32MultiArray,"shelfbot_firmware/motor_positions")
     PUB_BE (distance_sensors_pub, std_msgs, Float32MultiArray,"shelfbot_firmware/distance_sensors")
-    PUB_BE (led_state_pub,        std_msgs, Bool,             "shelfbot_firmware/led_state")
+    PUB_REL(led_state_pub, std_msgs, Bool, "shelfbot_firmware/led_state")
     PUB_BE (tof_distance_pub,     std_msgs, Float32,          "shelfbot_firmware/tof_distance")
     PUB_BE(laser_scan_pub,  sensor_msgs, LaserScan,          "shelfbot_firmware/laser_scan")
     SUB_REL(motor_command_sub,    std_msgs, Float32MultiArray,"shelfbot_firmware/motor_command")
