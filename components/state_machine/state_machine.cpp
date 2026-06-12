@@ -6,9 +6,10 @@ static const char* TAG = "StateMachine";
 // Static member definitions
 std::mutex StateMachine::mutex_;
 std::unordered_map<std::string, StateMachine::ModuleState> StateMachine::modules_;
-std::unordered_map<std::string,
-    std::unordered_map<std::string, std::vector<StateMachine::Prerequisite>>>
-    StateMachine::prerequisites_;
+std::unordered_map<
+    std::string,
+    std::unordered_map<std::string, std::vector<StateMachine::Prerequisite>>
+> StateMachine::prerequisites_;
 TaskHandle_t StateMachine::status_task_handle_ = nullptr;
 bool         StateMachine::task_running_       = false;
 
@@ -52,7 +53,6 @@ bool StateMachine::setInitial(const std::string& module,
         if (!found) {
             ESP_LOGE(TAG, "Module '%s': initial_state '%s' not in ordered_states",
                      module.c_str(), initial_state.c_str());
-            // Still register — guard above prevents crash in rank lookups
         }
     }
     modules_.emplace(module, ModuleState(initial_state, ordered_states));
@@ -67,7 +67,6 @@ void StateMachine::registerPrerequisite(const std::string& module,
                                          const std::string& target_state,
                                          const Prerequisite& prereq) {
     std::lock_guard<std::mutex> lock(mutex_);
-    // Validate that both modules are already registered (early error detection)
     if (modules_.find(module) == modules_.end())
         ESP_LOGE(TAG, "registerPrerequisite: subject module '%s' not yet registered", module.c_str());
     if (modules_.find(prereq.prereq_module) == modules_.end())
@@ -164,7 +163,13 @@ bool StateMachine::changeState(const std::string& module,
         return false;
     }
     const std::string& old_state = it->second.current_state;
-    if (old_state == new_state) return true;   // no-op, not an error
+
+    // BLOCK invalid transition to the same state
+    if (old_state == new_state) {
+        ESP_LOGW(TAG, "Module '%s' attempted invalid transition: %s -> %s (no change)",
+                 module.c_str(), old_state.c_str(), new_state.c_str());
+        return false;
+    }
 
     if (!force_skip_prereqs && !prereqsSatisfied_locked(module, new_state)) {
         ESP_LOGW(TAG, "Module '%s': transition '%s' -> '%s' blocked by prerequisites",

@@ -1,5 +1,7 @@
 #pragma once
 
+#define SENSOR_STOP_TO_SETUP_DELAY_MS 5000
+
 // ============================================================================
 // Compile‑time sensor configuration – set these before building
 // ============================================================================
@@ -93,6 +95,13 @@ public:
 
     bool get_latest_data(SensorCommon::SensorDataPacket* data) const;
 
+    // New lifecycle methods
+    esp_err_t lifecycle_setup();
+    esp_err_t lifecycle_init();
+    esp_err_t lifecycle_start();
+    esp_err_t lifecycle_stop();
+    esp_err_t lifecycle_update();
+
     static const char* TAG;
 
     SensorControl(const SensorControl&) = delete;
@@ -117,3 +126,10 @@ private:
     std::unique_ptr<IToFSensor>       createToFSensor();
     std::unique_ptr<ILidarSensor>     createLidarSensor();
 };
+
+// Global lifecycle functions for the sensor control component
+void sensor_control_setup();
+void sensor_control_init();
+void sensor_control_start();
+void sensor_control_stop();
+void sensor_control_update();

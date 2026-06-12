@@ -349,8 +349,14 @@ static bool monitor_rssi() {
 // ---------------------------------------------------------------------------
 // Public API
 // ---------------------------------------------------------------------------
+
 esp_err_t wifi_manager_init() {
     s_evt = xEventGroupCreate();
+    // Register module only if not already registered
+    if (StateMachine::getState("wifi_manager").empty()) {
+      StateMachine::setInitial("wifi_manager", stateToString(WifiManagerState::OFF), orderedStates(WifiManagerState()));
+    }
+
     if (!s_evt) return ESP_ERR_NO_MEM;
     xEventGroupSetBits(s_evt, WM_DISCONNECTED_BIT);
 

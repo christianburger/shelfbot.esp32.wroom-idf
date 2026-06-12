@@ -6,6 +6,7 @@
 #include <firmware_version.hpp>
 #include <state_machine.hpp>
 #include <state_machine_lifecycle.hpp>
+#include <sensor_manager.hpp>
 
 // Include adapter for the selected driver
 #if SHELFBOT_DRIVER_VL53L0X
@@ -33,10 +34,7 @@ static void set_sensor_state(SensorControlState new_state) {
 }
 
 SensorControl::SensorControl(Config config) : config_(std::move(config)) {
-    data_mutex_ = xSemaphoreCreateMutex();
-    if (!data_mutex_) {
-        ESP_LOGE(TAG, "Failed to create data mutex");
-    }
+    // data_mutex_ will be created in initialize()
 }
 
 SensorControl::~SensorControl() {
@@ -49,7 +47,7 @@ SensorControl::~SensorControl() {
     }
 }
 
-// Factory methods (unchanged)
+// Factory methods
 std::unique_ptr<IUltrasonicArray> SensorControl::createUltrasonicArray() {
 #if SHELFBOT_HAS_ULTRASONIC == 0
     ESP_LOGW(TAG, "Ultrasonic support disabled at compile time");
@@ -114,7 +112,7 @@ std::unique_ptr<IToFSensor> SensorControl::createToFSensor() {
 #elif SHELFBOT_DRIVER_LYDSTO
         return std::make_unique<LydstoAdapter>();
 #else
-#error "No ToF driver selected! Define one of SHELFBOT_DRIVER_VL53L0X, VL53L1, VL53L1_MODBUS, or LYDSTO"
+#error "No ToF driver selected!"
 #endif
     });
 
@@ -155,6 +153,11 @@ std::unique_ptr<ILidarSensor> SensorControl::createLidarSensor() {
 }
 
 esp_err_t SensorControl::initialize() {
+    // Create mutex here instead of constructor to allow re-initialization after stop
+    if (!data_mutex_) {
+        data_mutex_ = xSemaphoreCreateMutex();
+        if (!data_mutex_) return ESP_ERR_NO_MEM;
+    }
     if (initialized_) return ESP_OK;
 
     ESP_LOGI(TAG, "Firmware Version: %s", FirmwareVersion::get_version_string());
@@ -179,8 +182,6 @@ esp_err_t SensorControl::initialize() {
     // Initial state – OFF
     StateMachine::setInitial("sensor_control", stateToString(SensorControlState::OFF));
     set_sensor_state(SensorControlState::OFF);
-
-    // Move to IDLE – this transition is allowed (OFF → IDLE)
     set_sensor_state(SensorControlState::IDLE);
 
     ESP_LOGI(TAG, "=========================================");
@@ -239,7 +240,6 @@ esp_err_t SensorControl::read_all(std::vector<uint16_t>& ultrasonic_distances,
     return err;
 }
 
-// FIX #3: continuous_read_loop – move blocking read outside mutex
 void SensorControl::continuous_read_loop() {
     ESP_LOGI(TAG, "Starting continuous sensor reading...");
     TickType_t last_ultrasonic_wake = xTaskGetTickCount();
@@ -248,13 +248,11 @@ void SensorControl::continuous_read_loop() {
     while (continuous_mode_) {
         TickType_t now = xTaskGetTickCount();
 
-        // --- Perform the blocking LiDAR read OUTSIDE the mutex
         SensorCommon::LidarMeasurement lidar_result;
         if (lidar_sensor_) {
             lidar_sensor_->read(lidar_result);
         }
 
-        // --- Now take the mutex only to update shared data
         if (xSemaphoreTake(data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
             int64_t timestamp = esp_timer_get_time();
 
@@ -276,12 +274,10 @@ void SensorControl::continuous_read_loop() {
             }
 
             latest_data_.timestamp_us = timestamp;
-            // Copy the LiDAR result that was already read
             latest_data_.lidar_measurement = lidar_result;
 
             xSemaphoreGive(data_mutex_);
 
-            // Callbacks – these are non‑blocking and outside the mutex
             if ((now - last_ultrasonic_wake) * portTICK_PERIOD_MS >= config_.ultrasonic_read_interval_ms) {
                 if (config_.ultrasonic_callback && ultrasonic_array_) {
                     std::vector<uint16_t> distances_mm;
@@ -328,12 +324,11 @@ esp_err_t SensorControl::start_continuous() {
         }
     }
 
-    // FIX #3: transition from IDLE → SCANNING (OFF→IDLE already done in initialize())
     set_sensor_state(SensorControlState::SCANNING);
     continuous_mode_ = true;
 
     BaseType_t result = xTaskCreate(
-        continuous_read_task,
+        [](void* arg) { static_cast<SensorControl*>(arg)->continuous_read_loop(); },
         "sensor_read_task",
         4096,
         this,
@@ -412,7 +407,6 @@ bool SensorControl::tof_probe(uint8_t sensor_index) const {
 }
 
 uint8_t SensorControl::lidar_health() const {
-    // This function reads from latest_data_ – must take mutex
     uint8_t health = 0;
     if (xSemaphoreTake(data_mutex_, pdMS_TO_TICKS(100)) == pdTRUE) {
         health = latest_data_.lidar_measurement.health;
@@ -436,6 +430,49 @@ bool SensorControl::get_latest_data(SensorCommon::SensorDataPacket* data) const 
 }
 
 esp_err_t SensorControl::update_lidar_measurement() {
-    // This function is no longer used – kept for compatibility but does nothing
     return ESP_OK;
+}
+
+// ---------------------------------------------------------------------------
+// New lifecycle methods
+// ---------------------------------------------------------------------------
+esp_err_t SensorControl::lifecycle_setup() {
+    ESP_LOGI(TAG, "Sensor lifecycle setup");
+    return ESP_OK;
+}
+
+esp_err_t SensorControl::lifecycle_init() {
+    ESP_LOGI(TAG, "Sensor lifecycle init");
+    return initialize();
+}
+
+esp_err_t SensorControl::lifecycle_start() {
+    ESP_LOGI(TAG, "Sensor lifecycle start");
+    return start_continuous();
+}
+
+esp_err_t SensorControl::lifecycle_stop() {
+    ESP_LOGI(TAG, "Sensor lifecycle stop");
+    return stop_continuous();
+}
+
+esp_err_t SensorControl::lifecycle_update() {
+    return ESP_OK;
+}
+
+// Global lifecycle functions
+void sensor_control_setup() {
+    SensorManager::get_instance().get_sensor_control()->lifecycle_setup();
+}
+void sensor_control_init() {
+    SensorManager::get_instance().get_sensor_control()->lifecycle_init();
+}
+void sensor_control_start() {
+    SensorManager::get_instance().get_sensor_control()->lifecycle_start();
+}
+void sensor_control_stop() {
+    SensorManager::get_instance().get_sensor_control()->lifecycle_stop();
+}
+void sensor_control_update() {
+    SensorManager::get_instance().get_sensor_control()->lifecycle_update();
 }

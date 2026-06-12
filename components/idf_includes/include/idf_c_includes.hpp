@@ -46,7 +46,6 @@ extern "C" {
 #include "std_msgs/msg/bool.h"
 #include "std_msgs/msg/float32.h"
 #include "std_msgs/msg/float32_multi_array.h"
-
 }
 
 #include <FastAccelStepper.h>
@@ -70,4 +69,16 @@ extern "C" {
 #include <unordered_map>
 #include <unordered_set>
 #include <mutex>
+
+#include <rcl/rcl.h>
+#include <rclc/rclc.h>
+#include <rclc/executor.h>
+#include <rmw_microros/rmw_microros.h>
+#include <std_msgs/msg/int32.h>
+#include <std_msgs/msg/float32_multi_array.h>
+#include <std_msgs/msg/bool.h>
+#include <std_msgs/msg/float32.h>
+#include <sensor_msgs/msg/laser_scan.h>
+#include <builtin_interfaces/msg/time.h>
+#include <sys/time.h>
 

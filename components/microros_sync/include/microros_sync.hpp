@@ -1,6 +1,5 @@
 #pragma once
-#include <cstddef>
-#include <cstdint>
+#include <idf_c_includes.hpp>
 #include <sensor_common.hpp>
 
 class MicrorosSync {

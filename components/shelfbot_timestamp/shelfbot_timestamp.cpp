@@ -4,10 +4,6 @@
 
 namespace shelfbot {
 
-// ---------------------------------------------------------------------------
-// Lower bound for a "sane" Unix epoch: 2023-11-14 22:13:20 UTC.
-// Any time.tv_sec below this means the RTC has not been set yet.
-// ---------------------------------------------------------------------------
 static constexpr time_t kReasonableEpoch = 1700000000LL;
 
 int64_t ShelfbotTimestamp::monotonicMicros() {

@@ -8,26 +8,12 @@
 #include <state_machine_lifecycle.hpp>
 #include <shelfbot_timestamp.hpp>
 
-#include <rcl/rcl.h>
-#include <rclc/rclc.h>
-#include <rclc/executor.h>
-#include <rmw_microros/rmw_microros.h>
-#include <std_msgs/msg/int32.h>
-#include <std_msgs/msg/float32_multi_array.h>
-#include <std_msgs/msg/bool.h>
-#include <std_msgs/msg/float32.h>
-#include <sensor_msgs/msg/laser_scan.h>
-#include <builtin_interfaces/msg/time.h>
-#include <sys/time.h>
-
 static const char* TAG = "MicrorosSync";
 
 // ---------------------------------------------------------------------------
 // Timing constants
 // ---------------------------------------------------------------------------
 static constexpr int32_t  SYNC_TIMEOUT_MS             = 5000;
-static constexpr uint32_t EPOCH_WAIT_TIMEOUT_MS        = 30000;
-static constexpr uint32_t EPOCH_POLL_MS                = 250;
 static constexpr uint32_t BACKOFF_INITIAL_MS           = 1000;
 static constexpr uint32_t BACKOFF_MAX_MS               = 30000;
 static constexpr int      SPIN_FAIL_THRESHOLD          = 15;
@@ -75,12 +61,10 @@ struct MicrorosSyncImpl {
     float ranges_data[12]                                  = {};
     float intensities_data[12]                             = {};
 
-    // pub_fail_count is written from timer callbacks (executor task) and
-    // read + cleared from the spin loop (same task) – no lock needed.
-    uint32_t pub_fail_count = 0;
+    uint32_t pub_fail_count;
 
-    TaskHandle_t      task_handle    = nullptr;
-    SemaphoreHandle_t mutex          = nullptr;
+    TaskHandle_t      task_handle;
+    SemaphoreHandle_t mutex;
 
     static std_msgs__msg__MultiArrayDimension motor_dim[1];
     static std_msgs__msg__MultiArrayDimension distance_dim[1];
@@ -96,7 +80,10 @@ std_msgs__msg__MultiArrayDimension MicrorosSyncImpl::distance_dim[1];
 
 static MicrorosSyncImpl* g_impl = nullptr;
 
-static bool lock_impl()  {
+// ---------------------------------------------------------------------------
+// Lock helpers
+// ---------------------------------------------------------------------------
+static bool lock_impl() {
     return g_impl && g_impl->mutex &&
            xSemaphoreTake(g_impl->mutex, pdMS_TO_TICKS(100)) == pdTRUE;
 }
@@ -123,7 +110,10 @@ MicrorosSyncImpl::MicrorosSyncImpl()
       led_sub(rcl_get_zero_initialized_subscription()),
       heartbeat_timer(rcl_get_zero_initialized_timer()),
       motor_position_timer(rcl_get_zero_initialized_timer()),
-      sensor_control_timer(rcl_get_zero_initialized_timer())
+      sensor_control_timer(rcl_get_zero_initialized_timer()),
+      pub_fail_count(0),
+      task_handle(nullptr),
+      mutex(nullptr)
 {
     std_msgs__msg__Int32__init(&heartbeat_msg);
     std_msgs__msg__Float32MultiArray__init(&motor_positions_msg);
@@ -194,8 +184,6 @@ void MicrorosSyncImpl::fillStamp(int32_t& sec, uint32_t& ns) const {
 
 // ---------------------------------------------------------------------------
 // Publish helpers
-// These run only inside the executor task (serialised) — no lock needed.
-// pub_fail_count is read and cleared from the same task in the spin loop.
 // ---------------------------------------------------------------------------
 static bool is_connected() {
     return StateMachine::isAtLeast("microros_sync",
@@ -243,7 +231,7 @@ static void _pub_laser_scan() {
 }
 
 // ---------------------------------------------------------------------------
-// Timer callbacks (executor task only)
+// Timer callbacks
 // ---------------------------------------------------------------------------
 static void heartbeat_timer_cb(rcl_timer_t*, int64_t) {
     static int32_t counter = 0;
@@ -275,44 +263,24 @@ static void sensor_control_timer_cb(rcl_timer_t*, int64_t) {
         return;
     }
 
-    // Pack distance array: ultrasonic, ToF, LiDAR
+    // Pack distance array
+    float distance_array[SensorCommon::NUM_SENSORS];
     size_t idx = 0;
-    for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS &&
-         idx < (size_t)SensorCommon::NUM_SENSORS; ++i, ++idx)
-        g_impl->distance_sensors_data[idx] = data.ultrasonic_readings[i].distance_cm;
-    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS &&
-         idx < (size_t)SensorCommon::NUM_SENSORS; ++i, ++idx)
-        g_impl->distance_sensors_data[idx] = data.tof_measurements[i].distance_mm / 10.0f;
-    if (idx < (size_t)SensorCommon::NUM_SENSORS) {
-        g_impl->distance_sensors_data[idx++] = data.lidar_measurement.valid
+    for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS && idx < SensorCommon::NUM_SENSORS; ++i, ++idx)
+        distance_array[idx] = data.ultrasonic_readings[i].distance_cm;
+    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS && idx < SensorCommon::NUM_SENSORS; ++i, ++idx)
+        distance_array[idx] = data.tof_measurements[i].distance_mm / 10.0f;
+    if (idx < SensorCommon::NUM_SENSORS) {
+        distance_array[idx++] = data.lidar_measurement.valid
             ? (data.lidar_measurement.distance_mm / 10.0f) : -1.0f;
     }
-    g_impl->distance_sensors_msg.data.size = idx;
-    _pub_distance_sensors();
+    MicrorosSync::publishDistanceSensors(distance_array, idx);
 
-    g_impl->tof_distance_msg.data = data.tof_measurements[0].valid
-        ? (data.tof_measurements[0].distance_mm / 1000.0f) : -1.0f;
-    _pub_tof_distance();
+    float tof_m = data.tof_measurements[0].valid ? (data.tof_measurements[0].distance_mm / 1000.0f) : -1.0f;
+    MicrorosSync::publishTofDistance(tof_m);
 
-    const auto& m = data.lidar_measurement;
-    if (m.valid && m.has_packet_points) {
-        const float start_rad = m.start_angle_deg * static_cast<float>(M_PI) / 180.0f;
-        const float end_rad   = m.end_angle_deg   * static_cast<float>(M_PI) / 180.0f;
-        g_impl->laser_scan_msg.angle_min       = start_rad;
-        g_impl->laser_scan_msg.angle_max       = end_rad;
-        g_impl->laser_scan_msg.angle_increment = (end_rad - start_rad) / 11.0f;
-        g_impl->fillStamp(g_impl->laser_scan_msg.header.stamp.sec,
-                          g_impl->laser_scan_msg.header.stamp.nanosec);
-        for (int i = 0; i < 12; ++i) {
-            const uint16_t mm = m.packet_distances_mm[i];
-            g_impl->ranges_data[i] = (mm == 0 || mm > 12000)
-                ? (g_impl->laser_scan_msg.range_max + 1.0f)
-                : (mm / 1000.0f);
-            g_impl->intensities_data[i] = static_cast<float>(m.packet_confidences[i]);
-        }
-        g_impl->laser_scan_msg.ranges.size      = 12;
-        g_impl->laser_scan_msg.intensities.size = 12;
-        _pub_laser_scan();
+    if (data.lidar_measurement.valid && data.lidar_measurement.has_packet_points) {
+        MicrorosSync::publishLidarScan(data.lidar_measurement);
     } else {
         static uint32_t skip_lidar = 0;
         if ((++skip_lidar % 100) == 1)
@@ -410,11 +378,8 @@ static bool destroy_entities(MicrorosSyncImpl& impl) {
     return ok;
 }
 
-// Returns true only if ALL entities were created.
-// On failure: node is finalised, all handles reset to zero.
 static bool create_entities(MicrorosSyncImpl& impl) {
     ESP_LOGI(TAG, "Creating micro-ROS entities");
-
     rcl_ret_t r = rclc_node_init_default(
         &impl.node, "shelfbot_firmware", "", &impl.support);
     if (r != RCL_RET_OK) {
@@ -514,7 +479,6 @@ static bool create_entities(MicrorosSyncImpl& impl) {
     }
 
     if (!ok) {
-        // Node was created; fini it before resetting all handles.
         const rcl_ret_t fr = rcl_node_fini(&impl.node);
         if (fr != RCL_RET_OK) {
             ESP_LOGE(TAG, "node fini (cleanup) failed: %ld (%s)", (long)fr,
@@ -546,52 +510,14 @@ static bool query_mdns_host(const char* host, char* out_ip, size_t len) {
 }
 
 // ---------------------------------------------------------------------------
-// Clock synchronisation
-//
-// Try rmw_uros_sync_session() first (requires agent started with --time).
-// Fall back to SNTP.  Returns true if wall clock is now valid.
-//
-// IMPORTANT: this function is called AFTER rclc_support_init so the agent
-// session transport is already alive when we call rmw_uros_sync_session().
+// Helper to avoid redundant state changes
 // ---------------------------------------------------------------------------
-static bool sync_clock_with_agent() {
-    ESP_LOGI(TAG, "Attempting clock sync via micro-ROS agent (rmw_uros_sync_session)");
-    const rmw_ret_t r = rmw_uros_sync_session(SYNC_TIMEOUT_MS);
-    if (r == RMW_RET_OK && shelfbot::ShelfbotTimestamp::isEpochValid()) {
-        int32_t sec; uint32_t ns;
-        shelfbot::ShelfbotTimestamp::toRosTime(
-            shelfbot::ShelfbotTimestamp::epochMicros(), sec, ns);
-        ESP_LOGI(TAG, "Clock synced via micro-ROS agent — wall time %ld.%09lu",
-                 (long)sec, (unsigned long)ns);
-        return true;
-    }
-    ESP_LOGW(TAG, "Agent clock sync failed (rmw=%d) — falling back to SNTP", (int)r);
-    return false;
-}
-
-static bool wait_for_sntp(uint32_t timeout_ms) {
-    ESP_LOGI(TAG, "Waiting for SNTP (timeout %lu ms)", (unsigned long)timeout_ms);
-    const TickType_t deadline = xTaskGetTickCount() + pdMS_TO_TICKS(timeout_ms);
-    uint32_t polls = 0;
-    while (xTaskGetTickCount() < deadline) {
-        if (shelfbot::ShelfbotTimestamp::isEpochValid()) {
-            int32_t sec; uint32_t ns;
-            shelfbot::ShelfbotTimestamp::toRosTime(
-                shelfbot::ShelfbotTimestamp::epochMicros(), sec, ns);
-            ESP_LOGI(TAG, "Clock synced via SNTP after %lu polls — wall time %ld.%09lu",
-                     (unsigned long)polls, (long)sec, (unsigned long)ns);
-            return true;
-        }
-        if ((++polls % 20) == 0)
-            ESP_LOGI(TAG, "Waiting for SNTP... (%lu ms elapsed)",
-                     (unsigned long)(polls * EPOCH_POLL_MS));
-        vTaskDelay(pdMS_TO_TICKS(EPOCH_POLL_MS));
-    }
-    return false;
+static bool is_current_state(const std::string& module, const std::string& state) {
+    return StateMachine::isInState(module, state);
 }
 
 // ---------------------------------------------------------------------------
-// microros_task
+// microros_task – with time sync prerequisite enforced
 // ---------------------------------------------------------------------------
 static void microros_task(void* arg) {
     auto* impl = static_cast<MicrorosSyncImpl*>(arg);
@@ -603,7 +529,6 @@ static void microros_task(void* arg) {
     bool  init_options_inited = false;
     uint32_t backoff_ms = BACKOFF_INITIAL_MS;
 
-    // Helper: full teardown to a clean disconnected state
     auto full_teardown = [&](const char* reason) {
         ESP_LOGW(TAG, "full_teardown: %s", reason);
         if (StateMachine::isAtLeast("microros_sync",
@@ -626,46 +551,62 @@ static void microros_task(void* arg) {
             init_options_inited = false;
         }
         impl->pub_fail_count = 0;
-        // force_skip_prereqs=true: teardown must always succeed regardless of
-        // what other modules are doing.
-        StateMachine::changeState("microros_sync",
-                                  stateToString(MicrorosState::DISCONNECTED),
-                                  /*force_skip_prereqs=*/true);
-        StateMachine::changeState("agent",
-                                  stateToString(AgentState::OFFLINE),
-                                  /*force_skip_prereqs=*/true);
+
+        // Transition to RECOVERING
+        if (!is_current_state("microros_sync", stateToString(MicrorosState::RECOVERING))) {
+            StateMachine::changeState("microros_sync",
+                                      stateToString(MicrorosState::RECOVERING),
+                                      true);
+        }
+        if (!is_current_state("agent", stateToString(AgentState::OFFLINE))) {
+            StateMachine::changeState("agent",
+                                      stateToString(AgentState::OFFLINE),
+                                      true);
+        }
     };
 
-    ESP_LOGI(TAG, "MicrorosSync task started, waiting for prerequisites");
+    ESP_LOGI(TAG, "MicrorosSync task started");
 
     while (true) {
         // ------------------------------------------------------------------
-        // Wait for wifi + mDNS before attempting discovery
+        // If in RECOVERING, wait backoff and then go to DISCONNECTED
         // ------------------------------------------------------------------
-        if (!StateMachine::waitForPrerequisites("microros_sync",
-                stateToString(MicrorosState::DISCOVERING), 60000, 500)) {
-            ESP_LOGW(TAG, "Prerequisites for discovering not met within 60s, retrying");
-            backoff_ms = std::min(BACKOFF_MAX_MS, backoff_ms * 2);
+        if (is_current_state("microros_sync", stateToString(MicrorosState::RECOVERING))) {
             vTaskDelay(pdMS_TO_TICKS(backoff_ms));
+            if (!is_current_state("microros_sync", stateToString(MicrorosState::DISCONNECTED))) {
+                StateMachine::changeState("microros_sync",
+                                          stateToString(MicrorosState::DISCONNECTED),
+                                          true);
+            }
             continue;
         }
-        StateMachine::changeState("microros_sync",
-                                  stateToString(MicrorosState::DISCOVERING));
+
+        // ------------------------------------------------------------------
+        // Wait for prerequisites (wifi connected, network_service mdns_ready)
+        // ------------------------------------------------------------------
+        if (!StateMachine::waitForPrerequisites("microros_sync",
+                stateToString(MicrorosState::DISCOVERING), 120000, 500)) {
+            ESP_LOGW(TAG, "Prerequisites for discovering not met within 120s");
+            full_teardown("prerequisites timeout");
+            continue;
+        }
 
         // ------------------------------------------------------------------
         // mDNS discovery
         // ------------------------------------------------------------------
+        if (!is_current_state("microros_sync", stateToString(MicrorosState::DISCOVERING))) {
+            StateMachine::changeState("microros_sync", stateToString(MicrorosState::DISCOVERING));
+        }
+
         if (!query_mdns_host(CONFIG_MICROROS_AGENT_MDNS_HOST,
                              agent_ip, sizeof(agent_ip))) {
-            ESP_LOGW(TAG, "Agent mDNS not found, backing off %lu ms",
-                     (unsigned long)backoff_ms);
+            ESP_LOGW(TAG, "Agent mDNS not found, backing off");
             full_teardown("mDNS not found");
-            vTaskDelay(pdMS_TO_TICKS(backoff_ms));
-            backoff_ms = std::min(BACKOFF_MAX_MS, backoff_ms * 2);
             continue;
         }
-        StateMachine::changeState("agent", stateToString(AgentState::DISCOVERED),
-                                  /*force*/true);
+        if (!is_current_state("agent", stateToString(AgentState::DISCOVERED))) {
+            StateMachine::changeState("agent", stateToString(AgentState::DISCOVERED), true);
+        }
 
         // ------------------------------------------------------------------
         // rcl init options + support init
@@ -676,8 +617,6 @@ static void microros_task(void* arg) {
             ESP_LOGE(TAG, "rcl_init_options_init failed: %ld", (long)r);
             rcl_reset_error();
             full_teardown("init_options_init failed");
-            vTaskDelay(pdMS_TO_TICKS(backoff_ms));
-            backoff_ms = std::min(BACKOFF_MAX_MS, backoff_ms * 2);
             continue;
         }
         init_options_inited = true;
@@ -696,14 +635,11 @@ static void microros_task(void* arg) {
             init_options = rcl_get_zero_initialized_init_options();
             init_options_inited = false;
             full_teardown("set_udp_address failed");
-            vTaskDelay(pdMS_TO_TICKS(backoff_ms));
-            backoff_ms = std::min(BACKOFF_MAX_MS, backoff_ms * 2);
             continue;
         }
 
         const rcl_ret_t support_r = rclc_support_init_with_options(
             &impl->support, 0, nullptr, &init_options, &impl->allocator);
-        // init_options consumed; fini regardless of result
         rcl_ret_t fini_ret = rcl_init_options_fini(&init_options);
         if (fini_ret != RCL_RET_OK) {
             ESP_LOGE(TAG, "rcl_init_options_fini after support_init failed: %ld (%s)",
@@ -717,118 +653,94 @@ static void microros_task(void* arg) {
             ESP_LOGE(TAG, "rclc_support_init failed: %ld (%s)",
                      (long)support_r, rcl_get_error_string().str);
             rcl_reset_error();
-            safe_destroy_support(*impl);  // partial init — always fini
+            safe_destroy_support(*impl);
             full_teardown("support_init failed");
-            vTaskDelay(pdMS_TO_TICKS(backoff_ms));
-            backoff_ms = std::min(BACKOFF_MAX_MS, backoff_ms * 2);
             continue;
         }
         support_inited = true;
         ESP_LOGI(TAG, "rclc_support_init OK");
 
-        // brief settle — let the DDS participant announce itself
         vTaskDelay(pdMS_TO_TICKS(200));
 
         // ------------------------------------------------------------------
         // Ping
         // ------------------------------------------------------------------
         if (rmw_uros_ping_agent(500, 3) != RMW_RET_OK) {
-            ESP_LOGE(TAG, "Agent ping failed after support init — agent down or wrong port?");
+            ESP_LOGE(TAG, "Agent ping failed after support init");
             full_teardown("ping failed");
-            vTaskDelay(pdMS_TO_TICKS(backoff_ms));
-            backoff_ms = std::min(BACKOFF_MAX_MS, backoff_ms * 2);
             continue;
         }
-        StateMachine::changeState("agent", stateToString(AgentState::PING_OK), true);
+        if (!is_current_state("agent", stateToString(AgentState::PING_OK))) {
+            StateMachine::changeState("agent", stateToString(AgentState::PING_OK), true);
+        }
         ESP_LOGI(TAG, "Agent ping OK");
 
         // ------------------------------------------------------------------
-        // Clock sync — try agent first, then SNTP fallback.
-        // MUST happen after support_init so rmw_uros_sync_session can work.
+        // Session sync (required for DDS)
         // ------------------------------------------------------------------
-        bool time_synced = shelfbot::ShelfbotTimestamp::isEpochValid();
-        if (!time_synced) {
-            time_synced = sync_clock_with_agent();
+        if (rmw_uros_sync_session(SYNC_TIMEOUT_MS) != RMW_RET_OK) {
+            ESP_LOGE(TAG, "rmw_uros_sync_session failed");
+            full_teardown("session sync failed");
+            continue;
         }
-        if (!time_synced) {
-            time_synced = wait_for_sntp(EPOCH_WAIT_TIMEOUT_MS);
+        if (!is_current_state("agent", stateToString(AgentState::SESSION_SYNCED))) {
+            StateMachine::changeState("agent", stateToString(AgentState::SESSION_SYNCED), true);
         }
-        if (!time_synced) {
-            ESP_LOGE(TAG, "Clock sync failed (neither agent nor SNTP succeeded). "
-                     "Sensor topics with timestamps will NOT publish.");
-            // Do NOT tear down — heartbeat and led_state can still work.
-            // Log clearly so the user knows what is broken and why.
-        } else {
-            StateMachine::changeState("time_sync",
-                                      stateToString(TimeSyncState::SYNCED),
-                                      /*force*/true);
-        }
-
-        // ------------------------------------------------------------------
-        // Session sync (agent state machine)
-        // ------------------------------------------------------------------
-        {
-            const rmw_ret_t sess_r = rmw_uros_sync_session(SYNC_TIMEOUT_MS);
-            if (sess_r != RMW_RET_OK) {
-                ESP_LOGE(TAG, "rmw_uros_sync_session failed: %d", (int)sess_r);
-                full_teardown("session sync failed");
-                vTaskDelay(pdMS_TO_TICKS(backoff_ms));
-                backoff_ms = std::min(BACKOFF_MAX_MS, backoff_ms * 2);
-                continue;
-            }
-        }
-        StateMachine::changeState("agent", stateToString(AgentState::SESSION_SYNCED), true);
         ESP_LOGI(TAG, "Session established");
 
-        // ------------------------------------------------------------------
-        // Second ping — agent could have dropped during the sync window
-        // ------------------------------------------------------------------
+        // Second ping
         if (rmw_uros_ping_agent(300, 2) != RMW_RET_OK) {
             ESP_LOGE(TAG, "Agent gone after session sync");
             full_teardown("ping failed after session sync");
-            vTaskDelay(pdMS_TO_TICKS(backoff_ms));
-            backoff_ms = std::min(BACKOFF_MAX_MS, backoff_ms * 2);
             continue;
         }
 
         // ------------------------------------------------------------------
-        // Check prerequisites for creating_entities (time_sync must be synced
-        // for timestamped topics — optional, we already logged above)
+        // Wait for time sync BEFORE creating entities (prerequisite enforced)
         // ------------------------------------------------------------------
-        StateMachine::changeState("microros_sync",
-                                  stateToString(MicrorosState::CREATING_ENTITIES));
+        if (!StateMachine::waitForPrerequisites("microros_sync",
+                stateToString(MicrorosState::CREATING_ENTITIES), 60000, 500)) {
+            ESP_LOGW(TAG, "Time sync prerequisite not met, aborting entity creation");
+            full_teardown("time sync not achieved");
+            continue;
+        }
+
+        // Transition to CREATING_ENTITIES (only allowed after time sync)
+        if (!is_current_state("microros_sync", stateToString(MicrorosState::CREATING_ENTITIES))) {
+            StateMachine::changeState("microros_sync", stateToString(MicrorosState::CREATING_ENTITIES));
+        }
 
         if (!create_entities(*impl)) {
             ESP_LOGE(TAG, "create_entities failed");
             full_teardown("create_entities failed");
-            vTaskDelay(pdMS_TO_TICKS(backoff_ms));
-            backoff_ms = std::min(BACKOFF_MAX_MS, backoff_ms * 2);
             continue;
         }
 
-        StateMachine::changeState("agent", stateToString(AgentState::ENTITIES_CREATED), true);
-        StateMachine::changeState("microros_sync", stateToString(MicrorosState::CONNECTED));
-        StateMachine::changeState("agent", stateToString(AgentState::CONNECTED), true);
+        if (!is_current_state("agent", stateToString(AgentState::ENTITIES_CREATED))) {
+            StateMachine::changeState("agent", stateToString(AgentState::ENTITIES_CREATED), true);
+        }
+        if (!is_current_state("microros_sync", stateToString(MicrorosState::CONNECTED))) {
+            StateMachine::changeState("microros_sync", stateToString(MicrorosState::CONNECTED));
+        }
+        if (!is_current_state("agent", stateToString(AgentState::CONNECTED))) {
+            StateMachine::changeState("agent", stateToString(AgentState::CONNECTED), true);
+        }
 
         impl->pub_fail_count = 0;
-        backoff_ms           = BACKOFF_INITIAL_MS;  // reset on successful connect
-        ESP_LOGI(TAG, "micro-ROS fully connected and ready (time_synced=%s)",
-                 time_synced ? "yes" : "no");
+        backoff_ms = BACKOFF_INITIAL_MS;
+        ESP_LOGI(TAG, "micro-ROS fully connected and ready");
 
         // ------------------------------------------------------------------
         // Spin loop
         // ------------------------------------------------------------------
         int consecutive_spin_failures = 0;
         while (true) {
-            // Wi-Fi watchdog
             if (!(xEventGroupGetBits(wifi_manager_get_event_group()) & WM_CONNECTED_BIT)) {
                 ESP_LOGW(TAG, "Wi-Fi lost while connected — tearing down");
                 break;
             }
 
-            const rcl_ret_t spin_r =
-                rclc_executor_spin_some(&impl->executor, RCL_MS_TO_NS(100));
-
+            const rcl_ret_t spin_r = rclc_executor_spin_some(&impl->executor, RCL_MS_TO_NS(100));
             if (spin_r != RCL_RET_OK) {
                 ++consecutive_spin_failures;
                 if ((consecutive_spin_failures % 5) == 0)
@@ -839,35 +751,19 @@ static void microros_task(void* arg) {
                     break;
                 }
             } else {
-                // Healthy spin: decay the failure counter
-                consecutive_spin_failures =
-                    std::max(0, consecutive_spin_failures - SPIN_RECOVERY_CREDIT);
-
-                // Check publish failure accumulator (written by executor callbacks,
-                // read here in the same task — no lock needed)
-                const uint32_t pf = impl->pub_fail_count;
-                impl->pub_fail_count = 0;   // single-writer reset, executor task only
+                consecutive_spin_failures = std::max(0, consecutive_spin_failures - SPIN_RECOVERY_CREDIT);
+                uint32_t pf = impl->pub_fail_count;
+                impl->pub_fail_count = 0;
                 if (pf >= PUB_FAIL_RECONNECT_THRESHOLD) {
                     ESP_LOGE(TAG, "Pub failure count %lu >= %lu — DDS writer broken",
-                             (unsigned long)pf,
-                             (unsigned long)PUB_FAIL_RECONNECT_THRESHOLD);
+                             (unsigned long)pf, (unsigned long)PUB_FAIL_RECONNECT_THRESHOLD);
                     break;
                 }
             }
-
             vTaskDelay(pdMS_TO_TICKS(10));
         }
 
-        // ------------------------------------------------------------------
-        // Teardown after spin exit
-        // ------------------------------------------------------------------
         full_teardown("spin loop exited");
-        // If we were time-synced, the sync is only for this session; reset
-        // so the next reconnect re-validates.
-        StateMachine::changeState("time_sync",
-                                  stateToString(TimeSyncState::UNSYNCED),
-                                  /*force*/true);
-        vTaskDelay(pdMS_TO_TICKS(backoff_ms));
         backoff_ms = std::min(BACKOFF_MAX_MS, backoff_ms * 2);
     }
 }
@@ -885,28 +781,7 @@ MicrorosSync& MicrorosSync::getInstance() {
 
 bool MicrorosSync::init() {
     FirmwareVersion::print_version(TAG);
-
-    // Register all modules owned by microros_sync
-    StateMachine::setInitial("microros_sync",
-                             stateToString(MicrorosState::DISCONNECTED),
-                             orderedStates(MicrorosState::DISCONNECTED));
-    StateMachine::setInitial("time_sync",
-                             stateToString(TimeSyncState::UNSYNCED),
-                             orderedStates(TimeSyncState::UNSYNCED));
-    StateMachine::setInitial("agent",
-                             stateToString(AgentState::OFFLINE),
-                             orderedStates(AgentState::OFFLINE));
-
-    // ------------------------------------------------------------------
-    // Register ALL prerequisites here, before start() is called.
-    // This guarantees prereqs are visible the moment the task starts.
-    // ------------------------------------------------------------------
-
-    // microros_sync can only enter DISCOVERING when:
-    //   1. wifi_manager is connected (has IP)
-    //   2. network_service has mDNS running (so mdns_query_a will work)
-    //   3. microros_sync itself is in a safe stopped state (>= DISCONNECTED)
-    //      This prevents jumping to DISCOVERING from OFF on first boot.
+    // Prerequisites: all modules already registered in shelfbot.cpp
     StateMachine::registerPrerequisite("microros_sync",
         stateToString(MicrorosState::DISCOVERING),
         { "wifi_manager", stateToString(WifiManagerState::CONNECTED) });
@@ -916,7 +791,10 @@ bool MicrorosSync::init() {
     StateMachine::registerPrerequisite("microros_sync",
         stateToString(MicrorosState::DISCOVERING),
         { "microros_sync", stateToString(MicrorosState::DISCONNECTED) });
-
+    // ADDED: prerequisite for CREATING_ENTITIES requires time sync
+    StateMachine::registerPrerequisite("microros_sync",
+        stateToString(MicrorosState::CREATING_ENTITIES),
+        { "time_sync", stateToString(TimeSyncState::SYNCED) });
     ESP_LOGI(TAG, "MicrorosSync initialised");
     return true;
 }
@@ -933,7 +811,7 @@ void MicrorosSync::start() {
     ESP_LOGI(TAG, "MicrorosSync task started");
 }
 
-// Public publish helpers — safe to call from any task; guard via SM state
+// Public publish helpers (unchanged)
 void MicrorosSync::publishHeartbeat(int32_t value) {
     if (!lock_impl()) return;
     g_impl->heartbeat_msg.data = value;
@@ -973,8 +851,28 @@ void MicrorosSync::publishTofDistance(float distance_m) {
     _pub_tof_distance();
 }
 
-void MicrorosSync::publishLidarScan(const SensorCommon::LidarMeasurement& /*m*/) {
-    // LaserScan is published by sensor_control_timer_cb with proper ROS timestamps.
-    // This callback stub exists so shelfbot.cpp can register a lidar_callback
-    // without changes; the actual publish happens via the executor timer.
+void MicrorosSync::publishLidarScan(const SensorCommon::LidarMeasurement& m) {
+    if (!lock_impl()) return;
+    if (!m.valid || !m.has_packet_points) {
+        unlock_impl();
+        return;
+    }
+    const float start_rad = m.start_angle_deg * static_cast<float>(M_PI) / 180.0f;
+    const float end_rad   = m.end_angle_deg   * static_cast<float>(M_PI) / 180.0f;
+    g_impl->laser_scan_msg.angle_min       = start_rad;
+    g_impl->laser_scan_msg.angle_max       = end_rad;
+    g_impl->laser_scan_msg.angle_increment = (end_rad - start_rad) / 11.0f;
+    g_impl->fillStamp(g_impl->laser_scan_msg.header.stamp.sec,
+                      g_impl->laser_scan_msg.header.stamp.nanosec);
+    for (int i = 0; i < 12; ++i) {
+        const uint16_t mm = m.packet_distances_mm[i];
+        g_impl->ranges_data[i] = (mm == 0 || mm > 12000)
+            ? (g_impl->laser_scan_msg.range_max + 1.0f)
+            : (mm / 1000.0f);
+        g_impl->intensities_data[i] = static_cast<float>(m.packet_confidences[i]);
+    }
+    g_impl->laser_scan_msg.ranges.size      = 12;
+    g_impl->laser_scan_msg.intensities.size = 12;
+    unlock_impl();
+    _pub_laser_scan();
 }

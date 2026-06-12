@@ -30,7 +30,7 @@ void SensorManager::monitor_loop() {
                 tof_valid_stream << static_cast<int>(snapshot.tof_measurements[i].valid);
             }
 
-            ESP_LOGI(TAG,
+            /*ESP_LOGI(TAG,
                      "Snapshot us=%lld | US[%.1f, %.1f, %.1f, %.1f] cm | TOF[%s] mm valid[%s] | LiDAR[%u]mm valid[%d] st[%u]",
                      static_cast<long long>(snapshot.timestamp_us),
                      snapshot.ultrasonic_readings[0].distance_cm,
@@ -41,7 +41,7 @@ void SensorManager::monitor_loop() {
                      tof_valid_stream.str().c_str(),
                      static_cast<unsigned>(snapshot.lidar_measurement.distance_mm),
                      static_cast<int>(snapshot.lidar_measurement.valid),
-                     static_cast<unsigned>(snapshot.lidar_measurement.status));
+                     static_cast<unsigned>(snapshot.lidar_measurement.status));*/
             monitor_line_counter++;
             if (monitor_line_counter % 40 == 0) {
                 ESP_LOGI(TAG, "Firmware Version (every 40 lines): %s", FirmwareVersion::get_version_string());
