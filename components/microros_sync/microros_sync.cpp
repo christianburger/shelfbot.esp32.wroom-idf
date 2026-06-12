@@ -439,7 +439,7 @@ static bool create_entities(MicrorosSyncImpl& impl) {
     PUB_BE (distance_sensors_pub, std_msgs, Float32MultiArray,"shelfbot_firmware/distance_sensors")
     PUB_BE (led_state_pub,        std_msgs, Bool,             "shelfbot_firmware/led_state")
     PUB_BE (tof_distance_pub,     std_msgs, Float32,          "shelfbot_firmware/tof_distance")
-    PUB_REL(laser_scan_pub,  sensor_msgs, LaserScan,          "shelfbot_firmware/laser_scan")
+    PUB_BE(laser_scan_pub,  sensor_msgs, LaserScan,          "shelfbot_firmware/laser_scan")
     SUB_REL(motor_command_sub,    std_msgs, Float32MultiArray,"shelfbot_firmware/motor_command")
     SUB_REL(set_speed_sub,        std_msgs, Float32MultiArray,"shelfbot_firmware/set_speed")
     SUB_REL(led_sub,              std_msgs, Bool,             "shelfbot_firmware/led")
@@ -553,16 +553,8 @@ static void microros_task(void* arg) {
         impl->pub_fail_count = 0;
 
         // Transition to RECOVERING
-        if (!is_current_state("microros_sync", stateToString(MicrorosState::RECOVERING))) {
-            StateMachine::changeState("microros_sync",
-                                      stateToString(MicrorosState::RECOVERING),
-                                      true);
-        }
-        if (!is_current_state("agent", stateToString(AgentState::OFFLINE))) {
-            StateMachine::changeState("agent",
-                                      stateToString(AgentState::OFFLINE),
-                                      true);
-        }
+        StateMachine::changeState("microros_sync", stateToString(MicrorosState::RECOVERING), true);
+        StateMachine::changeState("agent", stateToString(AgentState::OFFLINE), true);
     };
 
     ESP_LOGI(TAG, "MicrorosSync task started");
@@ -730,10 +722,12 @@ static void microros_task(void* arg) {
         backoff_ms = BACKOFF_INITIAL_MS;
         ESP_LOGI(TAG, "micro-ROS fully connected and ready");
 
-        // ------------------------------------------------------------------
+
+      // ------------------------------------------------------------------
         // Spin loop
         // ------------------------------------------------------------------
         int consecutive_spin_failures = 0;
+        uint32_t cumulative_pub_fails = 0;
         while (true) {
             if (!(xEventGroupGetBits(wifi_manager_get_event_group()) & WM_CONNECTED_BIT)) {
                 ESP_LOGW(TAG, "Wi-Fi lost while connected — tearing down");
@@ -752,14 +746,23 @@ static void microros_task(void* arg) {
                 }
             } else {
                 consecutive_spin_failures = std::max(0, consecutive_spin_failures - SPIN_RECOVERY_CREDIT);
-                uint32_t pf = impl->pub_fail_count;
-                impl->pub_fail_count = 0;
-                if (pf >= PUB_FAIL_RECONNECT_THRESHOLD) {
-                    ESP_LOGE(TAG, "Pub failure count %lu >= %lu — DDS writer broken",
-                             (unsigned long)pf, (unsigned long)PUB_FAIL_RECONNECT_THRESHOLD);
-                    break;
-                }
             }
+
+            // Accumulate pub failures across spins; a zero-failure spin drains
+            // the counter by one so a brief blip doesn't cause a teardown.
+            uint32_t pf = impl->pub_fail_count;
+            impl->pub_fail_count = 0;
+            cumulative_pub_fails += pf;
+            if (pf == 0 && cumulative_pub_fails > 0) {
+                cumulative_pub_fails--;
+            }
+            if (cumulative_pub_fails >= PUB_FAIL_RECONNECT_THRESHOLD) {
+                ESP_LOGE(TAG, "Cumulative pub failures %lu >= %lu — DDS writer broken, tearing down",
+                         (unsigned long)cumulative_pub_fails,
+                         (unsigned long)PUB_FAIL_RECONNECT_THRESHOLD);
+                break;
+            }
+
             vTaskDelay(pdMS_TO_TICKS(10));
         }
 
