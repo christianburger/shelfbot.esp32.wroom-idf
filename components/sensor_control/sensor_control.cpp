@@ -434,45 +434,48 @@ esp_err_t SensorControl::update_lidar_measurement() {
 }
 
 // ---------------------------------------------------------------------------
-// New lifecycle methods
+// Self-driving sensor_control lifecycle task
 // ---------------------------------------------------------------------------
-esp_err_t SensorControl::lifecycle_setup() {
-    ESP_LOGI(TAG, "Sensor lifecycle setup");
-    return ESP_OK;
-}
+static void sensor_lifecycle_task(void* /*arg*/) {
+  static const char* LTAG     = "SensorControl";
+  static const uint32_t RETRY_MS = 1000;
 
-esp_err_t SensorControl::lifecycle_init() {
-    ESP_LOGI(TAG, "Sensor lifecycle init");
-    return initialize();
-}
+  // off -> idle
+  while (!StateMachine::canTransition("sensor_control",
+                                      stateToString(SensorControlState::IDLE))) {
+    ESP_LOGD(LTAG, "waiting for prereqs: off->idle");
+    vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
+                                      }
+  // SensorManager was already initialized in shelfbot.cpp::begin()
+  StateMachine::changeState("sensor_control", stateToString(SensorControlState::IDLE));
+  ESP_LOGI(LTAG, "Sensor idle");
 
-esp_err_t SensorControl::lifecycle_start() {
-    ESP_LOGI(TAG, "Sensor lifecycle start");
-    return start_continuous();
-}
+  // idle -> scanning
+  while (!StateMachine::canTransition("sensor_control",
+                                      stateToString(SensorControlState::SCANNING))) {
+    ESP_LOGD(LTAG, "waiting for prereqs: idle->scanning");
+    vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
+                                      }
+  SensorManager::get_instance().start();
+  StateMachine::changeState("sensor_control", stateToString(SensorControlState::SCANNING));
+  ESP_LOGI(LTAG, "Sensor scanning");
 
-esp_err_t SensorControl::lifecycle_stop() {
-    ESP_LOGI(TAG, "Sensor lifecycle stop");
-    return stop_continuous();
-}
-
-esp_err_t SensorControl::lifecycle_update() {
-    return ESP_OK;
+  vTaskDelete(nullptr);
 }
 
 // Global lifecycle functions
+// shelfbot.cpp calls sensor_control_setup() once to kick off the task.
 void sensor_control_setup() {
-    SensorManager::get_instance().get_sensor_control()->lifecycle_setup();
+  ESP_LOGI(SensorControl::TAG, "Sensor setup: spawning lifecycle task");
+  xTaskCreate(sensor_lifecycle_task, "sensor_lifecycle", 3072, nullptr, 3, nullptr);
 }
-void sensor_control_init() {
-    SensorManager::get_instance().get_sensor_control()->lifecycle_init();
-}
-void sensor_control_start() {
-    SensorManager::get_instance().get_sensor_control()->lifecycle_start();
-}
+
+void sensor_control_init()   {}  // driven by lifecycle task
+void sensor_control_start()  {}  // driven by lifecycle task
 void sensor_control_stop() {
-    SensorManager::get_instance().get_sensor_control()->lifecycle_stop();
+  SensorManager::get_instance().stop();
+  StateMachine::changeState("sensor_control",
+                             stateToString(SensorControlState::IDLE),
+                             /*force=*/true);
 }
-void sensor_control_update() {
-    SensorManager::get_instance().get_sensor_control()->lifecycle_update();
-}
+void sensor_control_update() {}
