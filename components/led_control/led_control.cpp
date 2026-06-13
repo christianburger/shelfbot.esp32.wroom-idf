@@ -29,7 +29,7 @@ static void led_lifecycle_task(void* /*arg*/) {
 
 void led_control_setup() {
     ESP_LOGI(TAG, "LED setup: spawning lifecycle task");
-    xTaskCreate(led_lifecycle_task, "led_lifecycle", 2048, nullptr, 3, &led_task_handle);
+    xTaskCreate(led_lifecycle_task, "led_lifecycle", 4096, nullptr, 3, &led_task_handle);
 }
 
 void led_control_init()   {}

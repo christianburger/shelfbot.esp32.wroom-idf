@@ -324,8 +324,16 @@ void StateMachine::recover() {
         const std::string& module = kv.first;
         const std::string& state = kv.second.current_state;
 
-        if (module == "microros_sync" && (state == "error" || state == "recovering")) {
-            changeState(module, "disconnected", true);
+      // AFTER:
+      if (module == "microros_sync" &&
+          (state == "error" || state == "recovering" ||
+           state == "creating_entities" || state == "connected")) {
+        changeState(module, "disconnected", true);
+        // agent is owned by microros_sync — reset it too so DISCOVERING restarts cleanly
+        auto it_agent = modules_.find("agent");
+        if (it_agent != modules_.end() && it_agent->second.current_state != "offline") {
+          changeState("agent", "offline", true);
+           }
         } else if (module == "agent" && state == "error") {
             changeState(module, "offline", true);
         } else if (module == "network_service" && state == "error") {

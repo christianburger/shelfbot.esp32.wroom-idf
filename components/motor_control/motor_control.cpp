@@ -35,7 +35,7 @@ static void motor_lifecycle_task(void* /*arg*/) {
         StateMachine::advance("motor_control");
         vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
     }
-    xTaskCreate(motor_update_task, "motor_update", 2048, nullptr, 5, &update_task_handle);
+    xTaskCreate(motor_lifecycle_task, "motor_lifecycle", 4096, nullptr, 3, nullptr);
     ESP_LOGI(TAG, "Motor running");
 
     vTaskDelete(nullptr);
