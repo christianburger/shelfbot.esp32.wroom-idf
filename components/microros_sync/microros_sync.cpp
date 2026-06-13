@@ -160,42 +160,43 @@ bool MicrorosSync::createEntitiesImpl() {
 }
 
 void MicrorosSync::destroyEntitiesImpl() {
-  if (!entities_created_) return;
+    if (!entities_created_) return;
 
-  // Destroy components in reverse order
-  if (comp_initialized_[COMP_ULTRASONIC]) ultrasonic_.fini(&node_);
-  if (comp_initialized_[COMP_TOF]) tof_.fini(&node_);
-  if (comp_initialized_[COMP_LIDAR]) lidar_.fini(&node_);
-  if (comp_initialized_[COMP_MOTORS]) motors_.fini(&node_);
-  if (comp_initialized_[COMP_LED]) led_.fini(&node_);
+    // Destroy components in reverse order
+    if (comp_initialized_[COMP_ULTRASONIC]) ultrasonic_.fini(&node_);
+    if (comp_initialized_[COMP_TOF]) tof_.fini(&node_);
+    if (comp_initialized_[COMP_LIDAR]) lidar_.fini(&node_);
+    if (comp_initialized_[COMP_MOTORS]) motors_.fini(&node_);
+    if (comp_initialized_[COMP_LED]) led_.fini(&node_);
 
-  rcl_ret_t r;
-  r = rcl_publisher_fini(&heartbeat_pub_, &node_);
-  if (r != RCL_RET_OK) ESP_LOGW(TAG, "heartbeat_pub fini: %ld", (long)r);
-  r = rcl_timer_fini(&heartbeat_timer_);
-  if (r != RCL_RET_OK) ESP_LOGW(TAG, "heartbeat_timer fini: %ld", (long)r);
-  r = rclc_executor_fini(&executor_);
-  if (r != RCL_RET_OK) ESP_LOGW(TAG, "executor fini: %ld", (long)r);
-  r = rcl_node_fini(&node_);
-  if (r != RCL_RET_OK) ESP_LOGW(TAG, "node fini: %ld", (long)r);
+    rcl_ret_t r;
+    r = rcl_publisher_fini(&heartbeat_pub_, &node_);
+    if (r != RCL_RET_OK) ESP_LOGW(TAG, "heartbeat_pub fini: %ld", (long)r);
+    r = rcl_timer_fini(&heartbeat_timer_);
+    if (r != RCL_RET_OK) ESP_LOGW(TAG, "heartbeat_timer fini: %ld", (long)r);
+    r = rclc_executor_fini(&executor_);
+    if (r != RCL_RET_OK) ESP_LOGW(TAG, "executor fini: %ld", (long)r);
+    r = rcl_node_fini(&node_);
+    if (r != RCL_RET_OK) ESP_LOGW(TAG, "node fini: %ld", (long)r);
 
-  // Zero all handles
-  node_ = rcl_get_zero_initialized_node();
-  executor_ = rclc_executor_get_zero_initialized_executor();
-  heartbeat_pub_ = rcl_get_zero_initialized_publisher();
-  heartbeat_timer_ = rcl_get_zero_initialized_timer();
+    // Zero all handles
+    node_ = rcl_get_zero_initialized_node();
+    executor_ = rclc_executor_get_zero_initialized_executor();
+    heartbeat_pub_ = rcl_get_zero_initialized_publisher();
+    heartbeat_timer_ = rcl_get_zero_initialized_timer();
 
-  // Fully reset support context
-  if (support_inited_) {
-    (void)rclc_support_fini(&support_);
-    // Zero the support struct to clear any stale pointers
-    memset(&support_, 0, sizeof(support_));
-    support_inited_ = false;
-  }
+    // Fully reset support context (if previously initialised)
+    if (support_inited_) {
+        r = rclc_support_fini(&support_);
+        if (r != RCL_RET_OK) ESP_LOGW(TAG, "support_fini failed: %ld", (long)r);
+        // Zero the support struct to clear any stale pointers
+        memset(&support_, 0, sizeof(support_));
+        support_inited_ = false;
+    }
 
-  for (int i = 0; i < COMP_COUNT; ++i) comp_initialized_[i] = false;
-  entities_created_ = false;
-  ESP_LOGI(TAG, "micro-ROS entities destroyed");
+    for (int i = 0; i < COMP_COUNT; ++i) comp_initialized_[i] = false;
+    entities_created_ = false;
+    ESP_LOGI(TAG, "micro-ROS entities destroyed");
 }
 
 void MicrorosSync::heartbeatTimerCallback(rcl_timer_t*, int64_t) {
@@ -256,7 +257,10 @@ void MicrorosSync::microros_task(void* arg) {
                     rcl_init_options_get_rmw_init_options(&init_options));
                 if (rmw_r != RMW_RET_OK) {
                     ESP_LOGE(TAG, "rmw_uros_options_set_udp_address failed: %ld", (long)rmw_r);
-                    rcl_init_options_fini(&init_options);
+                    rcl_ret_t fini_r = rcl_init_options_fini(&init_options);
+                    if (fini_r != RCL_RET_OK) {
+                        ESP_LOGW(TAG, "rcl_init_options_fini after set_udp_address error: %ld", (long)fini_r);
+                    }
                     vTaskDelay(pdMS_TO_TICKS(2000));
                     continue;
                 }
@@ -264,7 +268,10 @@ void MicrorosSync::microros_task(void* arg) {
 
                 r = rclc_support_init_with_options(&self->support_, 0, nullptr,
                                                    &init_options, &self->allocator_);
-                (void)rcl_init_options_fini(&init_options);
+                rcl_ret_t fini_r = rcl_init_options_fini(&init_options);
+                if (fini_r != RCL_RET_OK) {
+                    ESP_LOGW(TAG, "rcl_init_options_fini after support_init: %ld", (long)fini_r);
+                }
                 if (r != RCL_RET_OK) {
                     ESP_LOGE(TAG, "support_init failed: %ld", (long)r);
                     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -311,7 +318,7 @@ void MicrorosSync::microros_task(void* arg) {
 
         if (current_state == stateToString(MicrorosState::CREATING_ENTITIES)) {
             if (!self->createEntitiesImpl()) {
-                ESP_LOGE(TAG, "Entity creation failed");
+                ESP_LOGE(TAG, "Entity creation failed, cleaning up and retrying...");
                 self->destroyEntitiesImpl();
                 if (self->support_inited_) {
                     (void)rclc_support_fini(&self->support_);
