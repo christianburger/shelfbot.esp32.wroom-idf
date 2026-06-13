@@ -21,6 +21,44 @@
 
 const char* SensorControl::TAG = "SensorControl";
 
+// ----------------------------------------------------------------------------
+// Lifecycle Task (same pattern as motor_control)
+// ----------------------------------------------------------------------------
+static void sensor_lifecycle_task(void* /*arg*/) {
+    static const uint32_t RETRY_MS = 1000;
+    ESP_LOGI(SensorControl::TAG, "Sensor lifecycle task started");
+
+    // Step 1: Wait for the state to become IDLE (prerequisite: shelfbot running)
+    while (!StateMachine::isInState("sensor_control", stateToString(SensorControlState::IDLE))) {
+        StateMachine::advance("sensor_control");
+        vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
+    }
+
+    ESP_LOGI(SensorControl::TAG, "Sensor control now IDLE");
+
+    // Step 2: Transition to SCANNING (prerequisite: wifi_manager connected)
+    // The state machine rule for IDLE -> SCANNING requires wifi_manager == CONNECTED.
+    // Wait until that is satisfied and advance.
+    while (!StateMachine::isInState("sensor_control", stateToString(SensorControlState::SCANNING))) {
+        StateMachine::advance("sensor_control");
+        vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
+    }
+
+    ESP_LOGI(SensorControl::TAG, "Sensor control now SCANNING – starting continuous reading");
+
+    // Step 3: Start the continuous sensor reading loop (blocking)
+    SensorManager::get_instance().start();
+
+    // If start() ever returns (should not, unless error), keep the task alive
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+    }
+}
+
+// ----------------------------------------------------------------------------
+// SensorControl Implementation (unchanged except for the lifecycle task creation)
+// ----------------------------------------------------------------------------
+
 SensorControl::SensorControl(Config config) : config_(std::move(config)) {
     data_mutex_ = xSemaphoreCreateMutex();
     if (!data_mutex_) {
@@ -166,8 +204,7 @@ esp_err_t SensorControl::initialize() {
 
     initialized_ = true;
 
-    // Let state machine transition from OFF to IDLE
-    StateMachine::advance("sensor_control");
+    // REMOVED: single StateMachine::advance("sensor_control") – lifecycle task handles it
 
     ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "Sensor Control Initialization Complete");
@@ -312,7 +349,8 @@ esp_err_t SensorControl::start_continuous() {
         }
     }
 
-    StateMachine::advance("sensor_control");
+    // Note: StateMachine::advance("sensor_control") is not called here;
+    // the lifecycle task already advanced to SCANNING before calling start_continuous().
     continuous_mode_ = true;
 
     const BaseType_t result = xTaskCreate(
@@ -338,7 +376,6 @@ esp_err_t SensorControl::start_continuous() {
 esp_err_t SensorControl::stop_continuous() {
     if (!continuous_mode_) return ESP_OK;
     continuous_mode_ = false;
-    StateMachine::advance("sensor_control");
     if (continuous_task_handle_) {
         vTaskDelay(pdMS_TO_TICKS(100));
         continuous_task_handle_ = nullptr;
@@ -418,10 +455,21 @@ esp_err_t SensorControl::update_lidar_measurement() {
     return ESP_OK;
 }
 
+// ----------------------------------------------------------------------------
+// Global lifecycle functions (called by the top-level shelfbot)
+// ----------------------------------------------------------------------------
+
 void sensor_control_setup() {
-    ESP_LOGI(SensorControl::TAG, "sensor_control_setup called");
+    ESP_LOGI(SensorControl::TAG, "sensor_control_setup called – creating lifecycle task");
+    // Create the lifecycle task (same pattern as motor_control)
+    xTaskCreate(sensor_lifecycle_task, "sensor_lifecycle", 4096, nullptr, 3, nullptr);
 }
+
 void sensor_control_init()   {}
-void sensor_control_start()  { SensorManager::get_instance().start(); }
+void sensor_control_start()  {
+    // The lifecycle task already started the continuous reading when state became SCANNING.
+    // This function is kept for API consistency but does nothing.
+    ESP_LOGD(SensorControl::TAG, "sensor_control_start called (no action needed)");
+}
 void sensor_control_stop()   { SensorManager::get_instance().stop(); }
 void sensor_control_update() {}
