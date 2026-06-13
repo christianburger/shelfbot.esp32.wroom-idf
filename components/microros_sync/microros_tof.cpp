@@ -6,6 +6,7 @@ TofComponent::TofComponent() {
 }
 
 bool TofComponent::init(rcl_node_t* node, rclc_executor_t* executor) {
+    pub_ = rcl_get_zero_initialized_publisher();
     (void)executor;
     rcl_ret_t r = rclc_publisher_init_best_effort(&pub_, node,
             ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32),
@@ -23,6 +24,7 @@ bool TofComponent::fini(rcl_node_t* node) {
         ESP_LOGE("TofComponent", "pub fini failed: %ld", (long)r);
         return false;
     }
+    pub_ = rcl_get_zero_initialized_publisher();
     return true;
 }
 

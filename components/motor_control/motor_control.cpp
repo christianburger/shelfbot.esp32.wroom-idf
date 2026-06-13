@@ -30,12 +30,11 @@ static void motor_lifecycle_task(void* /*arg*/) {
         motor_running[i]    = false;
     }
     ESP_LOGI(TAG, "Motor init done");
-
     while (!StateMachine::isInState("motor_control", stateToString(MotorControlState::RUNNING))) {
         StateMachine::advance("motor_control");
         vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
     }
-    xTaskCreate(motor_lifecycle_task, "motor_lifecycle", 4096, nullptr, 3, nullptr);
+    xTaskCreate(motor_update_task, "motor_update", 4096, nullptr, 5, &update_task_handle);
     ESP_LOGI(TAG, "Motor running");
 
     vTaskDelete(nullptr);

@@ -22,6 +22,9 @@ void LedComponent::ledCallback(const void* msg) {
 
 bool LedComponent::init(rcl_node_t* node, rclc_executor_t* executor) {
     s_instance = this;
+    state_pub_ = rcl_get_zero_initialized_publisher();
+    led_sub_   = rcl_get_zero_initialized_subscription();
+
     rcl_ret_t r;
 
     r = rclc_publisher_init_default(&state_pub_, node,
@@ -59,11 +62,14 @@ bool LedComponent::fini(rcl_node_t* node) {
         ESP_LOGE("LedComponent", "state_pub fini failed: %ld", (long)r);
         ok = false;
     }
+    state_pub_ = rcl_get_zero_initialized_publisher();
+
     r = rcl_subscription_fini(&led_sub_, node);
     if (r != RCL_RET_OK) {
         ESP_LOGE("LedComponent", "led_sub fini failed: %ld", (long)r);
         ok = false;
     }
+    led_sub_ = rcl_get_zero_initialized_subscription();
 
     s_instance = nullptr;
     return ok;

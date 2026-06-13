@@ -37,6 +37,7 @@ MicrorosSync::MicrorosSync()
         mutex_ = xSemaphoreCreateMutex();
         configASSERT(mutex_ != nullptr);
     }
+    for (int i = 0; i < COMP_COUNT; ++i) comp_initialized_[i] = false;
     std_msgs__msg__Int32__init(&heartbeat_msg_);
     heartbeat_pub_ = rcl_get_zero_initialized_publisher();
     heartbeat_timer_ = rcl_get_zero_initialized_timer();
@@ -76,38 +77,82 @@ bool MicrorosSync::isConnected() const {
 }
 
 bool MicrorosSync::queryAgentIp(char* out_ip, size_t len) {
-  esp_ip4_addr_t addr = { .addr = 0 };
-  esp_err_t err = mdns_query_a(CONFIG_MICROROS_AGENT_MDNS_HOST, 2000, &addr);
-  if (err != ESP_OK) {
-    ESP_LOGE(TAG, "mDNS query for %s failed: %s", CONFIG_MICROROS_AGENT_MDNS_HOST, esp_err_to_name(err));
-    return false;
-  }
-  snprintf(out_ip, len, IPSTR, IP2STR(&addr));
-  ESP_LOGI(TAG, "mDNS resolved %s -> %s", CONFIG_MICROROS_AGENT_MDNS_HOST, out_ip);  // ADD THIS
-  return true;
+    esp_ip4_addr_t addr = { .addr = 0 };
+    esp_err_t err = mdns_query_a(CONFIG_MICROROS_AGENT_MDNS_HOST, 2000, &addr);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "mDNS query for %s failed: %s", CONFIG_MICROROS_AGENT_MDNS_HOST, esp_err_to_name(err));
+        return false;
+    }
+    snprintf(out_ip, len, IPSTR, IP2STR(&addr));
+    ESP_LOGI(TAG, "mDNS resolved %s -> %s", CONFIG_MICROROS_AGENT_MDNS_HOST, out_ip);
+    return true;
+}
+
+void MicrorosSync::logMicrorosLimits() {
+    ESP_LOGI(TAG, "=== micro-ROS compile-time limits ===");
+    ESP_LOGI(TAG, "RMW_UXRCE_MAX_NODES        = %d", RMW_UXRCE_MAX_NODES);
+    ESP_LOGI(TAG, "RMW_UXRCE_MAX_PUBLISHERS   = %d", RMW_UXRCE_MAX_PUBLISHERS);
+    ESP_LOGI(TAG, "RMW_UXRCE_MAX_SUBSCRIPTIONS= %d", RMW_UXRCE_MAX_SUBSCRIPTIONS);
+    ESP_LOGI(TAG, "RMW_UXRCE_MAX_SERVICES     = %d", RMW_UXRCE_MAX_SERVICES);
+    ESP_LOGI(TAG, "RMW_UXRCE_MAX_CLIENTS      = %d", RMW_UXRCE_MAX_CLIENTS);
+    ESP_LOGI(TAG, "RMW_UXRCE_MAX_HISTORY      = %d", RMW_UXRCE_MAX_HISTORY);
+    ESP_LOGI(TAG, "====================================");
 }
 
 bool MicrorosSync::createEntitiesImpl() {
+    for (int i = 0; i < COMP_COUNT; ++i) comp_initialized_[i] = false;
+
+    node_          = rcl_get_zero_initialized_node();
+    executor_      = rclc_executor_get_zero_initialized_executor();
+    heartbeat_pub_ = rcl_get_zero_initialized_publisher();
+    heartbeat_timer_ = rcl_get_zero_initialized_timer();
+
     rcl_ret_t r;
     r = rclc_node_init_default(&node_, "shelfbot_firmware", "", &support_);
-    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "node init failed: %ld", (long)r); return false; }
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "node init failed: %ld", (long)r);
+        return false;
+    }
     r = rclc_executor_init(&executor_, &support_.context, 10, &allocator_);
-    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "executor init failed: %ld", (long)r); return false; }
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "executor init failed: %ld", (long)r);
+        return false;
+    }
+
+    logMicrorosLimits();
 
     if (!led_.init(&node_, &executor_)) return false;
+    comp_initialized_[COMP_LED] = true;
+
     if (!motors_.init(&node_, &support_, &executor_)) return false;
+    comp_initialized_[COMP_MOTORS] = true;
+
     if (!lidar_.init(&node_, &executor_)) return false;
+    comp_initialized_[COMP_LIDAR] = true;
+
     if (!tof_.init(&node_, &executor_)) return false;
+    comp_initialized_[COMP_TOF] = true;
+
     if (!ultrasonic_.init(&node_, &support_, &executor_)) return false;
+    comp_initialized_[COMP_ULTRASONIC] = true;
 
     r = rclc_publisher_init_best_effort(&heartbeat_pub_, &node_,
             ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
             "shelfbot_firmware/heartbeat");
-    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "heartbeat publisher init failed: %ld", (long)r); return false; }
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "heartbeat publisher init failed: %ld", (long)r);
+        return false;
+    }
     r = rclc_timer_init_default(&heartbeat_timer_, &support_, RCL_MS_TO_NS(1000), heartbeatTimerCallback);
-    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "heartbeat timer init failed: %ld", (long)r); return false; }
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "heartbeat timer init failed: %ld", (long)r);
+        return false;
+    }
     r = rclc_executor_add_timer(&executor_, &heartbeat_timer_);
-    if (r != RCL_RET_OK) { ESP_LOGE(TAG, "add heartbeat timer failed: %ld", (long)r); return false; }
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "add heartbeat timer failed: %ld", (long)r);
+        return false;
+    }
 
     entities_created_ = true;
     ESP_LOGI(TAG, "micro-ROS entities created");
@@ -115,27 +160,42 @@ bool MicrorosSync::createEntitiesImpl() {
 }
 
 void MicrorosSync::destroyEntitiesImpl() {
-    if (!entities_created_) return;
-    led_.fini(&node_);
-    motors_.fini(&node_);
-    lidar_.fini(&node_);
-    tof_.fini(&node_);
-    ultrasonic_.fini(&node_);
+  if (!entities_created_) return;
 
-    rcl_ret_t r;
-    r = rcl_publisher_fini(&heartbeat_pub_, &node_);
-    if (r != RCL_RET_OK) ESP_LOGW(TAG, "heartbeat_pub fini: %ld", (long)r);
-    r = rcl_timer_fini(&heartbeat_timer_);
-    if (r != RCL_RET_OK) ESP_LOGW(TAG, "heartbeat_timer fini: %ld", (long)r);
-    r = rclc_executor_fini(&executor_);
-    if (r != RCL_RET_OK) ESP_LOGW(TAG, "executor fini: %ld", (long)r);
-    r = rcl_node_fini(&node_);
-    if (r != RCL_RET_OK) ESP_LOGW(TAG, "node fini: %ld", (long)r);
+  // Destroy components in reverse order
+  if (comp_initialized_[COMP_ULTRASONIC]) ultrasonic_.fini(&node_);
+  if (comp_initialized_[COMP_TOF]) tof_.fini(&node_);
+  if (comp_initialized_[COMP_LIDAR]) lidar_.fini(&node_);
+  if (comp_initialized_[COMP_MOTORS]) motors_.fini(&node_);
+  if (comp_initialized_[COMP_LED]) led_.fini(&node_);
 
-    node_ = rcl_get_zero_initialized_node();
-    executor_ = rclc_executor_get_zero_initialized_executor();
-    entities_created_ = false;
-    ESP_LOGI(TAG, "micro-ROS entities destroyed");
+  rcl_ret_t r;
+  r = rcl_publisher_fini(&heartbeat_pub_, &node_);
+  if (r != RCL_RET_OK) ESP_LOGW(TAG, "heartbeat_pub fini: %ld", (long)r);
+  r = rcl_timer_fini(&heartbeat_timer_);
+  if (r != RCL_RET_OK) ESP_LOGW(TAG, "heartbeat_timer fini: %ld", (long)r);
+  r = rclc_executor_fini(&executor_);
+  if (r != RCL_RET_OK) ESP_LOGW(TAG, "executor fini: %ld", (long)r);
+  r = rcl_node_fini(&node_);
+  if (r != RCL_RET_OK) ESP_LOGW(TAG, "node fini: %ld", (long)r);
+
+  // Zero all handles
+  node_ = rcl_get_zero_initialized_node();
+  executor_ = rclc_executor_get_zero_initialized_executor();
+  heartbeat_pub_ = rcl_get_zero_initialized_publisher();
+  heartbeat_timer_ = rcl_get_zero_initialized_timer();
+
+  // Fully reset support context
+  if (support_inited_) {
+    (void)rclc_support_fini(&support_);
+    // Zero the support struct to clear any stale pointers
+    memset(&support_, 0, sizeof(support_));
+    support_inited_ = false;
+  }
+
+  for (int i = 0; i < COMP_COUNT; ++i) comp_initialized_[i] = false;
+  entities_created_ = false;
+  ESP_LOGI(TAG, "micro-ROS entities destroyed");
 }
 
 void MicrorosSync::heartbeatTimerCallback(rcl_timer_t*, int64_t) {
@@ -166,8 +226,8 @@ void MicrorosSync::microros_task(void* arg) {
         }
 
         if (current_state == stateToString(MicrorosState::DISCOVERING)) {
-            // Step 1: resolve agent IP once — don't repeat if already discovered
-            if (!StateMachine::isAtLeast("agent", stateToString(AgentState::DISCOVERED))) {
+            // Step 1: resolve agent IP once — guard redundant state changes
+            if (!StateMachine::isInState("agent", stateToString(AgentState::DISCOVERED))) {
                 if (!self->queryAgentIp(agent_ip, sizeof(agent_ip))) {
                     vTaskDelay(pdMS_TO_TICKS(2000));
                     continue;
@@ -175,15 +235,14 @@ void MicrorosSync::microros_task(void* arg) {
                 StateMachine::changeState("agent", stateToString(AgentState::DISCOVERED), true);
             }
 
-            // Step 2: wait for time sync — creating_entities requires it and
-            // there is no point establishing a session without a valid clock
+            // Step 2: wait for time sync
             if (!StateMachine::isAtLeast("time_sync", stateToString(TimeSyncState::SYNCED))) {
                 ESP_LOGI(TAG, "Waiting for time sync before connecting to agent...");
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 continue;
             }
 
-            // Step 3: initialize transport — rmw_uros_ping_agent needs it to send UDP packets
+            // Step 3: initialize transport
             if (!self->support_inited_) {
                 rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
                 rcl_ret_t r = rcl_init_options_init(&init_options, self->allocator_);
@@ -193,8 +252,6 @@ void MicrorosSync::microros_task(void* arg) {
                     continue;
                 }
 
-                // Set agent IP and port before support init — without this the
-                // transport has no address and rclc_support_init_with_options blocks forever
                 rmw_ret_t rmw_r = rmw_uros_options_set_udp_address(agent_ip, "8888",
                     rcl_init_options_get_rmw_init_options(&init_options));
                 if (rmw_r != RMW_RET_OK) {
@@ -207,8 +264,7 @@ void MicrorosSync::microros_task(void* arg) {
 
                 r = rclc_support_init_with_options(&self->support_, 0, nullptr,
                                                    &init_options, &self->allocator_);
-                rcl_ret_t fini_r = rcl_init_options_fini(&init_options);
-                if (fini_r != RCL_RET_OK) ESP_LOGW(TAG, "rcl_init_options_fini: %ld", (long)fini_r);
+                (void)rcl_init_options_fini(&init_options);
                 if (r != RCL_RET_OK) {
                     ESP_LOGE(TAG, "support_init failed: %ld", (long)r);
                     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -218,8 +274,8 @@ void MicrorosSync::microros_task(void* arg) {
                 ESP_LOGI(TAG, "Transport initialized to %s:8888", agent_ip);
             }
 
-            // Step 4: ping — transport is up, UDP socket exists
-            if (!StateMachine::isAtLeast("agent", stateToString(AgentState::PING_OK))) {
+            // Step 4: ping — guard redundant state changes
+            if (!StateMachine::isInState("agent", stateToString(AgentState::PING_OK))) {
                 ESP_LOGI(TAG, "Pinging agent at %s...", agent_ip);
                 constexpr int PING_TIMEOUT_MS = 2000;
                 constexpr int PING_ATTEMPTS   = 3;
@@ -236,8 +292,8 @@ void MicrorosSync::microros_task(void* arg) {
                 }
             }
 
-            // Step 5: session sync
-            if (!StateMachine::isAtLeast("agent", stateToString(AgentState::SESSION_SYNCED))) {
+            // Step 5: session sync — guard redundant state changes
+            if (!StateMachine::isInState("agent", stateToString(AgentState::SESSION_SYNCED))) {
                 if (rmw_uros_sync_session(5000) != RMW_RET_OK) {
                     ESP_LOGE(TAG, "Session sync failed");
                     (void)rclc_support_fini(&self->support_);
@@ -271,31 +327,30 @@ void MicrorosSync::microros_task(void* arg) {
             continue;
         }
 
-      if (current_state == stateToString(MicrorosState::CONNECTED)) {
-        // Only ping periodically, not every spin iteration
-        static TickType_t last_ping_tick = 0;
-        constexpr uint32_t PING_INTERVAL_MS = 2000;
-        constexpr int      PING_TIMEOUT_MS  = 500;
-        constexpr int      PING_ATTEMPTS    = 2;
+        if (current_state == stateToString(MicrorosState::CONNECTED)) {
+            static TickType_t last_ping_tick = 0;
+            constexpr uint32_t PING_INTERVAL_MS = 2000;
+            constexpr int      PING_TIMEOUT_MS  = 500;
+            constexpr int      PING_ATTEMPTS    = 2;
 
-        TickType_t now = xTaskGetTickCount();
-        if ((now - last_ping_tick) >= pdMS_TO_TICKS(PING_INTERVAL_MS)) {
-          last_ping_tick = now;
-          if (rmw_uros_ping_agent(PING_TIMEOUT_MS, PING_ATTEMPTS) != RMW_RET_OK) {
-            ESP_LOGW(TAG, "Agent keepalive ping failed - connection lost");
-            StateMachine::recover();
+            TickType_t now = xTaskGetTickCount();
+            if ((now - last_ping_tick) >= pdMS_TO_TICKS(PING_INTERVAL_MS)) {
+                last_ping_tick = now;
+                if (rmw_uros_ping_agent(PING_TIMEOUT_MS, PING_ATTEMPTS) != RMW_RET_OK) {
+                    ESP_LOGW(TAG, "Agent keepalive ping failed - connection lost");
+                    StateMachine::recover();
+                    continue;
+                }
+                ESP_LOGD(TAG, "Agent keepalive OK");
+            }
+
+            rcl_ret_t spin_r = rclc_executor_spin_some(&self->executor_, RCL_MS_TO_NS(100));
+            if (spin_r != RCL_RET_OK && spin_r != RCL_RET_TIMEOUT) {
+                ESP_LOGW(TAG, "spin_some error: %ld", (long)spin_r);
+            }
+            vTaskDelay(pdMS_TO_TICKS(10));
             continue;
-          }
-          ESP_LOGD(TAG, "Agent keepalive OK");
         }
-
-        rcl_ret_t spin_r = rclc_executor_spin_some(&self->executor_, RCL_MS_TO_NS(100));
-        if (spin_r != RCL_RET_OK && spin_r != RCL_RET_TIMEOUT) {
-          ESP_LOGW(TAG, "spin_some error: %ld", (long)spin_r);
-        }
-        vTaskDelay(pdMS_TO_TICKS(10));
-        continue;
-      }
 
         StateMachine::recover();
         vTaskDelay(pdMS_TO_TICKS(1000));

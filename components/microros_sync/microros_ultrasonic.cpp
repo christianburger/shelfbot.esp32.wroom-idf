@@ -37,6 +37,9 @@ UltrasonicComponent::UltrasonicComponent() {
 
 bool UltrasonicComponent::init(rcl_node_t* node, rclc_support_t* support, rclc_executor_t* executor) {
     s_instance = this;
+    pub_   = rcl_get_zero_initialized_publisher();
+    timer_ = rcl_get_zero_initialized_timer();
+
     rcl_ret_t r;
 
     r = rclc_publisher_init_best_effort(&pub_, node,
@@ -71,11 +74,14 @@ bool UltrasonicComponent::fini(rcl_node_t* node) {
         ESP_LOGE("UltrasonicComponent", "pub fini failed: %ld", (long)r);
         ok = false;
     }
+    pub_ = rcl_get_zero_initialized_publisher();
+
     r = rcl_timer_fini(&timer_);
     if (r != RCL_RET_OK) {
         ESP_LOGE("UltrasonicComponent", "timer fini failed: %ld", (long)r);
         ok = false;
     }
+    timer_ = rcl_get_zero_initialized_timer();
 
     s_instance = nullptr;
     return ok;

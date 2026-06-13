@@ -1,5 +1,6 @@
 #include "microros_motors.hpp"
 #include <algorithm>
+#include <rcl/error_handling.h>
 
 std_msgs__msg__MultiArrayDimension MotorComponent::dim_[1] = {
     { {const_cast<char*>(""), 0, 1}, NUM_MOTORS, NUM_MOTORS }
@@ -52,6 +53,12 @@ MotorComponent::MotorComponent() {
 
 bool MotorComponent::init(rcl_node_t* node, rclc_support_t* support, rclc_executor_t* executor) {
     s_instance = this;
+
+    pos_pub_   = rcl_get_zero_initialized_publisher();
+    cmd_sub_   = rcl_get_zero_initialized_subscription();
+    spd_sub_   = rcl_get_zero_initialized_subscription();
+    pos_timer_ = rcl_get_zero_initialized_timer();
+
     rcl_ret_t r;
 
     r = rclc_publisher_init_best_effort(&pos_pub_, node,
@@ -74,7 +81,9 @@ bool MotorComponent::init(rcl_node_t* node, rclc_support_t* support, rclc_execut
             ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Float32MultiArray),
             "shelfbot_firmware/set_speed");
     if (r != RCL_RET_OK) {
-        ESP_LOGE("MotorComponent", "spd_sub init failed: %ld", (long)r);
+        ESP_LOGE("MotorComponent", "spd_sub init failed: %ld (rcl error: %s)", (long)r,
+                 rcl_get_error_string().str);
+        rcl_reset_error();
         return false;
     }
 
@@ -109,12 +118,19 @@ bool MotorComponent::fini(rcl_node_t* node) {
 
     r = rcl_publisher_fini(&pos_pub_, node);
     if (r != RCL_RET_OK) { ESP_LOGE("MotorComponent", "pos_pub fini failed: %ld", (long)r); ok = false; }
+    pos_pub_ = rcl_get_zero_initialized_publisher();
+
     r = rcl_subscription_fini(&cmd_sub_, node);
     if (r != RCL_RET_OK) { ESP_LOGE("MotorComponent", "cmd_sub fini failed: %ld", (long)r); ok = false; }
+    cmd_sub_ = rcl_get_zero_initialized_subscription();
+
     r = rcl_subscription_fini(&spd_sub_, node);
     if (r != RCL_RET_OK) { ESP_LOGE("MotorComponent", "spd_sub fini failed: %ld", (long)r); ok = false; }
+    spd_sub_ = rcl_get_zero_initialized_subscription();
+
     r = rcl_timer_fini(&pos_timer_);
     if (r != RCL_RET_OK) { ESP_LOGE("MotorComponent", "pos_timer fini failed: %ld", (long)r); ok = false; }
+    pos_timer_ = rcl_get_zero_initialized_timer();
 
     s_instance = nullptr;
     return ok;

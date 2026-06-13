@@ -62,7 +62,18 @@ private:
 
     // Static instance for callbacks
     static MicrorosSync* instance_;
-    static SemaphoreHandle_t mutex_;   // global mutex for lock/unlock
+    static SemaphoreHandle_t mutex_;
+
+    // Component initialization tracking
+    enum ComponentId : uint8_t {
+        COMP_LED,
+        COMP_MOTORS,
+        COMP_LIDAR,
+        COMP_TOF,
+        COMP_ULTRASONIC,
+        COMP_COUNT
+    };
+    bool comp_initialized_[COMP_COUNT];
 
     // Task function
     static void microros_task(void* arg);
@@ -71,4 +82,5 @@ private:
     bool createEntitiesImpl();
     void destroyEntitiesImpl();
     bool queryAgentIp(char* out_ip, size_t len);
+    void logMicrorosLimits();
 };
