@@ -5,8 +5,8 @@
 #include <lidar_packet_parser.hpp>
 #include <firmware_version.hpp>
 #include <state_machine.hpp>
-#include <state_machine_lifecycle.hpp>
 #include <sensor_manager.hpp>
+#include <state_machine_lifecycle.hpp>
 
 // Include adapter for the selected driver
 #if SHELFBOT_DRIVER_VL53L0X
@@ -21,20 +21,11 @@
 
 const char* SensorControl::TAG = "SensorControl";
 
-static SensorControlState s_current_state = SensorControlState::OFF;
-
-static void set_sensor_state(SensorControlState new_state) {
-    if (s_current_state == new_state) return;
-    const char* state_str = stateToString(new_state);
-    if (StateMachine::changeState("sensor_control", state_str)) {
-        s_current_state = new_state;
-    } else {
-        ESP_LOGE(SensorControl::TAG, "Failed to transition to state %s", state_str);
-    }
-}
-
 SensorControl::SensorControl(Config config) : config_(std::move(config)) {
-    // data_mutex_ will be created in initialize()
+    data_mutex_ = xSemaphoreCreateMutex();
+    if (!data_mutex_) {
+        ESP_LOGE(TAG, "Failed to create data mutex");
+    }
 }
 
 SensorControl::~SensorControl() {
@@ -47,7 +38,6 @@ SensorControl::~SensorControl() {
     }
 }
 
-// Factory methods
 std::unique_ptr<IUltrasonicArray> SensorControl::createUltrasonicArray() {
 #if SHELFBOT_HAS_ULTRASONIC == 0
     ESP_LOGW(TAG, "Ultrasonic support disabled at compile time");
@@ -153,11 +143,6 @@ std::unique_ptr<ILidarSensor> SensorControl::createLidarSensor() {
 }
 
 esp_err_t SensorControl::initialize() {
-    // Create mutex here instead of constructor to allow re-initialization after stop
-    if (!data_mutex_) {
-        data_mutex_ = xSemaphoreCreateMutex();
-        if (!data_mutex_) return ESP_ERR_NO_MEM;
-    }
     if (initialized_) return ESP_OK;
 
     ESP_LOGI(TAG, "Firmware Version: %s", FirmwareVersion::get_version_string());
@@ -170,19 +155,19 @@ esp_err_t SensorControl::initialize() {
     lidar_sensor_     = createLidarSensor();
 
     for (int i = 0; i < SensorCommon::NUM_ULTRASONIC_SENSORS; ++i) {
-        latest_data_.ultrasonic_readings[i].active = (ultrasonic_array_ && i < static_cast<int>(config_.ultrasonic_configs.size()));
+        latest_data_.ultrasonic_readings[i].active =
+            (ultrasonic_array_ && i < static_cast<int>(config_.ultrasonic_configs.size()));
     }
     for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; ++i) {
-        latest_data_.tof_measurements[i].active = (tof_sensor_ && config_.tof_configs[i].enabled);
+        latest_data_.tof_measurements[i].active =
+            (tof_sensor_ && config_.tof_configs[i].enabled);
     }
     latest_data_.lidar_measurement.active = (lidar_sensor_ != nullptr);
 
     initialized_ = true;
 
-    // Initial state – OFF
-    StateMachine::setInitial("sensor_control", stateToString(SensorControlState::OFF));
-    set_sensor_state(SensorControlState::OFF);
-    set_sensor_state(SensorControlState::IDLE);
+    // Let state machine transition from OFF to IDLE
+    StateMachine::advance("sensor_control");
 
     ESP_LOGI(TAG, "=========================================");
     ESP_LOGI(TAG, "Sensor Control Initialization Complete");
@@ -205,7 +190,6 @@ esp_err_t SensorControl::read_ultrasonic(std::vector<uint16_t>& distances) {
         ESP_LOGE(TAG, "Failed to read ultrasonic sensors");
         return ESP_ERR_INVALID_RESPONSE;
     }
-
     for (const auto& reading : readings) {
         distances.push_back(static_cast<uint16_t>(reading.distance_cm * 10));
     }
@@ -243,23 +227,28 @@ esp_err_t SensorControl::read_all(std::vector<uint16_t>& ultrasonic_distances,
 void SensorControl::continuous_read_loop() {
     ESP_LOGI(TAG, "Starting continuous sensor reading...");
     TickType_t last_ultrasonic_wake = xTaskGetTickCount();
-    TickType_t last_tof_wake = xTaskGetTickCount();
+    TickType_t last_tof_wake        = xTaskGetTickCount();
 
     while (continuous_mode_) {
         TickType_t now = xTaskGetTickCount();
 
         SensorCommon::LidarMeasurement lidar_result;
+        bool lidar_ok = false;
         if (lidar_sensor_) {
-            lidar_sensor_->read(lidar_result);
+            lidar_ok = (lidar_sensor_->read(lidar_result) == ESP_OK);
+        }
+
+        if (lidar_ok && lidar_result.valid && config_.lidar_callback) {
+            config_.lidar_callback(lidar_result);
         }
 
         if (xSemaphoreTake(data_mutex_, pdMS_TO_TICKS(10)) == pdTRUE) {
-            int64_t timestamp = esp_timer_get_time();
+            const int64_t timestamp = esp_timer_get_time();
 
             std::vector<SensorCommon::Reading> ultrasonic_readings;
             if (ultrasonic_array_) {
                 ultrasonic_array_->readAll(ultrasonic_readings, SensorCommon::DEFAULT_TIMEOUT_MS);
-                for (size_t i = 0; i < ultrasonic_readings.size() && i < SensorCommon::NUM_ULTRASONIC_SENSORS; i++) {
+                for (size_t i = 0; i < ultrasonic_readings.size() && i < SensorCommon::NUM_ULTRASONIC_SENSORS; ++i) {
                     latest_data_.ultrasonic_readings[i] = ultrasonic_readings[i];
                 }
             }
@@ -267,15 +256,17 @@ void SensorControl::continuous_read_loop() {
             if (tof_sensor_) {
                 SensorCommon::TofMeasurement tof_results[SensorCommon::NUM_TOF_SENSORS];
                 if (tof_sensor_->readAll(tof_results) == ESP_OK) {
-                    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
+                    for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; ++i) {
                         latest_data_.tof_measurements[i] = tof_results[i];
                     }
                 }
             }
 
-            latest_data_.timestamp_us = timestamp;
-            latest_data_.lidar_measurement = lidar_result;
+            if (lidar_ok) {
+                latest_data_.lidar_measurement = lidar_result;
+            }
 
+            latest_data_.timestamp_us = timestamp;
             xSemaphoreGive(data_mutex_);
 
             if ((now - last_ultrasonic_wake) * portTICK_PERIOD_MS >= config_.ultrasonic_read_interval_ms) {
@@ -293,14 +284,11 @@ void SensorControl::continuous_read_loop() {
                 if (config_.tof_callback && tof_sensor_) {
                     config_.tof_callback(latest_data_.tof_measurements);
                 }
-                if (config_.lidar_callback && lidar_sensor_) {
-                    config_.lidar_callback(latest_data_.lidar_measurement);
-                }
                 last_tof_wake = now;
             }
         }
 
-        vTaskDelay(pdMS_TO_TICKS(10));
+        vTaskDelay(pdMS_TO_TICKS(1));
     }
 
     ESP_LOGI(TAG, "Continuous reading stopped");
@@ -324,22 +312,21 @@ esp_err_t SensorControl::start_continuous() {
         }
     }
 
-    set_sensor_state(SensorControlState::SCANNING);
+    StateMachine::advance("sensor_control");
     continuous_mode_ = true;
 
-    BaseType_t result = xTaskCreate(
-        [](void* arg) { static_cast<SensorControl*>(arg)->continuous_read_loop(); },
+    const BaseType_t result = xTaskCreate(
+        continuous_read_task,
         "sensor_read_task",
         4096,
         this,
         tskIDLE_PRIORITY + 1,
-        &continuous_task_handle_
-    );
+        &continuous_task_handle_);
 
     if (result != pdPASS) {
         ESP_LOGE(TAG, "Failed to create continuous reading task");
         continuous_mode_ = false;
-        set_sensor_state(SensorControlState::ERROR);
+        StateMachine::recover();
         if (tof_sensor_) tof_sensor_->stopContinuous();
         return ESP_FAIL;
     }
@@ -351,7 +338,7 @@ esp_err_t SensorControl::start_continuous() {
 esp_err_t SensorControl::stop_continuous() {
     if (!continuous_mode_) return ESP_OK;
     continuous_mode_ = false;
-    set_sensor_state(SensorControlState::IDLE);
+    StateMachine::advance("sensor_control");
     if (continuous_task_handle_) {
         vTaskDelay(pdMS_TO_TICKS(100));
         continuous_task_handle_ = nullptr;
@@ -361,9 +348,7 @@ esp_err_t SensorControl::stop_continuous() {
     return ESP_OK;
 }
 
-bool SensorControl::is_continuous() const {
-    return continuous_mode_;
-}
+bool SensorControl::is_continuous() const { return continuous_mode_; }
 
 size_t SensorControl::get_ultrasonic_count() const {
     return config_.ultrasonic_configs.size();
@@ -390,7 +375,7 @@ esp_err_t SensorControl::set_tof_mode(uint8_t sensor_index, bool long_distance) 
 esp_err_t SensorControl::self_test() const {
     esp_err_t overall_result = ESP_OK;
     if (tof_sensor_) {
-        for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; i++) {
+        for (int i = 0; i < SensorCommon::NUM_TOF_SENSORS; ++i) {
             if (tof_sensor_->probe(i)) {
                 ESP_LOGI(TAG, "TOF sensor %d probe passed", i);
             } else {
@@ -433,49 +418,10 @@ esp_err_t SensorControl::update_lidar_measurement() {
     return ESP_OK;
 }
 
-// ---------------------------------------------------------------------------
-// Self-driving sensor_control lifecycle task
-// ---------------------------------------------------------------------------
-static void sensor_lifecycle_task(void* /*arg*/) {
-  static const char* LTAG     = "SensorControl";
-  static const uint32_t RETRY_MS = 1000;
-
-  // off -> idle
-  while (!StateMachine::canTransition("sensor_control",
-                                      stateToString(SensorControlState::IDLE))) {
-    ESP_LOGD(LTAG, "waiting for prereqs: off->idle");
-    vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
-                                      }
-  // SensorManager was already initialized in shelfbot.cpp::begin()
-  StateMachine::changeState("sensor_control", stateToString(SensorControlState::IDLE));
-  ESP_LOGI(LTAG, "Sensor idle");
-
-  // idle -> scanning
-  while (!StateMachine::canTransition("sensor_control",
-                                      stateToString(SensorControlState::SCANNING))) {
-    ESP_LOGD(LTAG, "waiting for prereqs: idle->scanning");
-    vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
-                                      }
-  SensorManager::get_instance().start();
-  StateMachine::changeState("sensor_control", stateToString(SensorControlState::SCANNING));
-  ESP_LOGI(LTAG, "Sensor scanning");
-
-  vTaskDelete(nullptr);
-}
-
-// Global lifecycle functions
-// shelfbot.cpp calls sensor_control_setup() once to kick off the task.
 void sensor_control_setup() {
-  ESP_LOGI(SensorControl::TAG, "Sensor setup: spawning lifecycle task");
-  xTaskCreate(sensor_lifecycle_task, "sensor_lifecycle", 3072, nullptr, 3, nullptr);
+    ESP_LOGI(SensorControl::TAG, "sensor_control_setup called");
 }
-
-void sensor_control_init()   {}  // driven by lifecycle task
-void sensor_control_start()  {}  // driven by lifecycle task
-void sensor_control_stop() {
-  SensorManager::get_instance().stop();
-  StateMachine::changeState("sensor_control",
-                             stateToString(SensorControlState::IDLE),
-                             /*force=*/true);
-}
+void sensor_control_init()   {}
+void sensor_control_start()  { SensorManager::get_instance().start(); }
+void sensor_control_stop()   { SensorManager::get_instance().stop(); }
 void sensor_control_update() {}

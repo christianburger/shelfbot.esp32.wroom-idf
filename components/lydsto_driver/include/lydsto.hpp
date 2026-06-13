@@ -44,28 +44,35 @@ public:
     LYDSTO_Driver& operator=(const LYDSTO_Driver&) = delete;
 
 private:
-    static constexpr uint8_t PACKET_LEN = 47;
-    static constexpr uint8_t COMMAND = 0x54;
-    static constexpr uint8_t LENGTH_BYTE = 0x2C;
+    static constexpr uint8_t PACKET_LEN   = 47;
+    static constexpr uint8_t COMMAND      = 0x54;
+    static constexpr uint8_t LENGTH_BYTE  = 0x2C;
 
     uart_port_t uart_port_;
-    int uart_tx_pin_;
-    int uart_rx_pin_;
-    uint32_t baud_rate_;
-    uint16_t timeout_ms_;
+    int         uart_tx_pin_;
+    int         uart_rx_pin_;
+    uint32_t    baud_rate_;
+    uint16_t    timeout_ms_;
 
-    bool initialized_;
-    bool timeout_occurred_;
-    uint8_t parser_buf_[512]{};
-    size_t parser_len_;
+    bool     initialized_;
+    bool     timeout_occurred_;
+    uint8_t  parser_buf_[512]{};
+    size_t   parser_len_;
     uint32_t total_rx_bytes_;
     uint32_t header_fa_hits_;
     uint32_t valid_packets_;
     uint32_t failed_reads_;
-    uint8_t last_packet_[47]{};
-    bool has_last_packet_;
+    uint8_t  last_packet_[47]{};
+    bool     has_last_packet_;
+
+    // Scans parser_buf_ for a complete valid packet.
+    // On success: copies packet to *out, removes it from parser_buf_,
+    // returns true. On failure: returns false, buffer unchanged.
+    bool tryParseFromBuffer(uint8_t* out);
 
     bool readPacket(uint8_t* packet);
-    static bool validPacket(const uint8_t* packet) ;
-    static bool extractMinDistance(const uint8_t* packet, uint16_t& min_mm, int& min_idx) ;
+    static bool validPacket(const uint8_t* packet);
+    static bool extractMinDistance(const uint8_t* packet,
+                                   uint16_t& min_mm,
+                                   int& min_idx);
 };

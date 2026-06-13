@@ -1,5 +1,12 @@
 idf_component_register(
-    SRCS "microros_sync.cpp"
+    SRCS
+        microros_sync.cpp
+        microros_common.cpp
+        microros_led.cpp
+        microros_motors.cpp
+        microros_lidar.cpp
+        microros_tof.cpp
+        microros_ultrasonic.cpp
     INCLUDE_DIRS "include"
     REQUIRES
         idf_includes

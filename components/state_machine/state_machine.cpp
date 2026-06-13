@@ -1,5 +1,7 @@
-#include <state_machine.hpp>
+#include "state_machine.hpp"
+#include "state_machine_lifecycle.hpp"
 #include <esp_timer.h>
+#include <esp_log.h>
 
 static const char* TAG = "StateMachine";
 
@@ -79,7 +81,7 @@ void StateMachine::registerPrerequisite(const std::string& module,
 }
 
 // ---------------------------------------------------------------------------
-// prereqsSatisfied_locked  (mutex must be held by caller)
+// prereqsSatisfied_locked (mutex held)
 // ---------------------------------------------------------------------------
 bool StateMachine::prereqsSatisfied_locked(const std::string& module,
                                            const std::string& new_state) {
@@ -151,12 +153,11 @@ bool StateMachine::waitForPrerequisites(const std::string& module,
 }
 
 // ---------------------------------------------------------------------------
-// changeState
+// changeState (private – only called by advance() and recover())
 // ---------------------------------------------------------------------------
 bool StateMachine::changeState(const std::string& module,
                                const std::string& new_state,
                                bool force_skip_prereqs) {
-    std::lock_guard<std::mutex> lock(mutex_);
     auto it = modules_.find(module);
     if (it == modules_.end()) {
         ESP_LOGE(TAG, "changeState: module '%s' not found", module.c_str());
@@ -164,7 +165,6 @@ bool StateMachine::changeState(const std::string& module,
     }
     const std::string& old_state = it->second.current_state;
 
-    // BLOCK invalid transition to the same state
     if (old_state == new_state) {
         ESP_LOGW(TAG, "Module '%s' attempted invalid transition: %s -> %s (no change)",
                  module.c_str(), old_state.c_str(), new_state.c_str());
@@ -212,13 +212,145 @@ bool StateMachine::isInState(const std::string& module,
 }
 
 // ---------------------------------------------------------------------------
-// getState  (diagnostic only)
+// getState
 // ---------------------------------------------------------------------------
 const std::string& StateMachine::getState(const std::string& module) {
     static const std::string empty;
     std::lock_guard<std::mutex> lock(mutex_);
     auto it = modules_.find(module);
     return (it != modules_.end()) ? it->second.current_state : empty;
+}
+
+// ---------------------------------------------------------------------------
+// advance (all modules)
+// ---------------------------------------------------------------------------
+void StateMachine::advance() {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::unordered_map<std::string, std::string> current_map;
+    for (const auto& kv : modules_) current_map[kv.first] = kv.second.current_state;
+
+    bool changed;
+    do {
+        changed = false;
+        for (auto& kv : modules_) {
+            const std::string& module = kv.first;
+            ModuleState& mod_state = kv.second;
+            const std::string& current = mod_state.current_state;
+
+            std::vector<std::string> ordered;
+            if (module == "shelfbot")          ordered = orderedStates(ShelfbotState());
+            else if (module == "led_control")  ordered = orderedStates(LedControlState());
+            else if (module == "motor_control")ordered = orderedStates(MotorControlState());
+            else if (module == "sensor_control")ordered = orderedStates(SensorControlState());
+            else if (module == "wifi_manager") ordered = orderedStates(WifiManagerState());
+            else if (module == "network_service") ordered = orderedStates(NetworkServiceState());
+            else if (module == "microros_sync")ordered = orderedStates(MicrorosState());
+            else if (module == "agent")        ordered = orderedStates(AgentState());
+            else if (module == "time_sync")    ordered = orderedStates(TimeSyncState());
+            else continue;
+
+            int cur_idx = -1;
+            for (size_t i = 0; i < ordered.size(); ++i)
+                if (ordered[i] == current) { cur_idx = i; break; }
+            if (cur_idx < 0) continue;
+
+            for (size_t next_idx = cur_idx + 1; next_idx < ordered.size(); ++next_idx) {
+                const std::string& next_state = ordered[next_idx];
+                if (!prereqsSatisfied_locked(module, next_state)) continue;
+                if (!::is_allowed_transition(module, next_state, current_map)) continue;
+
+                mod_state.current_state = next_state;
+                ESP_LOGI(TAG, "advance: %s -> %s", module.c_str(), next_state.c_str());
+                current_map[module] = next_state;
+                changed = true;
+                break;
+            }
+        }
+    } while (changed);
+}
+
+// ---------------------------------------------------------------------------
+// advance (single module)
+// ---------------------------------------------------------------------------
+void StateMachine::advance(const std::string& module) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    std::unordered_map<std::string, std::string> current_map;
+    for (const auto& kv : modules_) current_map[kv.first] = kv.second.current_state;
+
+    auto it = modules_.find(module);
+    if (it == modules_.end()) {
+        ESP_LOGW(TAG, "advance: module '%s' not found", module.c_str());
+        return;
+    }
+
+    ModuleState& mod_state = it->second;
+    const std::string& current = mod_state.current_state;
+
+    std::vector<std::string> ordered;
+    if (module == "shelfbot")          ordered = orderedStates(ShelfbotState());
+    else if (module == "led_control")  ordered = orderedStates(LedControlState());
+    else if (module == "motor_control")ordered = orderedStates(MotorControlState());
+    else if (module == "sensor_control")ordered = orderedStates(SensorControlState());
+    else if (module == "wifi_manager") ordered = orderedStates(WifiManagerState());
+    else if (module == "network_service") ordered = orderedStates(NetworkServiceState());
+    else if (module == "microros_sync")ordered = orderedStates(MicrorosState());
+    else if (module == "agent")        ordered = orderedStates(AgentState());
+    else if (module == "time_sync")    ordered = orderedStates(TimeSyncState());
+    else return;
+
+    int cur_idx = -1;
+    for (size_t i = 0; i < ordered.size(); ++i)
+        if (ordered[i] == current) { cur_idx = i; break; }
+    if (cur_idx < 0) return;
+
+    for (size_t next_idx = cur_idx + 1; next_idx < ordered.size(); ++next_idx) {
+        const std::string& next_state = ordered[next_idx];
+        if (!prereqsSatisfied_locked(module, next_state)) continue;
+        if (!::is_allowed_transition(module, next_state, current_map)) continue;
+
+        mod_state.current_state = next_state;
+        ESP_LOGI(TAG, "advance: %s -> %s", module.c_str(), next_state.c_str());
+        return;
+    }
+}
+
+// ---------------------------------------------------------------------------
+// recover – reset error/recovery states
+// ---------------------------------------------------------------------------
+void StateMachine::recover() {
+    std::lock_guard<std::mutex> lock(mutex_);
+
+    for (auto& kv : modules_) {
+        const std::string& module = kv.first;
+        const std::string& state = kv.second.current_state;
+
+        if (module == "microros_sync" && (state == "error" || state == "recovering")) {
+            changeState(module, "disconnected", true);
+        } else if (module == "agent" && state == "error") {
+            changeState(module, "offline", true);
+        } else if (module == "network_service" && state == "error") {
+            changeState(module, "off", true);
+        } else if (module == "wifi_manager" && state == "error") {
+            changeState(module, "disconnected", true);
+        } else if (module == "shelfbot" && state == "error") {
+            changeState(module, "setup", true);
+        }
+    }
+
+    // WiFi disconnect forces network_service and time_sync to safe states
+    auto it_wifi = modules_.find("wifi_manager");
+    if (it_wifi != modules_.end() && it_wifi->second.current_state == "disconnected") {
+        auto it_net = modules_.find("network_service");
+        if (it_net != modules_.end() && it_net->second.current_state != "off") {
+            changeState("network_service", "off", true);
+            ESP_LOGW(TAG, "recover: network_service -> off (wifi disconnected)");
+        }
+        auto it_time = modules_.find("time_sync");
+        if (it_time != modules_.end() && it_time->second.current_state != "unsynced") {
+            changeState("time_sync", "unsynced", true);
+            ESP_LOGW(TAG, "recover: time_sync -> unsynced (wifi disconnected)");
+        }
+    }
 }
 
 // ---------------------------------------------------------------------------
