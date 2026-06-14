@@ -7,8 +7,6 @@
 #include "microros_led.hpp"
 #include "microros_motors.hpp"
 #include "microros_lidar.hpp"
-#include "microros_tof.hpp"
-#include "microros_ultrasonic.hpp"
 
 class MicrorosSync {
 public:
@@ -24,27 +22,11 @@ public:
 
     static void publishHeartbeat(int32_t value);
     static void publishMotorPositions(const float* positions, size_t count);
-
-    /**
-     * @brief Publish an array of distance readings (centimetres).
-     *
-     * Caller owns the data; distances[0..count-1] are written directly
-     * into the Float32MultiArray message.  Capped at ULTRASONIC_MAX_CHANNELS.
-     */
     static void publishDistanceSensors(const float* distances, size_t count);
-
     static void publishLedState(bool state);
     static void publishTofDistance(float distance_m);
-
-    /**
-     * @brief Publish a completed 360° LiDAR scan as a ROS LaserScan message.
-     *
-     * @param scan  A completed LidarScan (scan.complete == true).
-     *              Points are mapped into 1°-wide buckets; closest reading wins.
-     */
     static void publishLidarScan(const LidarScan& scan);
 
-    // For global lock/unlock
     static bool lockCore();
     static void unlockCore();
 
@@ -64,13 +46,14 @@ private:
     LedComponent        led_;
     MotorComponent      motors_;
     LidarComponent      lidar_;
-    TofComponent        tof_;
-    UltrasonicComponent ultrasonic_;
 
     // Heartbeat
     rcl_publisher_t      heartbeat_pub_;
     rcl_timer_t          heartbeat_timer_;
     std_msgs__msg__Int32 heartbeat_msg_;
+
+    // LiDAR timer
+    rcl_timer_t          lidar_timer_;   // ADDED
 
     // Task handle
     TaskHandle_t task_handle_;
@@ -84,8 +67,6 @@ private:
         COMP_LED,
         COMP_MOTORS,
         COMP_LIDAR,
-        COMP_TOF,
-        COMP_ULTRASONIC,
         COMP_COUNT
     };
     bool comp_initialized_[COMP_COUNT];
@@ -93,6 +74,7 @@ private:
     // Task function
     static void microros_task(void* arg);
     static void heartbeatTimerCallback(rcl_timer_t* timer, int64_t last_call_time);
+    static void lidarTimerCallback(rcl_timer_t* timer, int64_t last_call_time); // ADDED
 
     bool createEntitiesImpl();
     void destroyEntitiesImpl();

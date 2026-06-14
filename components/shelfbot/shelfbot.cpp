@@ -1,6 +1,5 @@
 #include <shelfbot.hpp>
 #include <microros_sync.hpp>
-#include <sensor_manager.hpp>
 #include <motor_control.hpp>
 #include <led_control.hpp>
 #include <wifi_manager.hpp>
@@ -9,6 +8,7 @@
 #include <state_machine.hpp>
 #include <state_machine_lifecycle.hpp>
 #include <shelfbot_timestamp.hpp>
+#include <lidar_sensor.hpp>
 
 static const char* TAG = "Shelfbot";
 Shelfbot* Shelfbot::instance_ = nullptr;
@@ -105,7 +105,7 @@ esp_err_t Shelfbot::begin() {
     StateMachine::setInitial("shelfbot",        stateToString(ShelfbotState::SETUP),        orderedStates(ShelfbotState()));
     StateMachine::setInitial("led_control",     stateToString(LedControlState::SETUP),      orderedStates(LedControlState()));
     StateMachine::setInitial("motor_control",   stateToString(MotorControlState::SETUP),    orderedStates(MotorControlState()));
-    StateMachine::setInitial("sensor_control",  stateToString(SensorControlState::OFF),     orderedStates(SensorControlState()));
+    StateMachine::setInitial("lidar_sensor",    stateToString(LidarSensorState::SETUP),     orderedStates(LidarSensorState()));
     StateMachine::setInitial("wifi_manager",    stateToString(WifiManagerState::OFF),       orderedStates(WifiManagerState()));
     StateMachine::setInitial("network_service", stateToString(NetworkServiceState::OFF),    orderedStates(NetworkServiceState()));
     StateMachine::setInitial("microros_sync",   stateToString(MicrorosState::DISCONNECTED), orderedStates(MicrorosState()));
@@ -131,24 +131,9 @@ esp_err_t Shelfbot::begin() {
     MicrorosSync::getInstance().init();
     MicrorosSync::getInstance().start();
 
-    SensorControl::Config sensor_config;
-    sensor_config.ultrasonic_configs = {
-        {.trig_pin = 25, .echo_pin = 34, .timeout_us = 30000, .max_distance_mm = 4000},
-        {.trig_pin = 32, .echo_pin = 35, .timeout_us = 30000, .max_distance_mm = 4000},
-        {.trig_pin = 16, .echo_pin = 36, .timeout_us = 30000, .max_distance_mm = 4000},
-        {.trig_pin = 17, .echo_pin = 39, .timeout_us = 30000, .max_distance_mm = 4000},
-    };
-    sensor_config.lidar_config.enabled     = true;
-    sensor_config.lidar_config.uart_port   = UART_NUM_2;
-    sensor_config.lidar_config.uart_tx_pin = UART_PIN_NO_CHANGE;
-    sensor_config.lidar_config.uart_rx_pin = GPIO_NUM_3;
-    sensor_config.lidar_config.baud_rate   = 115200;
-
-    SensorManager::get_instance().initialize(sensor_config);
-
     led_control_setup();
     motor_control_setup();
-    sensor_control_setup();
+    lidar_setup();
 
     ESP_LOGI(TAG, "Initialization complete – components progressing independently");
     return ESP_OK;

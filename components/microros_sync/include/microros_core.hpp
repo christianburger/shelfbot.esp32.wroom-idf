@@ -3,8 +3,6 @@
 #include "microros_led.hpp"
 #include "microros_motors.hpp"
 #include "microros_lidar.hpp"
-#include "microros_tof.hpp"
-#include "microros_ultrasonic.hpp"
 
 struct MicrorosCore {
     rcl_node_t          node;
@@ -18,8 +16,6 @@ struct MicrorosCore {
     LedComponent        led;
     MotorComponent      motors;
     LidarComponent      lidar;
-    TofComponent        tof;
-    UltrasonicComponent ultrasonic;
 
     rcl_publisher_t     heartbeat_pub;
     rcl_timer_t         heartbeat_timer;

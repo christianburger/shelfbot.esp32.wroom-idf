@@ -238,16 +238,14 @@ void StateMachine::advance() {
             const std::string& current = mod_state.current_state;
 
             std::vector<std::string> ordered;
-            if (module == "shelfbot")          ordered = orderedStates(ShelfbotState());
-            else if (module == "led_control")  ordered = orderedStates(LedControlState());
-            else if (module == "motor_control")ordered = orderedStates(MotorControlState());
-            else if (module == "sensor_control")ordered = orderedStates(SensorControlState());
-            else if (module == "wifi_manager") ordered = orderedStates(WifiManagerState());
+            if (module == "shelfbot")             ordered = orderedStates(ShelfbotState());
+            else if (module == "led_control")     ordered = orderedStates(LedControlState());
+            else if (module == "motor_control")   ordered = orderedStates(MotorControlState());
+            else if (module == "wifi_manager")    ordered = orderedStates(WifiManagerState());
             else if (module == "network_service") ordered = orderedStates(NetworkServiceState());
-            else if (module == "microros_sync")ordered = orderedStates(MicrorosState());
-            else if (module == "agent")        ordered = orderedStates(AgentState());
-            else if (module == "time_sync")    ordered = orderedStates(TimeSyncState());
-            else continue;
+            else if (module == "microros_sync")   ordered = orderedStates(MicrorosState());
+            else if (module == "agent")           ordered = orderedStates(AgentState());
+            else if (module == "time_sync")       ordered = orderedStates(TimeSyncState());
 
             int cur_idx = -1;
             for (size_t i = 0; i < ordered.size(); ++i)
@@ -290,7 +288,6 @@ void StateMachine::advance(const std::string& module) {
     if (module == "shelfbot")          ordered = orderedStates(ShelfbotState());
     else if (module == "led_control")  ordered = orderedStates(LedControlState());
     else if (module == "motor_control")ordered = orderedStates(MotorControlState());
-    else if (module == "sensor_control")ordered = orderedStates(SensorControlState());
     else if (module == "wifi_manager") ordered = orderedStates(WifiManagerState());
     else if (module == "network_service") ordered = orderedStates(NetworkServiceState());
     else if (module == "microros_sync")ordered = orderedStates(MicrorosState());

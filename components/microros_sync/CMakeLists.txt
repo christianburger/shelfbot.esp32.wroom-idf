@@ -5,8 +5,6 @@ idf_component_register(
         microros_led.cpp
         microros_motors.cpp
         microros_lidar.cpp
-        microros_tof.cpp
-        microros_ultrasonic.cpp
     INCLUDE_DIRS "include"
     REQUIRES
         idf_includes

@@ -1,22 +1,14 @@
 idf_component_register(
     SRCS
-        microros_sync.cpp
-        microros_common.cpp
-        microros_led.cpp
-        microros_motors.cpp
-        microros_lidar.cpp
-        microros_tof.cpp
-        microros_ultrasonic.cpp
-    INCLUDE_DIRS "include"
+        "lidar_sensor.cpp"
+        "lidar_packet_parser.cpp"
+    INCLUDE_DIRS
+        "include"
     REQUIRES
         idf_includes
-        micro_ros_espidf_component
-        motor_control
-        led_control
-        wifi_manager
-        lidar_sensor
+        lydsto_driver
+        freertos
+        esp_timer
+        driver
         state_machine
-        shelfbot_timestamp
-    PRIV_REQUIRES
-        firmware_version
 )

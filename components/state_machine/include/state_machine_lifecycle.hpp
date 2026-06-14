@@ -17,9 +17,6 @@ enum class ShelfbotState : uint8_t {
 enum class MotorControlState : uint8_t {
     SETUP = 0, INIT, RUNNING, STOPPED, ERROR, DISABLED, COUNT
 };
-enum class SensorControlState : uint8_t {
-    OFF = 0, IDLE, SCANNING, ERROR, DISABLED, COUNT
-};
 enum class MicrorosState : uint8_t {
     OFF = 0, DISCONNECTED, DISCOVERING, CREATING_ENTITIES, CONNECTED, ERROR, RECOVERING, COUNT
 };
@@ -36,6 +33,9 @@ enum class TimeSyncState : uint8_t {
     UNSYNCED = 0, SYNCED, COUNT
 };
 enum class LedControlState : uint8_t {
+    SETUP = 0, INIT, RUNNING, STOPPED, ERROR, COUNT
+};
+enum class LidarSensorState : uint8_t {
     SETUP = 0, INIT, RUNNING, STOPPED, ERROR, COUNT
 };
 
@@ -62,16 +62,6 @@ inline const char* stateToString(MotorControlState s) {
         case MotorControlState::ERROR:    return "error";
         case MotorControlState::DISABLED: return "disabled";
         default:                          return "unknown";
-    }
-}
-inline const char* stateToString(SensorControlState s) {
-    switch (s) {
-        case SensorControlState::OFF:      return "off";
-        case SensorControlState::IDLE:     return "idle";
-        case SensorControlState::SCANNING: return "scanning";
-        case SensorControlState::ERROR:    return "error";
-        case SensorControlState::DISABLED: return "disabled";
-        default:                           return "unknown";
     }
 }
 inline const char* stateToString(MicrorosState s) {
@@ -135,18 +125,25 @@ inline const char* stateToString(LedControlState s) {
         default:                        return "unknown";
     }
 }
+inline const char* stateToString(LidarSensorState s) {
+    switch (s) {
+        case LidarSensorState::SETUP:   return "setup";
+        case LidarSensorState::INIT:    return "init";
+        case LidarSensorState::RUNNING: return "running";
+        case LidarSensorState::STOPPED: return "stopped";
+        case LidarSensorState::ERROR:   return "error";
+        default:                        return "unknown";
+    }
+}
 
 // ============================================================================
-// orderedStates – must be defined for all enums (used for rank calculation)
+// orderedStates – must be defined for all enums
 // ============================================================================
 inline std::vector<std::string> orderedStates(ShelfbotState) {
     return {"setup", "init", "running", "stopped", "error", "shutdown"};
 }
 inline std::vector<std::string> orderedStates(MotorControlState) {
     return {"setup", "init", "running", "stopped", "error", "disabled"};
-}
-inline std::vector<std::string> orderedStates(SensorControlState) {
-    return {"off", "idle", "scanning", "error", "disabled"};
 }
 inline std::vector<std::string> orderedStates(MicrorosState) {
     return {"off", "disconnected", "discovering", "creating_entities", "connected", "error", "recovering"};
@@ -166,6 +163,9 @@ inline std::vector<std::string> orderedStates(TimeSyncState) {
 inline std::vector<std::string> orderedStates(LedControlState) {
     return {"setup", "init", "running", "stopped", "error"};
 }
+inline std::vector<std::string> orderedStates(LidarSensorState) {
+    return {"setup", "init", "running", "stopped", "error"};
+}
 
 // ============================================================================
 // Helper: get rank of a state string for a given module
@@ -179,9 +179,6 @@ static int get_state_rank(const std::string& module, const std::string& state) {
         for (size_t i = 0; i < v.size(); ++i) if (v[i] == state) return (int)i;
     } else if (module == "motor_control") {
         auto v = orderedStates(MotorControlState());
-        for (size_t i = 0; i < v.size(); ++i) if (v[i] == state) return (int)i;
-    } else if (module == "sensor_control") {
-        auto v = orderedStates(SensorControlState());
         for (size_t i = 0; i < v.size(); ++i) if (v[i] == state) return (int)i;
     } else if (module == "wifi_manager") {
         auto v = orderedStates(WifiManagerState());
@@ -198,6 +195,9 @@ static int get_state_rank(const std::string& module, const std::string& state) {
     } else if (module == "time_sync") {
         auto v = orderedStates(TimeSyncState());
         for (size_t i = 0; i < v.size(); ++i) if (v[i] == state) return (int)i;
+    } else if (module == "lidar_sensor") {
+        auto v = orderedStates(LidarSensorState());
+        for (size_t i = 0; i < v.size(); ++i) if (v[i] == state) return (int)i;
     }
     return -1;
 }
@@ -209,7 +209,7 @@ struct TransitionRule {
     std::string module;
     std::string from_state;
     std::string to_state;
-    std::vector<std::pair<std::string, int>> prerequisites; // (module, min_rank)
+    std::vector<std::pair<std::string, int>> prerequisites;
 };
 
 inline const std::vector<TransitionRule> ALLOWED_TRANSITIONS = {
@@ -262,13 +262,6 @@ inline const std::vector<TransitionRule> ALLOWED_TRANSITIONS = {
     {"agent", "entities_created", "offline", {{"microros_sync", 1}}},
     {"agent", "connected", "offline", {{"microros_sync", 1}}},
 
-    // Sensor control
-    {"sensor_control", "off", "idle", {{"shelfbot", 2}}},
-    {"sensor_control", "idle", "scanning", {{"wifi_manager", 3}}},
-    {"sensor_control", "scanning", "idle", {}},
-    {"sensor_control", "idle", "off", {}},
-    {"sensor_control", "scanning", "idle", {{"wifi_manager", 1}}},
-
     // Motor control
     {"motor_control", "setup", "init", {{"shelfbot", 2}}},
     {"motor_control", "init", "running", {}},
@@ -280,6 +273,14 @@ inline const std::vector<TransitionRule> ALLOWED_TRANSITIONS = {
     {"led_control", "init", "running", {}},
     {"led_control", "running", "stopped", {}},
     {"led_control", "stopped", "setup", {}},
+
+    // LiDAR sensor
+    {"lidar_sensor", "setup", "init", {{"shelfbot", 2}}},
+    {"lidar_sensor", "init", "running", {}},
+    {"lidar_sensor", "running", "stopped", {}},
+    {"lidar_sensor", "stopped", "setup", {}},
+    {"lidar_sensor", "running", "error", {}},
+    {"lidar_sensor", "error", "setup", {}},
 };
 
 // ============================================================================

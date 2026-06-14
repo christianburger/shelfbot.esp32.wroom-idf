@@ -6,6 +6,7 @@
 #include <rmw_microros/rmw_microros.h>
 #include <esp_log.h>
 #include <cstring>
+#include <lidar_sensor.hpp>  // ADDED for lidar_get_latest_scan
 
 static const char* TAG = "MicrorosSync";
 MicrorosSync* MicrorosSync::instance_ = nullptr;
@@ -39,8 +40,9 @@ MicrorosSync::MicrorosSync()
     }
     for (int i = 0; i < COMP_COUNT; ++i) comp_initialized_[i] = false;
     std_msgs__msg__Int32__init(&heartbeat_msg_);
-    heartbeat_pub_ = rcl_get_zero_initialized_publisher();
+    heartbeat_pub_   = rcl_get_zero_initialized_publisher();
     heartbeat_timer_ = rcl_get_zero_initialized_timer();
+    lidar_timer_     = rcl_get_zero_initialized_timer(); // ADDED
 }
 
 MicrorosSync::~MicrorosSync() {
@@ -102,10 +104,11 @@ void MicrorosSync::logMicrorosLimits() {
 bool MicrorosSync::createEntitiesImpl() {
     for (int i = 0; i < COMP_COUNT; ++i) comp_initialized_[i] = false;
 
-    node_          = rcl_get_zero_initialized_node();
-    executor_      = rclc_executor_get_zero_initialized_executor();
-    heartbeat_pub_ = rcl_get_zero_initialized_publisher();
+    node_            = rcl_get_zero_initialized_node();
+    executor_        = rclc_executor_get_zero_initialized_executor();
+    heartbeat_pub_   = rcl_get_zero_initialized_publisher();
     heartbeat_timer_ = rcl_get_zero_initialized_timer();
+    lidar_timer_     = rcl_get_zero_initialized_timer(); // ADDED
 
     rcl_ret_t r;
     r = rclc_node_init_default(&node_, "shelfbot_firmware", "", &support_);
@@ -130,12 +133,6 @@ bool MicrorosSync::createEntitiesImpl() {
     if (!lidar_.init(&node_, &executor_)) return false;
     comp_initialized_[COMP_LIDAR] = true;
 
-    if (!tof_.init(&node_, &executor_)) return false;
-    comp_initialized_[COMP_TOF] = true;
-
-    if (!ultrasonic_.init(&node_, &support_, &executor_)) return false;
-    comp_initialized_[COMP_ULTRASONIC] = true;
-
     r = rclc_publisher_init_best_effort(&heartbeat_pub_, &node_,
             ROSIDL_GET_MSG_TYPE_SUPPORT(std_msgs, msg, Int32),
             "shelfbot_firmware/heartbeat");
@@ -143,7 +140,8 @@ bool MicrorosSync::createEntitiesImpl() {
         ESP_LOGE(TAG, "heartbeat publisher init failed: %ld", (long)r);
         return false;
     }
-    r = rclc_timer_init_default(&heartbeat_timer_, &support_, RCL_MS_TO_NS(1000), heartbeatTimerCallback);
+    r = rclc_timer_init_default(&heartbeat_timer_, &support_, RCL_MS_TO_NS(1000),
+                                 heartbeatTimerCallback);
     if (r != RCL_RET_OK) {
         ESP_LOGE(TAG, "heartbeat timer init failed: %ld", (long)r);
         return false;
@@ -151,6 +149,18 @@ bool MicrorosSync::createEntitiesImpl() {
     r = rclc_executor_add_timer(&executor_, &heartbeat_timer_);
     if (r != RCL_RET_OK) {
         ESP_LOGE(TAG, "add heartbeat timer failed: %ld", (long)r);
+        return false;
+    }
+
+    // ADDED: LiDAR timer (200 ms)
+    r = rclc_timer_init_default(&lidar_timer_, &support_, RCL_MS_TO_NS(200), lidarTimerCallback);
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "lidar timer init failed: %ld", (long)r);
+        return false;
+    }
+    r = rclc_executor_add_timer(&executor_, &lidar_timer_);
+    if (r != RCL_RET_OK) {
+        ESP_LOGE(TAG, "add lidar timer failed: %ld", (long)r);
         return false;
     }
 
@@ -162,34 +172,31 @@ bool MicrorosSync::createEntitiesImpl() {
 void MicrorosSync::destroyEntitiesImpl() {
     if (!entities_created_) return;
 
-    // Destroy components in reverse order
-    if (comp_initialized_[COMP_ULTRASONIC]) ultrasonic_.fini(&node_);
-    if (comp_initialized_[COMP_TOF]) tof_.fini(&node_);
-    if (comp_initialized_[COMP_LIDAR]) lidar_.fini(&node_);
-    if (comp_initialized_[COMP_MOTORS]) motors_.fini(&node_);
-    if (comp_initialized_[COMP_LED]) led_.fini(&node_);
+    if (comp_initialized_[COMP_LIDAR])      lidar_.fini(&node_);
+    if (comp_initialized_[COMP_MOTORS])     motors_.fini(&node_);
+    if (comp_initialized_[COMP_LED])        led_.fini(&node_);
 
     rcl_ret_t r;
     r = rcl_publisher_fini(&heartbeat_pub_, &node_);
     if (r != RCL_RET_OK) ESP_LOGW(TAG, "heartbeat_pub fini: %ld", (long)r);
     r = rcl_timer_fini(&heartbeat_timer_);
     if (r != RCL_RET_OK) ESP_LOGW(TAG, "heartbeat_timer fini: %ld", (long)r);
+    r = rcl_timer_fini(&lidar_timer_); // ADDED
+    if (r != RCL_RET_OK) ESP_LOGW(TAG, "lidar_timer fini: %ld", (long)r);
     r = rclc_executor_fini(&executor_);
     if (r != RCL_RET_OK) ESP_LOGW(TAG, "executor fini: %ld", (long)r);
     r = rcl_node_fini(&node_);
     if (r != RCL_RET_OK) ESP_LOGW(TAG, "node fini: %ld", (long)r);
 
-    // Zero all handles
-    node_ = rcl_get_zero_initialized_node();
-    executor_ = rclc_executor_get_zero_initialized_executor();
-    heartbeat_pub_ = rcl_get_zero_initialized_publisher();
+    node_            = rcl_get_zero_initialized_node();
+    executor_        = rclc_executor_get_zero_initialized_executor();
+    heartbeat_pub_   = rcl_get_zero_initialized_publisher();
     heartbeat_timer_ = rcl_get_zero_initialized_timer();
+    lidar_timer_     = rcl_get_zero_initialized_timer(); // ADDED
 
-    // Fully reset support context (if previously initialised)
     if (support_inited_) {
         r = rclc_support_fini(&support_);
         if (r != RCL_RET_OK) ESP_LOGW(TAG, "support_fini failed: %ld", (long)r);
-        // Zero the support struct to clear any stale pointers
         memset(&support_, 0, sizeof(support_));
         support_inited_ = false;
     }
@@ -206,9 +213,18 @@ void MicrorosSync::heartbeatTimerCallback(rcl_timer_t*, int64_t) {
     publish_or_fail(&instance_->heartbeat_pub_, &instance_->heartbeat_msg_, "heartbeat");
 }
 
+// ADDED: LiDAR timer callback
+void MicrorosSync::lidarTimerCallback(rcl_timer_t*, int64_t) {
+    if (!instance_ || !instance_->isConnected()) return;
+    LidarScan scan;
+    if (lidar_get_latest_scan(scan)) {
+        instance_->lidar_.publishLidarScan(scan);
+    }
+}
+
 void MicrorosSync::microros_task(void* arg) {
     MicrorosSync* self = static_cast<MicrorosSync*>(arg);
-    char agent_ip[16] = {};
+    char agent_ip[16]  = {};
 
     while (true) {
         std::string current_state = StateMachine::getState("microros_sync");
@@ -227,7 +243,6 @@ void MicrorosSync::microros_task(void* arg) {
         }
 
         if (current_state == stateToString(MicrorosState::DISCOVERING)) {
-            // Step 1: resolve agent IP once — guard redundant state changes
             if (!StateMachine::isInState("agent", stateToString(AgentState::DISCOVERED))) {
                 if (!self->queryAgentIp(agent_ip, sizeof(agent_ip))) {
                     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -236,14 +251,12 @@ void MicrorosSync::microros_task(void* arg) {
                 StateMachine::changeState("agent", stateToString(AgentState::DISCOVERED), true);
             }
 
-            // Step 2: wait for time sync
             if (!StateMachine::isAtLeast("time_sync", stateToString(TimeSyncState::SYNCED))) {
                 ESP_LOGI(TAG, "Waiting for time sync before connecting to agent...");
                 vTaskDelay(pdMS_TO_TICKS(1000));
                 continue;
             }
 
-            // Step 3: initialize transport
             if (!self->support_inited_) {
                 rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
                 rcl_ret_t r = rcl_init_options_init(&init_options, self->allocator_);
@@ -258,9 +271,8 @@ void MicrorosSync::microros_task(void* arg) {
                 if (rmw_r != RMW_RET_OK) {
                     ESP_LOGE(TAG, "rmw_uros_options_set_udp_address failed: %ld", (long)rmw_r);
                     rcl_ret_t fini_r = rcl_init_options_fini(&init_options);
-                    if (fini_r != RCL_RET_OK) {
+                    if (fini_r != RCL_RET_OK)
                         ESP_LOGW(TAG, "rcl_init_options_fini after set_udp_address error: %ld", (long)fini_r);
-                    }
                     vTaskDelay(pdMS_TO_TICKS(2000));
                     continue;
                 }
@@ -269,9 +281,8 @@ void MicrorosSync::microros_task(void* arg) {
                 r = rclc_support_init_with_options(&self->support_, 0, nullptr,
                                                    &init_options, &self->allocator_);
                 rcl_ret_t fini_r = rcl_init_options_fini(&init_options);
-                if (fini_r != RCL_RET_OK) {
+                if (fini_r != RCL_RET_OK)
                     ESP_LOGW(TAG, "rcl_init_options_fini after support_init: %ld", (long)fini_r);
-                }
                 if (r != RCL_RET_OK) {
                     ESP_LOGE(TAG, "support_init failed: %ld", (long)r);
                     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -281,7 +292,6 @@ void MicrorosSync::microros_task(void* arg) {
                 ESP_LOGI(TAG, "Transport initialized to %s:8888", agent_ip);
             }
 
-            // Step 4: ping — guard redundant state changes
             if (!StateMachine::isInState("agent", stateToString(AgentState::PING_OK))) {
                 ESP_LOGI(TAG, "Pinging agent at %s...", agent_ip);
                 constexpr int PING_TIMEOUT_MS = 2000;
@@ -299,7 +309,6 @@ void MicrorosSync::microros_task(void* arg) {
                 }
             }
 
-            // Step 5: session sync — guard redundant state changes
             if (!StateMachine::isInState("agent", stateToString(AgentState::SESSION_SYNCED))) {
                 if (rmw_uros_sync_session(5000) != RMW_RET_OK) {
                     ESP_LOGE(TAG, "Session sync failed");
@@ -364,6 +373,7 @@ void MicrorosSync::microros_task(void* arg) {
     }
 }
 
+// ── Static publish helpers ────────────────────────────────────────────────────
 void MicrorosSync::publishHeartbeat(int32_t value) {
     if (!instance_ || !instance_->isConnected()) return;
     instance_->heartbeat_msg_.data = value;
@@ -375,22 +385,12 @@ void MicrorosSync::publishMotorPositions(const float* positions, size_t count) {
     instance_->motors_.publishPositions(positions, count);
 }
 
-void MicrorosSync::publishDistanceSensors(const float* distances, size_t count) {
-    if (!instance_ || !instance_->isConnected()) return;
-    instance_->ultrasonic_.publishDistances(distances, count);
-}
-
 void MicrorosSync::publishLedState(bool state) {
     if (!instance_ || !instance_->isConnected()) return;
     instance_->led_.publishState(state);
 }
 
-void MicrorosSync::publishTofDistance(float distance_m) {
+void MicrorosSync::publishLidarScan(const LidarScan& scan) {
     if (!instance_ || !instance_->isConnected()) return;
-    instance_->tof_.publishDistance(distance_m);
-}
-
-void MicrorosSync::publishLidarScan(const SensorCommon::LidarMeasurement& measurement) {
-    if (!instance_ || !instance_->isConnected()) return;
-    instance_->lidar_.publishLidarScan(measurement);
+    instance_->lidar_.publishLidarScan(scan);
 }
