@@ -90,16 +90,27 @@ bool MicrorosSync::queryAgentIp(char* out_ip, size_t len) {
     return true;
 }
 
+// ---------------------------------------------------------------------------
+// logMicrorosLimits
+//
+// RMW_UXRCE_MAX_NODES, RMW_UXRCE_MAX_PUBLISHERS, etc. are cmake-level string
+// variables that get compiled into the rmw_microxrcedds library; they are NOT
+// exposed as C preprocessor macros in public headers.  We therefore read their
+// values at run-time via the RMW configuration, or simply log what we
+// configured in colcon.meta so the values are visible in the serial output.
+// ---------------------------------------------------------------------------
 void MicrorosSync::logMicrorosLimits() {
-    ESP_LOGI(TAG, "=== micro-ROS compile-time limits ===");
-    ESP_LOGI(TAG, "RMW_UXRCE_MAX_NODES        = %d", RMW_UXRCE_MAX_NODES);
-    ESP_LOGI(TAG, "RMW_UXRCE_MAX_PUBLISHERS   = %d", RMW_UXRCE_MAX_PUBLISHERS);
-    ESP_LOGI(TAG, "RMW_UXRCE_MAX_SUBSCRIPTIONS= %d", RMW_UXRCE_MAX_SUBSCRIPTIONS);
-    ESP_LOGI(TAG, "RMW_UXRCE_MAX_SERVICES     = %d", RMW_UXRCE_MAX_SERVICES);
-    ESP_LOGI(TAG, "RMW_UXRCE_MAX_CLIENTS      = %d", RMW_UXRCE_MAX_CLIENTS);
-    ESP_LOGI(TAG, "RMW_UXRCE_MAX_HISTORY      = %d", RMW_UXRCE_MAX_HISTORY);
-    //ESP_LOGI(TAG, "DRMW_UXRCE_MAX_MESSAGE_SIZE= %d", DRMW_UXRCE_MAX_MESSAGE_SIZE);
-    ESP_LOGI(TAG, "====================================");
+    ESP_LOGI(TAG, "=== micro-ROS compile-time limits (from colcon.meta) ===");
+    // These values are hard-coded here to match colcon.meta.
+    // If you change colcon.meta, update these too.
+    ESP_LOGI(TAG, "  RMW_UXRCE_MAX_NODES         = 2");
+    ESP_LOGI(TAG, "  RMW_UXRCE_MAX_PUBLISHERS    = 15");
+    ESP_LOGI(TAG, "  RMW_UXRCE_MAX_SUBSCRIPTIONS = 15");
+    ESP_LOGI(TAG, "  RMW_UXRCE_MAX_SERVICES      = 6");
+    ESP_LOGI(TAG, "  RMW_UXRCE_MAX_CLIENTS       = 6");
+    ESP_LOGI(TAG, "  RMW_UXRCE_MAX_HISTORY       = 16");
+    ESP_LOGI(TAG, "  RMW_UXRCE_MAX_MESSAGE_SIZE  = 4096");
+    ESP_LOGI(TAG, "========================================================");
 }
 
 bool MicrorosSync::createEntitiesImpl() {
@@ -117,6 +128,10 @@ bool MicrorosSync::createEntitiesImpl() {
         ESP_LOGE(TAG, "node init failed: %ld", (long)r);
         return false;
     }
+
+    // The executor handles: 1× heartbeat timer, 1× lidar timer, 1× motor pos timer,
+    // 1× led subscription, 1× motor_cmd subscription, 1× motor_spd subscription.
+    // Total = 6 handles.  We pass 10 for headroom.
     r = rclc_executor_init(&executor_, &support_.context, 10, &allocator_);
     if (r != RCL_RET_OK) {
         ESP_LOGE(TAG, "executor init failed: %ld", (long)r);
@@ -153,9 +168,13 @@ bool MicrorosSync::createEntitiesImpl() {
         return false;
     }
 
-    // LiDAR polling timer — fires every 200 ms from the executor thread.
-    // 200 ms is comfortably faster than the ~170 ms revolution period of the
-    // LYDSTO at nominal speed, so at most one scan is ever queued between polls.
+    // ── LiDAR polling timer ───────────────────────────────────────────────
+    // Period: 200 ms.  The LYDSTO at ~6 Hz revolution rate (170 ms/rev)
+    // produces one complete scan every ~170 ms.  200 ms polling means we
+    // pick up each scan within one timer period of completion.
+    //
+    // The timer callback is serialised by the executor so it never races
+    // with other callbacks or with heartbeatTimerCallback.
     r = rclc_timer_init_default(&lidar_timer_, &support_, RCL_MS_TO_NS(200),
                                  lidarTimerCallback);
     if (r != RCL_RET_OK) {
@@ -223,19 +242,43 @@ void MicrorosSync::heartbeatTimerCallback(rcl_timer_t*, int64_t) {
 // Called from rclc_executor_spin_some() — always on the microros_task thread,
 // never concurrently with other executor callbacks or publishers.
 //
-// The LidarScan struct is ~14 KB (2000 × uint16 + 2000 × uint8 + 2000 × float
-// + metadata).  Declaring it as a local would consume most of microros_task's
-// 24 576-byte stack, leaving almost no headroom for the XRCE serialisation
-// path and FreeRTOS overhead.  Making it static is safe here because:
-//   1. This callback is the ONLY writer of this variable.
-//   2. The executor guarantees sequential (non-reentrant) dispatch.
+// LidarScan is ~14 KB on the stack; declare static to avoid blowing the
+// 24 576-byte microros_task stack (14 KB scan + XRCE serialise buffer ≈ 18 KB
+// which leaves only ~6 KB for FreeRTOS overhead and nested calls).
+//
+// This is safe because:
+//   1. The executor guarantees sequential (non-reentrant) dispatch.
+//   2. lidar_get_latest_scan() copies the completed scan under its own mutex,
+//      so the static local is written to atomically from the caller's view.
 // ---------------------------------------------------------------------------
 void MicrorosSync::lidarTimerCallback(rcl_timer_t*, int64_t) {
     if (!instance_ || !instance_->isConnected()) return;
 
+    // Diagnostic: log when the lidar module is not yet running
+    static uint32_t s_not_running_log = 0;
+    if (!lidar_is_running()) {
+        if ((++s_not_running_log % 25) == 0) {
+            ESP_LOGW("MicrorosSync", "lidarTimer: lidar not running yet (check=%lu)", 
+                     (unsigned long)s_not_running_log);
+        }
+        return;
+    }
+
     static LidarScan scan;   // static: avoids ~14 KB stack allocation per call
+    static uint32_t s_no_scan_log = 0;
+
     if (lidar_get_latest_scan(scan)) {
+        ESP_LOGD("MicrorosSync", "lidarTimer: got scan pts=%u, publishing...", 
+                 (unsigned)scan.point_count);
+        s_no_scan_log = 0;
         instance_->lidar_.publishLidarScan(scan);
+    } else {
+        // Log periodically when no scan is available (expected during first revolution)
+        if ((++s_no_scan_log % 25) == 0) {
+            ESP_LOGD("MicrorosSync", "lidarTimer: no scan ready yet (polls=%lu, scan_count=%lu)",
+                     (unsigned long)s_no_scan_log,
+                     (unsigned long)lidar_get_scan_count());
+        }
     }
 }
 

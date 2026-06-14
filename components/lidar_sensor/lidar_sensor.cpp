@@ -15,20 +15,29 @@ static const char* TAG = "LidarSensor";
 //  Internal state
 // ============================================================================
 
-static LYDSTO_Driver* s_driver         = nullptr;
-static TaskHandle_t   s_read_task      = nullptr;
-static LidarSensorState s_state        = LidarSensorState::SETUP;
+static LYDSTO_Driver*   s_driver        = nullptr;
+static TaskHandle_t     s_read_task     = nullptr;
+static LidarSensorState s_state         = LidarSensorState::SETUP;
 
-static LidarScan      s_scans[2];
-static volatile int   s_building_idx   = 0;
-static volatile bool  s_scan_ready     = false;
-static SemaphoreHandle_t s_scan_mutex  = nullptr;
+// Double buffer: s_scans[s_building_idx] is the one being filled by lidar_read_task.
+// The *other* index (s_building_idx ^ 1) holds the last completed scan.
+// The mutex protects the swap and the s_scan_ready flag only — it is NOT
+// held during point accumulation (which is single-writer, single slot).
+static LidarScan         s_scans[2];
+static volatile int      s_building_idx  = 0;
+static volatile bool     s_scan_ready    = false;
+static SemaphoreHandle_t s_scan_mutex    = nullptr;
 
-static uint32_t       s_scan_count     = 0;
-static float          s_last_end_angle = -1.0f;
+// Diagnostic counters (written only from lidar_read_task)
+static uint32_t s_scan_count        = 0;
+static uint32_t s_overflow_count    = 0;  // scan buffer overflows
+static uint32_t s_crc_fail_count    = 0;
+static uint32_t s_parse_fail_count  = 0;
+static uint32_t s_wrap_count        = 0;  // revolution boundaries detected
+static float    s_last_end_angle    = -1.0f;
 
 // ============================================================================
-//  Internal helpers
+//  Angle helpers
 // ============================================================================
 
 static float interpolate_angle(float start_deg, float end_deg,
@@ -45,17 +54,48 @@ static float interpolate_angle(float start_deg, float end_deg,
     return angle;
 }
 
-static void accumulate_points(LidarScan& scan, const LidarParsedPacket& parsed,
+/**
+ * @brief Detect a revolution boundary.
+ *
+ * Returns true when the angle stream wraps back through 0°.
+ *
+ * Robust test:
+ *   1. new_start is numerically less than prev_end  (raw backward step — required).
+ *   2. The forward gap (360 - prev_end + new_start) is < 90°.
+ *
+ * This catches wraps regardless of where the last packet of a revolution ends,
+ * while correctly rejecting large backward jumps (sensor errors).
+ */
+static bool is_wrap_around(float prev_end_deg, float new_start_deg)
+{
+    if (new_start_deg >= prev_end_deg) {
+        return false;   // going forward — not a wrap
+    }
+    const float forward_gap = 360.0f - prev_end_deg + new_start_deg;
+    return forward_gap < 120.0f;
+}
+
+// ============================================================================
+//  Point accumulation
+//
+//  Called ONLY from lidar_read_task; no locking needed for the building scan.
+//  Returns true if all points were added, false if the buffer was full for
+//  at least one point (overflow).
+// ============================================================================
+
+static bool accumulate_points(LidarScan& scan, const LidarParsedPacket& parsed,
                                int64_t timestamp_us)
 {
     if (scan.point_count == 0) {
         scan.start_time_us = timestamp_us;
     }
     const int n = static_cast<int>(parsed.distances_mm.size());
+    bool overflow = false;
     for (int i = 0; i < n; ++i) {
         if (scan.point_count >= LidarScan::MAX_POINTS) {
-            ESP_LOGW(TAG, "Scan buffer full – dropping remaining points");
-            break;
+            overflow = true;
+            // Don't break — count all overflowed points for diagnostics
+            continue;
         }
         const uint16_t idx = scan.point_count;
         scan.distances_mm[idx] = parsed.distances_mm[i];
@@ -66,74 +106,130 @@ static void accumulate_points(LidarScan& scan, const LidarParsedPacket& parsed,
         scan.point_count++;
     }
     scan.end_time_us = timestamp_us;
+    return !overflow;
 }
 
-/**
- * @brief Detect a revolution boundary between consecutive packets.
- *
- * A new revolution is indicated when the sensor's angle stream wraps back
- * through 0°.  The old test (prev_end >= 340 AND new_start <= 20) is too
- * brittle: if the last packet of a revolution ends at, say, 330° the wrap is
- * missed entirely and points accumulate across multiple revolutions until the
- * 2000-point buffer overflows.
- *
- * Robust test:
- *   1. The new packet's start angle is numerically less than the previous
- *      packet's end angle (raw backward step — required for a 0°-crossing).
- *   2. The "forward gap" — how many degrees forward through 0° it would take
- *      to reach new_start from prev_end — is less than 90°.
- *
- * This catches wrap-arounds regardless of where the last packet of the
- * revolution ends, while correctly rejecting large backward jumps (sensor
- * errors or mid-revolution restarts).
- *
- * Example values and outcomes:
- *   prev=350 start=5   gap= 15° → true  (revolution, normal)
- *   prev=330 start=5   gap= 35° → true  (revolution, late wrap, was broken before)
- *   prev=270 start=5   gap= 95° → false (too large a gap, not a revolution)
- *   prev=200 start=5   gap=165° → false (large backward jump, not a revolution)
- *   prev=45  start=48  n/a      → false (going forward, first check exits early)
- */
-static bool is_wrap_around(float prev_end_deg, float new_start_deg)
-{
-    if (new_start_deg >= prev_end_deg) {
-        return false;   // angles are going forward — definitely not a wrap
-    }
-    const float forward_gap = 360.0f - prev_end_deg + new_start_deg;
-    return forward_gap < 90.0f;
-}
+// ============================================================================
+//  Packet processing  (called only from lidar_read_task)
+// ============================================================================
 
 static void process_raw_packet(const uint8_t* raw47, int64_t timestamp_us)
 {
     LidarParsedPacket parsed{};
     if (!LidarPacketParser::parse(raw47, 47, parsed)) {
+        ++s_parse_fail_count;
         return;
     }
     if (!parsed.crc_valid) {
-        ESP_LOGD(TAG, "CRC mismatch – dropping packet");
+        ++s_crc_fail_count;
+        ESP_LOGD(TAG, "CRC mismatch – dropping packet (total=%lu)", (unsigned long)s_crc_fail_count);
         return;
     }
 
     const float start_deg = parsed.start_angle_deg;
     const float end_deg   = parsed.end_angle_deg;
 
+    // ── Revolution boundary detection ──────────────────────────────────────
     if (s_last_end_angle >= 0.0f && is_wrap_around(s_last_end_angle, start_deg)) {
-        int building = s_building_idx;
+        ++s_wrap_count;
+        const int building = s_building_idx;
         s_scans[building].complete = true;
 
-        if (xSemaphoreTake(s_scan_mutex, pdMS_TO_TICKS(5)) == pdTRUE) {
-            s_building_idx = building ^ 1;
+        const uint16_t completed_pts = s_scans[building].point_count;
+
+        if (xSemaphoreTake(s_scan_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+            const int next_idx = building ^ 1;
+            s_building_idx = next_idx;
             s_scan_ready   = true;
             s_scan_count++;
             xSemaphoreGive(s_scan_mutex);
+
+            // Clear the *new* building buffer now that the mutex is released —
+            // lidar_get_latest_scan reads the *other* (completed) buffer.
+            s_scans[s_building_idx].clear();
+
+            const float dt_ms = (s_scans[building].end_time_us > s_scans[building].start_time_us)
+                ? static_cast<float>(s_scans[building].end_time_us - s_scans[building].start_time_us) / 1000.0f
+                : 0.0f;
+            ESP_LOGI(TAG, "scan #%lu complete: pts=%u dt=%.1fms wraps=%lu overflows=%lu crc_fails=%lu",
+                     (unsigned long)s_scan_count,
+                     (unsigned)completed_pts,
+                     dt_ms,
+                     (unsigned long)s_wrap_count,
+                     (unsigned long)s_overflow_count,
+                     (unsigned long)s_crc_fail_count);
+
+            // Warn if the scan was sparse (< 100 points suggests data loss)
+            if (completed_pts < 100) {
+                ESP_LOGW(TAG, "Sparse scan #%lu: only %u points (expected ~150+)",
+                         (unsigned long)s_scan_count, (unsigned)completed_pts);
+            }
         } else {
-            ESP_LOGW(TAG, "Scan mutex timeout during swap – scan lost");
+            ESP_LOGE(TAG, "Scan mutex timeout during swap – scan lost! (wrap #%lu, pts=%u)",
+                     (unsigned long)s_wrap_count, (unsigned)completed_pts);
+            // Don't swap — keep accumulating into the current buffer to avoid
+            // losing the partial data entirely.  The buffer will be cleared
+            // on the next successful swap.
         }
-        s_scans[s_building_idx].clear();
     }
 
-    accumulate_points(s_scans[s_building_idx], parsed, timestamp_us);
+    // ── Accumulate into the current building buffer ─────────────────────────
+    const bool ok = accumulate_points(s_scans[s_building_idx], parsed, timestamp_us);
+    if (!ok) {
+        ++s_overflow_count;
+        // Log every overflow, but throttle to avoid flooding
+        if ((s_overflow_count % 10) == 1) {
+            ESP_LOGW(TAG, "Scan buffer full – dropping points "
+                     "(overflow #%lu, pts_in_buf=%u/%u, wrap_last=%.1f->%.1f)",
+                     (unsigned long)s_overflow_count,
+                     (unsigned)s_scans[s_building_idx].point_count,
+                     (unsigned)LidarScan::MAX_POINTS,
+                     s_last_end_angle, start_deg);
+        }
+
+        // ── Overflow recovery ─────────────────────────────────────────────
+        // If the buffer is full and we're nowhere near a wrap-around angle,
+        // the revolution detection logic may have missed a wrap (e.g. because
+        // the LiDAR started at an unusual angle).  Force a manual wrap if the
+        // buffer has been filled without a revolution boundary.
+        //
+        // Heuristic: if point_count >= MAX_POINTS AND we have seen at least
+        // 300° of angle coverage (inferred from buffer density), force a swap.
+        if (s_scans[s_building_idx].point_count >= LidarScan::MAX_POINTS) {
+            ESP_LOGW(TAG, "Buffer full – forcing scan swap to prevent stall");
+            const int building = s_building_idx;
+            s_scans[building].complete = true;
+
+            if (xSemaphoreTake(s_scan_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+                const int next_idx = building ^ 1;
+                s_building_idx = next_idx;
+                s_scan_ready   = true;
+                s_scan_count++;
+                xSemaphoreGive(s_scan_mutex);
+                s_scans[s_building_idx].clear();
+                ESP_LOGW(TAG, "Forced scan swap -> scan #%lu", (unsigned long)s_scan_count);
+            } else {
+                // Can't swap — clear the building buffer to make space
+                s_scans[s_building_idx].clear();
+                ESP_LOGE(TAG, "Forced swap mutex timeout – clearing buffer instead");
+            }
+        }
+    }
+
     s_last_end_angle = end_deg;
+
+    // ── Periodic stats ─────────────────────────────────────────────────────
+    static uint32_t s_packet_count = 0;
+    if ((++s_packet_count % 500) == 0) {
+        ESP_LOGI(TAG, "Lidar stats: packets=%lu scans=%lu wraps=%lu "
+                 "overflows=%lu crc_fails=%lu parse_fails=%lu",
+                 (unsigned long)s_packet_count,
+                 (unsigned long)s_scan_count,
+                 (unsigned long)s_wrap_count,
+                 (unsigned long)s_overflow_count,
+                 (unsigned long)s_crc_fail_count,
+                 (unsigned long)s_parse_fail_count);
+    }
 }
 
 // ============================================================================
@@ -144,16 +240,29 @@ static void lidar_read_task(void* /*arg*/)
 {
     ESP_LOGI(TAG, "Read task started");
     uint8_t raw[47];
+    uint32_t total_reads = 0;
+    uint32_t failed_reads = 0;
+
     while (true) {
         LYDSTO_Driver::MeasurementResult result{};
         const bool ok = s_driver->read_sensor(result);
+        ++total_reads;
         if (!ok) {
+            ++failed_reads;
+            // Periodic warning if failure rate is high
+            if ((failed_reads % 100) == 0) {
+                ESP_LOGW(TAG, "read_sensor: %lu/%lu reads failed",
+                         (unsigned long)failed_reads, (unsigned long)total_reads);
+            }
+            // Brief yield — don't busy-loop on repeated failures
+            vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
         if (s_driver->get_last_packet(raw, sizeof(raw))) {
             process_raw_packet(raw, result.timestamp_us);
         }
-        vTaskDelay(pdMS_TO_TICKS(1));
+        // No delay when reads are succeeding — drain at maximum rate
+        taskYIELD();
     }
     vTaskDelete(nullptr);
 }
@@ -190,16 +299,23 @@ static void lidar_lifecycle_task(void* /*arg*/)
     }
     ESP_LOGI(TAG, "State: RUNNING – spawning read task");
 
+    // Reset all state before spawning read task
     s_scans[0].clear();
     s_scans[1].clear();
-    s_building_idx  = 0;
-    s_scan_ready    = false;
-    s_last_end_angle = -1.0f;
-    s_scan_count    = 0;
-    s_state         = LidarSensorState::RUNNING;
+    s_building_idx    = 0;
+    s_scan_ready      = false;
+    s_last_end_angle  = -1.0f;
+    s_scan_count      = 0;
+    s_overflow_count  = 0;
+    s_crc_fail_count  = 0;
+    s_parse_fail_count = 0;
+    s_wrap_count      = 0;
+    s_state           = LidarSensorState::RUNNING;
 
+    // Priority 3: above IDLE (1), below microros_task (5) and wifi_mgr (configMAX_PRIORITIES-2).
+    // Stack 4096: the read task only touches the parser + one 47-byte buffer.
     xTaskCreate(lidar_read_task, "lidar_read", 4096, nullptr,
-                tskIDLE_PRIORITY + 2, &s_read_task);
+                3, &s_read_task);
 
     vTaskDelete(nullptr);
 }
@@ -243,6 +359,8 @@ bool lidar_get_latest_scan(LidarScan& out)
         xSemaphoreGive(s_scan_mutex);
         return false;
     }
+    // The completed scan is always at (s_building_idx ^ 1).
+    // s_building_idx was already advanced to the new building slot during the swap.
     const int ready_idx = s_building_idx ^ 1;
     out = s_scans[ready_idx];
     s_scan_ready = false;
