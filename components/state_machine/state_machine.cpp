@@ -153,7 +153,7 @@ bool StateMachine::waitForPrerequisites(const std::string& module,
 }
 
 // ---------------------------------------------------------------------------
-// changeState (private – only called by advance() and recover())
+// changeState
 // ---------------------------------------------------------------------------
 bool StateMachine::changeState(const std::string& module,
                                const std::string& new_state,
@@ -222,6 +222,24 @@ const std::string& StateMachine::getState(const std::string& module) {
 }
 
 // ---------------------------------------------------------------------------
+// getOrderedStates — local helper mapping module name to its ordered state list.
+// Used by both advance() overloads to eliminate the duplicated else-if chain.
+// Returns empty vector for unknown modules (caller must handle).
+// ---------------------------------------------------------------------------
+static std::vector<std::string> getOrderedStates(const std::string& module) {
+    if      (module == "shelfbot")        return orderedStates(ShelfbotState());
+    else if (module == "led_control")     return orderedStates(LedControlState());
+    else if (module == "motor_control")   return orderedStates(MotorControlState());
+    else if (module == "wifi_manager")    return orderedStates(WifiManagerState());
+    else if (module == "network_service") return orderedStates(NetworkServiceState());
+    else if (module == "microros_sync")   return orderedStates(MicrorosState());
+    else if (module == "agent")           return orderedStates(AgentState());
+    else if (module == "time_sync")       return orderedStates(TimeSyncState());
+    else if (module == "lidar_sensor")    return orderedStates(LidarSensorState());
+    return {};
+}
+
+// ---------------------------------------------------------------------------
 // advance (all modules)
 // ---------------------------------------------------------------------------
 void StateMachine::advance() {
@@ -233,26 +251,19 @@ void StateMachine::advance() {
     do {
         changed = false;
         for (auto& kv : modules_) {
-            const std::string& module = kv.first;
-            ModuleState& mod_state = kv.second;
+            const std::string& module  = kv.first;
+            ModuleState&       mod_state = kv.second;
             const std::string& current = mod_state.current_state;
 
-            std::vector<std::string> ordered;
-            if (module == "shelfbot")             ordered = orderedStates(ShelfbotState());
-            else if (module == "led_control")     ordered = orderedStates(LedControlState());
-            else if (module == "motor_control")   ordered = orderedStates(MotorControlState());
-            else if (module == "wifi_manager")    ordered = orderedStates(WifiManagerState());
-            else if (module == "network_service") ordered = orderedStates(NetworkServiceState());
-            else if (module == "microros_sync")   ordered = orderedStates(MicrorosState());
-            else if (module == "agent")           ordered = orderedStates(AgentState());
-            else if (module == "time_sync")       ordered = orderedStates(TimeSyncState());
+            const std::vector<std::string> ordered = getOrderedStates(module);
+            if (ordered.empty()) continue;
 
             int cur_idx = -1;
             for (size_t i = 0; i < ordered.size(); ++i)
-                if (ordered[i] == current) { cur_idx = i; break; }
+                if (ordered[i] == current) { cur_idx = (int)i; break; }
             if (cur_idx < 0) continue;
 
-            for (size_t next_idx = cur_idx + 1; next_idx < ordered.size(); ++next_idx) {
+            for (size_t next_idx = (size_t)cur_idx + 1; next_idx < ordered.size(); ++next_idx) {
                 const std::string& next_state = ordered[next_idx];
                 if (!prereqsSatisfied_locked(module, next_state)) continue;
                 if (!::is_allowed_transition(module, next_state, current_map)) continue;
@@ -281,26 +292,21 @@ void StateMachine::advance(const std::string& module) {
         return;
     }
 
-    ModuleState& mod_state = it->second;
-    const std::string& current = mod_state.current_state;
+    ModuleState&       mod_state = it->second;
+    const std::string& current   = mod_state.current_state;
 
-    std::vector<std::string> ordered;
-    if (module == "shelfbot")          ordered = orderedStates(ShelfbotState());
-    else if (module == "led_control")  ordered = orderedStates(LedControlState());
-    else if (module == "motor_control")ordered = orderedStates(MotorControlState());
-    else if (module == "wifi_manager") ordered = orderedStates(WifiManagerState());
-    else if (module == "network_service") ordered = orderedStates(NetworkServiceState());
-    else if (module == "microros_sync")ordered = orderedStates(MicrorosState());
-    else if (module == "agent")        ordered = orderedStates(AgentState());
-    else if (module == "time_sync")    ordered = orderedStates(TimeSyncState());
-    else return;
+    const std::vector<std::string> ordered = getOrderedStates(module);
+    if (ordered.empty()) {
+        ESP_LOGW(TAG, "advance: module '%s' has no ordered state list", module.c_str());
+        return;
+    }
 
     int cur_idx = -1;
     for (size_t i = 0; i < ordered.size(); ++i)
-        if (ordered[i] == current) { cur_idx = i; break; }
+        if (ordered[i] == current) { cur_idx = (int)i; break; }
     if (cur_idx < 0) return;
 
-    for (size_t next_idx = cur_idx + 1; next_idx < ordered.size(); ++next_idx) {
+    for (size_t next_idx = (size_t)cur_idx + 1; next_idx < ordered.size(); ++next_idx) {
         const std::string& next_state = ordered[next_idx];
         if (!prereqsSatisfied_locked(module, next_state)) continue;
         if (!::is_allowed_transition(module, next_state, current_map)) continue;
@@ -312,25 +318,24 @@ void StateMachine::advance(const std::string& module) {
 }
 
 // ---------------------------------------------------------------------------
-// recover – reset error/recovery states
+// recover — reset error/recovery states
 // ---------------------------------------------------------------------------
 void StateMachine::recover() {
     std::lock_guard<std::mutex> lock(mutex_);
 
     for (auto& kv : modules_) {
         const std::string& module = kv.first;
-        const std::string& state = kv.second.current_state;
+        const std::string& state  = kv.second.current_state;
 
-      // AFTER:
-      if (module == "microros_sync" &&
-          (state == "error" || state == "recovering" ||
-           state == "creating_entities" || state == "connected")) {
-        changeState(module, "disconnected", true);
-        // agent is owned by microros_sync — reset it too so DISCOVERING restarts cleanly
-        auto it_agent = modules_.find("agent");
-        if (it_agent != modules_.end() && it_agent->second.current_state != "offline") {
-          changeState("agent", "offline", true);
-           }
+        if (module == "microros_sync" &&
+            (state == "error" || state == "recovering" ||
+             state == "creating_entities" || state == "connected")) {
+            changeState(module, "disconnected", true);
+            // agent is owned by microros_sync — reset it so DISCOVERING restarts cleanly
+            auto it_agent = modules_.find("agent");
+            if (it_agent != modules_.end() && it_agent->second.current_state != "offline") {
+                changeState("agent", "offline", true);
+            }
         } else if (module == "agent" && state == "error") {
             changeState(module, "offline", true);
         } else if (module == "network_service" && state == "error") {
@@ -338,6 +343,9 @@ void StateMachine::recover() {
         } else if (module == "wifi_manager" && state == "error") {
             changeState(module, "disconnected", true);
         } else if (module == "shelfbot" && state == "error") {
+            changeState(module, "setup", true);
+        } else if (module == "lidar_sensor" && state == "error") {
+            // Reset to setup so lidar_lifecycle_task restarts driver initialisation.
             changeState(module, "setup", true);
         }
     }

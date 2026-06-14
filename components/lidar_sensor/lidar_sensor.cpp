@@ -28,7 +28,7 @@ static uint32_t       s_scan_count     = 0;
 static float          s_last_end_angle = -1.0f;
 
 // ============================================================================
-//  Internal helpers (unchanged)
+//  Internal helpers
 // ============================================================================
 
 static float interpolate_angle(float start_deg, float end_deg,
@@ -68,9 +68,39 @@ static void accumulate_points(LidarScan& scan, const LidarParsedPacket& parsed,
     scan.end_time_us = timestamp_us;
 }
 
+/**
+ * @brief Detect a revolution boundary between consecutive packets.
+ *
+ * A new revolution is indicated when the sensor's angle stream wraps back
+ * through 0°.  The old test (prev_end >= 340 AND new_start <= 20) is too
+ * brittle: if the last packet of a revolution ends at, say, 330° the wrap is
+ * missed entirely and points accumulate across multiple revolutions until the
+ * 2000-point buffer overflows.
+ *
+ * Robust test:
+ *   1. The new packet's start angle is numerically less than the previous
+ *      packet's end angle (raw backward step — required for a 0°-crossing).
+ *   2. The "forward gap" — how many degrees forward through 0° it would take
+ *      to reach new_start from prev_end — is less than 90°.
+ *
+ * This catches wrap-arounds regardless of where the last packet of the
+ * revolution ends, while correctly rejecting large backward jumps (sensor
+ * errors or mid-revolution restarts).
+ *
+ * Example values and outcomes:
+ *   prev=350 start=5   gap= 15° → true  (revolution, normal)
+ *   prev=330 start=5   gap= 35° → true  (revolution, late wrap, was broken before)
+ *   prev=270 start=5   gap= 95° → false (too large a gap, not a revolution)
+ *   prev=200 start=5   gap=165° → false (large backward jump, not a revolution)
+ *   prev=45  start=48  n/a      → false (going forward, first check exits early)
+ */
 static bool is_wrap_around(float prev_end_deg, float new_start_deg)
 {
-    return (prev_end_deg >= 340.0f && new_start_deg <= 20.0f);
+    if (new_start_deg >= prev_end_deg) {
+        return false;   // angles are going forward — definitely not a wrap
+    }
+    const float forward_gap = 360.0f - prev_end_deg + new_start_deg;
+    return forward_gap < 90.0f;
 }
 
 static void process_raw_packet(const uint8_t* raw47, int64_t timestamp_us)

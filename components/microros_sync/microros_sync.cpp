@@ -3,10 +3,10 @@
 #include <firmware_version.hpp>
 #include <state_machine.hpp>
 #include <state_machine_lifecycle.hpp>
-#include <rmw_microros/rmw_microros.h>
+#include <rmw_microros.h>
 #include <esp_log.h>
 #include <cstring>
-#include <lidar_sensor.hpp>  // ADDED for lidar_get_latest_scan
+#include <lidar_sensor.hpp>
 
 static const char* TAG = "MicrorosSync";
 MicrorosSync* MicrorosSync::instance_ = nullptr;
@@ -42,7 +42,7 @@ MicrorosSync::MicrorosSync()
     std_msgs__msg__Int32__init(&heartbeat_msg_);
     heartbeat_pub_   = rcl_get_zero_initialized_publisher();
     heartbeat_timer_ = rcl_get_zero_initialized_timer();
-    lidar_timer_     = rcl_get_zero_initialized_timer(); // ADDED
+    lidar_timer_     = rcl_get_zero_initialized_timer();
 }
 
 MicrorosSync::~MicrorosSync() {
@@ -98,6 +98,7 @@ void MicrorosSync::logMicrorosLimits() {
     ESP_LOGI(TAG, "RMW_UXRCE_MAX_SERVICES     = %d", RMW_UXRCE_MAX_SERVICES);
     ESP_LOGI(TAG, "RMW_UXRCE_MAX_CLIENTS      = %d", RMW_UXRCE_MAX_CLIENTS);
     ESP_LOGI(TAG, "RMW_UXRCE_MAX_HISTORY      = %d", RMW_UXRCE_MAX_HISTORY);
+    //ESP_LOGI(TAG, "DRMW_UXRCE_MAX_MESSAGE_SIZE= %d", DRMW_UXRCE_MAX_MESSAGE_SIZE);
     ESP_LOGI(TAG, "====================================");
 }
 
@@ -108,7 +109,7 @@ bool MicrorosSync::createEntitiesImpl() {
     executor_        = rclc_executor_get_zero_initialized_executor();
     heartbeat_pub_   = rcl_get_zero_initialized_publisher();
     heartbeat_timer_ = rcl_get_zero_initialized_timer();
-    lidar_timer_     = rcl_get_zero_initialized_timer(); // ADDED
+    lidar_timer_     = rcl_get_zero_initialized_timer();
 
     rcl_ret_t r;
     r = rclc_node_init_default(&node_, "shelfbot_firmware", "", &support_);
@@ -152,8 +153,11 @@ bool MicrorosSync::createEntitiesImpl() {
         return false;
     }
 
-    // ADDED: LiDAR timer (200 ms)
-    r = rclc_timer_init_default(&lidar_timer_, &support_, RCL_MS_TO_NS(200), lidarTimerCallback);
+    // LiDAR polling timer — fires every 200 ms from the executor thread.
+    // 200 ms is comfortably faster than the ~170 ms revolution period of the
+    // LYDSTO at nominal speed, so at most one scan is ever queued between polls.
+    r = rclc_timer_init_default(&lidar_timer_, &support_, RCL_MS_TO_NS(200),
+                                 lidarTimerCallback);
     if (r != RCL_RET_OK) {
         ESP_LOGE(TAG, "lidar timer init failed: %ld", (long)r);
         return false;
@@ -181,7 +185,7 @@ void MicrorosSync::destroyEntitiesImpl() {
     if (r != RCL_RET_OK) ESP_LOGW(TAG, "heartbeat_pub fini: %ld", (long)r);
     r = rcl_timer_fini(&heartbeat_timer_);
     if (r != RCL_RET_OK) ESP_LOGW(TAG, "heartbeat_timer fini: %ld", (long)r);
-    r = rcl_timer_fini(&lidar_timer_); // ADDED
+    r = rcl_timer_fini(&lidar_timer_);
     if (r != RCL_RET_OK) ESP_LOGW(TAG, "lidar_timer fini: %ld", (long)r);
     r = rclc_executor_fini(&executor_);
     if (r != RCL_RET_OK) ESP_LOGW(TAG, "executor fini: %ld", (long)r);
@@ -192,7 +196,7 @@ void MicrorosSync::destroyEntitiesImpl() {
     executor_        = rclc_executor_get_zero_initialized_executor();
     heartbeat_pub_   = rcl_get_zero_initialized_publisher();
     heartbeat_timer_ = rcl_get_zero_initialized_timer();
-    lidar_timer_     = rcl_get_zero_initialized_timer(); // ADDED
+    lidar_timer_     = rcl_get_zero_initialized_timer();
 
     if (support_inited_) {
         r = rclc_support_fini(&support_);
@@ -213,10 +217,23 @@ void MicrorosSync::heartbeatTimerCallback(rcl_timer_t*, int64_t) {
     publish_or_fail(&instance_->heartbeat_pub_, &instance_->heartbeat_msg_, "heartbeat");
 }
 
-// ADDED: LiDAR timer callback
+// ---------------------------------------------------------------------------
+// lidarTimerCallback
+//
+// Called from rclc_executor_spin_some() — always on the microros_task thread,
+// never concurrently with other executor callbacks or publishers.
+//
+// The LidarScan struct is ~14 KB (2000 × uint16 + 2000 × uint8 + 2000 × float
+// + metadata).  Declaring it as a local would consume most of microros_task's
+// 24 576-byte stack, leaving almost no headroom for the XRCE serialisation
+// path and FreeRTOS overhead.  Making it static is safe here because:
+//   1. This callback is the ONLY writer of this variable.
+//   2. The executor guarantees sequential (non-reentrant) dispatch.
+// ---------------------------------------------------------------------------
 void MicrorosSync::lidarTimerCallback(rcl_timer_t*, int64_t) {
     if (!instance_ || !instance_->isConnected()) return;
-    LidarScan scan;
+
+    static LidarScan scan;   // static: avoids ~14 KB stack allocation per call
     if (lidar_get_latest_scan(scan)) {
         instance_->lidar_.publishLidarScan(scan);
     }
