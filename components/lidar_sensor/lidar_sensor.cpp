@@ -9,134 +9,166 @@
 #include <freertos/semphr.h>
 #include <cstring>
 
-static const char* TAG     = "LidarSensor";
-static const char* TAG_RAW = "raw_lidar";
+static const char* TAG = "LidarSensor";
+
+// ============================================================================
+//  Timing constants
+// ============================================================================
+
+// Expected revolution period at nominal 6 Hz.
+static constexpr int64_t REVOLUTION_PERIOD_US = 167000LL;  // 167 ms
+
+// Force scan completion if the building buffer has been accumulating for
+// longer than this.  1.5× revolution period leaves enough headroom for the
+// sensor to run slightly slow while still catching a missed angular wrap.
+// If CRC failures cause the angular wrap to be missed, this ensures we never
+// accumulate more than ~1.5 revolutions into one scan.
+static constexpr int64_t MAX_SCAN_DURATION_US = (REVOLUTION_PERIOD_US * 3) / 2;  // 250 ms
 
 // ============================================================================
 //  Internal state
 // ============================================================================
 
-static LYDSTO_Driver*    s_driver       = nullptr;
-static TaskHandle_t      s_read_task    = nullptr;
-static LidarSensorState  s_state        = LidarSensorState::SETUP;
+static LYDSTO_Driver*   s_driver        = nullptr;
+static TaskHandle_t     s_read_task     = nullptr;
+static LidarSensorState s_state         = LidarSensorState::SETUP;
 
+// Double buffer: s_scans[s_building_idx] is the one being filled by lidar_read_task.
+// The *other* index (s_building_idx ^ 1) holds the last completed scan.
+// The mutex protects the swap and the s_scan_ready flag only — it is NOT
+// held during point accumulation (which is single-writer, single slot).
 static LidarScan         s_scans[2];
-static volatile int      s_building_idx = 0;
-static volatile bool     s_scan_ready   = false;
-static SemaphoreHandle_t s_scan_mutex   = nullptr;
+static volatile int      s_building_idx  = 0;
+static volatile bool     s_scan_ready    = false;
+static SemaphoreHandle_t s_scan_mutex    = nullptr;
 
-// Diagnostic counters
-static uint32_t s_scan_count      = 0;
-static uint32_t s_overflow_count  = 0;
-static uint32_t s_crc_fail_count  = 0;
-static uint32_t s_parse_fail_count = 0;
-static uint32_t s_wrap_count      = 0;
-
-// ============================================================================
-//  Timestamp-based angular velocity tracker
-//
-//  Why timestamps instead of the encoder angle pair for per-measurement angles:
-//
-//  The LYDSTO sends one start_angle and one end_angle for a batch of 12
-//  measurements.  Dividing the arc evenly across 12 samples (uniform
-//  reconstruction) is correct on average but carries the quantisation error
-//  of the encoder update rate (~13.8° per packet).  The sensor's internal
-//  clock, however, runs the motor at a stable speed — the angular velocity
-//  is nearly constant over many revolutions and can be estimated precisely
-//  from the wall-clock timestamps of successive revolution boundaries.
-//
-//  Once angular_velocity_deg_per_us is known, the angle of measurement i
-//  within a packet is:
-//
-//    angle_i = (t_packet_start + i * T_SAMPLE - t_revolution_start)
-//              × angular_velocity_deg_per_us
-//
-//  where T_SAMPLE = UART transmission time for one 3-byte sample:
-//    115200 baud, 10 bits/byte → 86.8 µs/byte → 3 bytes → ~260 µs/sample
-//
-//  This gives sub-packet angle resolution that improves with motor stability,
-//  independent of the encoder's angular quantisation.
-//
-//  Bootstrap: for the first revolution we have no angular velocity estimate.
-//  We fall back to uniform angular reconstruction from the encoder angles,
-//  identical to the previous behaviour, and switch to timestamp-based
-//  assignment once the first revolution completes.
-// ============================================================================
-
-// Time of the most recent revolution start (esp_timer_get_time(), microseconds)
-static int64_t  s_rev_start_us         = -1;
-// Estimated angular velocity from the last complete revolution (deg/µs)
-static float    s_ang_vel_deg_per_us   = 0.0f;
-// Whether we have a valid angular velocity estimate
-static bool     s_ang_vel_valid        = false;
-// Accumulated angle within the current revolution (used for wrap detection)
-static float    s_accumulated_deg      = 0.0f;
-// End angle of the previous packet (encoder value, for fallback and logging)
-static float    s_last_end_angle       = -1.0f;
-
-// UART: 115200 baud, 10 bits per byte (8N1).
-// One 3-byte measurement field takes 3 × (1/115200 × 10) = 260.4 µs.
-static constexpr float BYTES_PER_SAMPLE    = 3.0f;
-static constexpr float BAUD_RATE           = 115200.0f;
-static constexpr float US_PER_SAMPLE       =
-    BYTES_PER_SAMPLE * 10.0f / BAUD_RATE * 1e6f;   // ≈ 260 µs
+// Diagnostic counters (written only from lidar_read_task)
+static uint32_t s_scan_count        = 0;
+static uint32_t s_overflow_count    = 0;
+static uint32_t s_crc_fail_count    = 0;
+static uint32_t s_parse_fail_count  = 0;
+static uint32_t s_wrap_count        = 0;
+static uint32_t s_time_wrap_count   = 0;  // wraps triggered by time fallback
+static float    s_last_end_angle    = -1.0f;
 
 // ============================================================================
-//  Angle assignment
+//  Angle helpers
 // ============================================================================
+
+static float interpolate_angle(float start_deg, float end_deg,
+                                int sample_idx, int sample_count)
+{
+    if (sample_count <= 1) return start_deg;
+    float span = end_deg - start_deg;
+    if (span >  180.0f) span -= 360.0f;
+    if (span < -180.0f) span += 360.0f;
+    float angle = start_deg + span * static_cast<float>(sample_idx)
+                                   / static_cast<float>(sample_count - 1);
+    if (angle <   0.0f) angle += 360.0f;
+    if (angle >= 360.0f) angle -= 360.0f;
+    return angle;
+}
 
 /**
- * @brief Assign physical angles to all 12 measurements in a packet.
+ * @brief Detect a revolution boundary between consecutive packets.
  *
- * Primary method (when angular velocity is known):
- *   Uses the wall-clock timestamp of the packet read and the estimated
- *   angular velocity to place each measurement at its true angular position
- *   within the current revolution.
+ * The LYDSTO sends packets with monotonically increasing start_angle.
+ * A revolution completes when start_angle wraps back past 0°, which appears
+ * as new_start_deg < prev_end_deg in the angle stream.
  *
- * Fallback (first revolution, no velocity estimate):
- *   Uniformly reconstructs angles from the encoder-reported start/end pair.
- *   This is NOT interpolation between estimated values — the start/end angles
- *   are the encoder's record of where the batch began and ended; distributing
- *   12 samples uniformly between them recovers the physically correct angles
- *   because the sensor hardware samples at equal angular intervals.
+ * THRESHOLD RATIONALE
+ * ───────────────────
+ * The angular gap threshold (forward_gap_limit) must be > 0° and < 360°.
+ * Too small: CRC packet loss near 0°/360° can produce a forward gap larger
+ *   than the threshold, causing wrap detection to MISS the revolution end.
+ *   Example: packets at 200°→255° arrive, then CRC failures eat 255°→360°→20°,
+ *   next valid packet at 20°: forward_gap = 360-255+20 = 125° > 120° → MISSED.
+ *   With 120° threshold at 6Hz and ~144 packets/rev, losing > 48 consecutive
+ *   packets (1/3 of a revolution) breaks detection.
+ * Too large (> 360°): impossible.
+ * Too close to 360° (e.g. 350°): an ordinary forward step of 2.5° between
+ *   adjacent packets in the SAME revolution could be mistaken for a wrap if
+ *   prev_end is very close to 0° (e.g. prev_end=2°, new_start=1° → ✓ wrap).
+ *   Actually, within-revolution steps are always FORWARD (new > prev), so they
+ *   never enter the wrap check at all (guarded by new_start < prev_end).
  *
- * @param parsed        Decoded packet (angles in degrees, timestamp in ms).
- * @param packet_time_us  Wall-clock time at which this packet was read
- *                        (esp_timer_get_time(), microseconds).
- * @param out_angles    Output array of 12 angles in degrees [0, 360).
+ * 300° allows up to 300° of consecutive CRC packet loss (83% of a revolution)
+ * while still correctly rejecting any in-revolution backward jitter.
+ * The only false-positive risk is a 60°+ backward jump within a revolution,
+ * which LYDSTO does not produce under normal operation.
  */
-static void assign_angles(const LidarParsedPacket& parsed,
-                           int64_t packet_time_us,
-                           float out_angles[12])
+static bool is_wrap_around(float prev_end_deg, float new_start_deg)
 {
-    if (s_ang_vel_valid && s_rev_start_us >= 0) {
-        // ── Primary: timestamp-based assignment ───────────────────────────
-        for (int i = 0; i < 12; ++i) {
-            const int64_t t_sample_us = packet_time_us +
-                static_cast<int64_t>(i * US_PER_SAMPLE);
-            float angle = static_cast<float>(t_sample_us - s_rev_start_us)
-                          * s_ang_vel_deg_per_us;
-            // Clamp to [0, 360) — small overshoots can occur near the boundary
-            while (angle >= 360.0f) angle -= 360.0f;
-            while (angle <    0.0f) angle += 360.0f;
-            out_angles[i] = angle;
+    // If the new packet starts at or after where the last one ended, we're
+    // still going forward in the same revolution — definitely not a wrap.
+    if (new_start_deg >= prev_end_deg) {
+        return false;
+    }
+    // The apparent backward step could be either:
+    //   (a) a genuine 360°→0° revolution wrap, or
+    //   (b) a large-gap backward anomaly from the sensor.
+    // We distinguish by the "forward arc distance" around the wrap point:
+    //   forward_gap = 360° - prev_end + new_start
+    // For a genuine wrap this is always the small gap (< one revolution).
+    // Threshold: allow up to 300° of packet loss around the wrap boundary.
+    static constexpr float WRAP_GAP_LIMIT_DEG = 300.0f;
+    const float forward_gap = 360.0f - prev_end_deg + new_start_deg;
+    return forward_gap < WRAP_GAP_LIMIT_DEG;
+}
+
+// ============================================================================
+//  Scan completion (common path for angular wrap and time-based fallback)
+// ============================================================================
+
+// Called only from lidar_read_task (single writer).
+// reason: "angular" or "time" for the log.
+static void complete_scan(const char* reason, float trigger_start_deg)
+{
+    const int building = s_building_idx;
+    s_scans[building].complete = true;
+
+    const uint16_t completed_pts = s_scans[building].point_count;
+    const float dt_ms = (s_scans[building].end_time_us > s_scans[building].start_time_us)
+        ? static_cast<float>(s_scans[building].end_time_us - s_scans[building].start_time_us)
+          / 1000.0f
+        : 0.0f;
+
+    if (xSemaphoreTake(s_scan_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
+        const int next_idx = building ^ 1;
+        s_building_idx = next_idx;
+        s_scan_ready   = true;
+        s_scan_count++;
+        xSemaphoreGive(s_scan_mutex);
+
+        // Clear the new building buffer now that the completed one is published.
+        s_scans[s_building_idx].clear();
+
+        ESP_LOGI(TAG,
+            "scan #%lu [%s] pts=%u dt=%.1fms last_end=%.1f° next_start=%.1f° "
+            "wraps=%lu time_wraps=%lu crc_fails=%lu overflows=%lu",
+            (unsigned long)s_scan_count, reason,
+            (unsigned)completed_pts, dt_ms,
+            s_last_end_angle, trigger_start_deg,
+            (unsigned long)s_wrap_count,
+            (unsigned long)s_time_wrap_count,
+            (unsigned long)s_crc_fail_count,
+            (unsigned long)s_overflow_count);
+
+        if (completed_pts < 100) {
+            ESP_LOGW(TAG,
+                "Sparse scan #%lu: only %u points (expected ~150+). "
+                "CRC fails=%lu — check UART signal integrity.",
+                (unsigned long)s_scan_count,
+                (unsigned)completed_pts,
+                (unsigned long)s_crc_fail_count);
         }
     } else {
-        // ── Fallback: uniform reconstruction from encoder angles ──────────
-        // The sensor records start_angle and end_angle from its optical
-        // encoder for the batch.  The 12 samples were taken at equal angular
-        // steps between these two positions — distributing them uniformly
-        // recovers the correct physical angles.
-        float span = parsed.end_angle_deg - parsed.start_angle_deg;
-        if (span >  180.0f) span -= 360.0f;
-        if (span < -180.0f) span += 360.0f;
-        for (int i = 0; i < 12; ++i) {
-            float angle = parsed.start_angle_deg +
-                span * static_cast<float>(i) / 11.0f;
-            while (angle >= 360.0f) angle -= 360.0f;
-            while (angle <    0.0f) angle += 360.0f;
-            out_angles[i] = angle;
-        }
+        ESP_LOGE(TAG,
+            "Scan mutex timeout during %s swap – scan lost! "
+            "(pts=%u last_end=%.1f° next_start=%.1f°)",
+            reason, (unsigned)completed_pts,
+            s_last_end_angle, trigger_start_deg);
+        // Don't swap — keep accumulating to avoid losing partial data.
     }
 }
 
@@ -145,91 +177,28 @@ static void assign_angles(const LidarParsedPacket& parsed,
 // ============================================================================
 
 static bool accumulate_points(LidarScan& scan, const LidarParsedPacket& parsed,
-                               const float angles_deg[12], int64_t timestamp_us)
+                               int64_t timestamp_us)
 {
     if (scan.point_count == 0) {
         scan.start_time_us = timestamp_us;
     }
+    const int n = static_cast<int>(parsed.distances_mm.size());
     bool overflow = false;
-    for (int i = 0; i < 12; ++i) {
+    for (int i = 0; i < n; ++i) {
         if (scan.point_count >= LidarScan::MAX_POINTS) {
             overflow = true;
             continue;
         }
-        const uint16_t idx     = scan.point_count;
+        const uint16_t idx = scan.point_count;
         scan.distances_mm[idx] = parsed.distances_mm[i];
         scan.confidences[idx]  = parsed.confidences[i];
-        scan.angles_deg[idx]   = angles_deg[i];
+        scan.angles_deg[idx]   = interpolate_angle(parsed.start_angle_deg,
+                                                    parsed.end_angle_deg,
+                                                    i, n);
         scan.point_count++;
     }
     scan.end_time_us = timestamp_us;
     return !overflow;
-}
-
-// ============================================================================
-//  Revolution boundary detection and swap
-// ============================================================================
-
-static void complete_revolution(int64_t wrap_time_us, uint16_t completed_pts)
-{
-    // Update angular velocity from this revolution's duration
-    if (s_rev_start_us >= 0) {
-        const int64_t rev_duration_us = wrap_time_us - s_rev_start_us;
-        if (rev_duration_us > 50000 && rev_duration_us < 500000) {
-            // Sanity: 50 ms < duration < 500 ms (2–20 Hz)
-            const float new_vel = 360.0f / static_cast<float>(rev_duration_us);
-            // Low-pass filter: blend 20% new, 80% old to damp noise
-            s_ang_vel_deg_per_us = s_ang_vel_valid
-                ? (0.8f * s_ang_vel_deg_per_us + 0.2f * new_vel)
-                : new_vel;
-            s_ang_vel_valid = true;
-
-            ESP_LOGD(TAG_RAW,
-                     "rev complete: dur=%lldus vel=%.4f deg/us pts=%u",
-                     (long long)rev_duration_us,
-                     s_ang_vel_deg_per_us,
-                     (unsigned)completed_pts);
-        } else {
-            ESP_LOGW(TAG, "Implausible revolution duration %lldus – ignoring",
-                     (long long)rev_duration_us);
-        }
-    }
-    s_rev_start_us      = wrap_time_us;
-    s_accumulated_deg   = 0.0f;
-
-    // Swap double buffer
-    const int building = s_building_idx;
-    s_scans[building].complete = true;
-
-    if (xSemaphoreTake(s_scan_mutex, pdMS_TO_TICKS(10)) == pdTRUE) {
-        s_building_idx = building ^ 1;
-        s_scan_ready   = true;
-        s_scan_count++;
-        xSemaphoreGive(s_scan_mutex);
-        s_scans[s_building_idx].clear();
-
-        const float dt_ms = (s_scans[building].end_time_us > s_scans[building].start_time_us)
-            ? static_cast<float>(s_scans[building].end_time_us -
-                                  s_scans[building].start_time_us) / 1000.0f
-            : 0.0f;
-        ESP_LOGI(TAG, "scan #%lu complete: pts=%u dt=%.1fms vel=%.4fdeg/us "
-                 "wraps=%lu overflows=%lu crc_fails=%lu",
-                 (unsigned long)s_scan_count,
-                 (unsigned)completed_pts,
-                 dt_ms,
-                 s_ang_vel_deg_per_us,
-                 (unsigned long)s_wrap_count,
-                 (unsigned long)s_overflow_count,
-                 (unsigned long)s_crc_fail_count);
-
-        if (completed_pts < 100) {
-            ESP_LOGW(TAG, "Sparse scan #%lu: only %u points (expected ~150+)",
-                     (unsigned long)s_scan_count, (unsigned)completed_pts);
-        }
-    } else {
-        ESP_LOGE(TAG, "Scan mutex timeout during swap – scan lost (wrap #%lu, pts=%u)",
-                 (unsigned long)s_wrap_count, (unsigned)completed_pts);
-    }
 }
 
 // ============================================================================
@@ -245,89 +214,86 @@ static void process_raw_packet(const uint8_t* raw47, int64_t timestamp_us)
     }
     if (!parsed.crc_valid) {
         ++s_crc_fail_count;
-        ESP_LOGD(TAG, "CRC mismatch – dropping (total=%lu)", (unsigned long)s_crc_fail_count);
+        ESP_LOGD(TAG, "CRC mismatch – dropping packet (total=%lu)",
+                 (unsigned long)s_crc_fail_count);
         return;
     }
 
-    // ── Assign angles ──────────────────────────────────────────────────────
-    float angles[12];
-    assign_angles(parsed, timestamp_us, angles);
+    const float start_deg = parsed.start_angle_deg;
+    const float end_deg   = parsed.end_angle_deg;
 
-    // ── Wrap detection ─────────────────────────────────────────────────────
-    // Primary: track accumulated angle within the revolution.
-    // When it reaches or exceeds 360° we have completed one revolution.
-    //
-    // The angular span of this packet (from encoder or from velocity estimate):
-    float pkt_span;
-    if (s_ang_vel_valid) {
-        // Use velocity × time for the 12-sample window
-        pkt_span = s_ang_vel_deg_per_us * (12.0f * US_PER_SAMPLE);
-    } else {
-        // Fallback: use encoder span, handling wrap
-        pkt_span = parsed.end_angle_deg - parsed.start_angle_deg;
-        if (pkt_span <   0.0f) pkt_span += 360.0f;
-        if (pkt_span > 180.0f) pkt_span  = 360.0f - pkt_span; // safety
-    }
-
-    // Also log encoder-based wrap signals for diagnostics
-    const bool encoder_wrap = (s_last_end_angle >= 0.0f) &&
-                              (parsed.start_angle_deg < s_last_end_angle) &&
-                              ((360.0f - s_last_end_angle + parsed.start_angle_deg) < 120.0f);
-
-    s_accumulated_deg += pkt_span;
-
-    const bool accumulated_wrap = (s_accumulated_deg >= 360.0f);
-
-    if (accumulated_wrap || encoder_wrap) {
-        if (accumulated_wrap != encoder_wrap) {
-            // Log when the two methods disagree — useful for tuning
-            ESP_LOGD(TAG_RAW,
-                     "wrap detection mismatch: accumulated=%s encoder=%s "
-                     "accum_deg=%.1f last_end=%.2f new_start=%.2f",
-                     accumulated_wrap ? "YES" : "no",
-                     encoder_wrap     ? "YES" : "no",
-                     s_accumulated_deg,
-                     s_last_end_angle,
-                     parsed.start_angle_deg);
-        }
+    // ── 1. Angular revolution boundary detection ──────────────────────────
+    if (s_last_end_angle >= 0.0f && is_wrap_around(s_last_end_angle, start_deg)) {
         ++s_wrap_count;
-        complete_revolution(timestamp_us, s_scans[s_building_idx].point_count);
+        complete_scan("angular", start_deg);
     }
 
-    s_last_end_angle = parsed.end_angle_deg;
+    // ── 2. Time-based fallback ────────────────────────────────────────────
+    // If no angular wrap was detected but the building scan has been running
+    // for longer than MAX_SCAN_DURATION_US, the wrap was likely missed due to
+    // CRC failures eating >300° of packets around the 0°/360° boundary.
+    // Force completion so we never accumulate more than ~1.5 revolutions.
+    //
+    // Only triggered if:
+    //   - We have at least a few points (scan is actually running), and
+    //   - The scan duration has exceeded the limit, and
+    //   - We have NOT already just done an angular wrap this packet (the
+    //     angular wrap check above already called complete_scan if needed).
+    else {
+        const int bidx = s_building_idx;
+        if (s_scans[bidx].point_count > 0 &&
+            s_scans[bidx].start_time_us > 0 &&
+            (timestamp_us - s_scans[bidx].start_time_us) > MAX_SCAN_DURATION_US)
+        {
+            ++s_time_wrap_count;
+            ESP_LOGW(TAG,
+                "Time-based scan wrap (scan_dur=%.1fms > %.1fms, "
+                "last_end=%.1f° cur_start=%.1f°, "
+                "pts=%u time_wraps=%lu)",
+                (float)(timestamp_us - s_scans[bidx].start_time_us) / 1000.0f,
+                (float)MAX_SCAN_DURATION_US / 1000.0f,
+                s_last_end_angle, start_deg,
+                (unsigned)s_scans[bidx].point_count,
+                (unsigned long)s_time_wrap_count);
+            complete_scan("time", start_deg);
+        }
+    }
 
-    // ── Accumulate points ─────────────────────────────────────────────────
-    const bool ok = accumulate_points(s_scans[s_building_idx], parsed,
-                                       angles, timestamp_us);
+    // ── 3. Accumulate into current building buffer ────────────────────────
+    const bool ok = accumulate_points(s_scans[s_building_idx], parsed, timestamp_us);
     if (!ok) {
         ++s_overflow_count;
         if ((s_overflow_count % 10) == 1) {
-            ESP_LOGW(TAG, "Scan buffer overflow #%lu (pts=%u/%u accum=%.1fdeg)",
-                     (unsigned long)s_overflow_count,
-                     (unsigned)s_scans[s_building_idx].point_count,
-                     (unsigned)LidarScan::MAX_POINTS,
-                     s_accumulated_deg);
+            ESP_LOGW(TAG,
+                "Scan buffer full (overflow #%lu, pts=%u/%u, "
+                "last_end=%.1f° cur_start=%.1f°) — forcing time wrap",
+                (unsigned long)s_overflow_count,
+                (unsigned)s_scans[s_building_idx].point_count,
+                (unsigned)LidarScan::MAX_POINTS,
+                s_last_end_angle, start_deg);
         }
-        // Force swap — buffer full
+        // Buffer full is also treated as a forced completion, same as time wrap.
         if (s_scans[s_building_idx].point_count >= LidarScan::MAX_POINTS) {
-            ESP_LOGW(TAG, "Buffer full – forcing scan swap");
-            ++s_wrap_count;
-            complete_revolution(timestamp_us, s_scans[s_building_idx].point_count);
+            ++s_time_wrap_count;
+            complete_scan("overflow", start_deg);
         }
     }
 
-    // ── Periodic stats ─────────────────────────────────────────────────────
+    s_last_end_angle = end_deg;
+
+    // ── 4. Periodic stats ─────────────────────────────────────────────────
     static uint32_t s_packet_count = 0;
     if ((++s_packet_count % 500) == 0) {
-        ESP_LOGI(TAG, "stats: pkts=%lu scans=%lu vel=%.4fdeg/us "
-                 "wraps=%lu overflows=%lu crc_fails=%lu parse_fails=%lu",
-                 (unsigned long)s_packet_count,
-                 (unsigned long)s_scan_count,
-                 s_ang_vel_deg_per_us,
-                 (unsigned long)s_wrap_count,
-                 (unsigned long)s_overflow_count,
-                 (unsigned long)s_crc_fail_count,
-                 (unsigned long)s_parse_fail_count);
+        ESP_LOGI(TAG,
+            "Lidar stats: packets=%lu scans=%lu wraps=%lu "
+            "time_wraps=%lu overflows=%lu crc_fails=%lu parse_fails=%lu",
+            (unsigned long)s_packet_count,
+            (unsigned long)s_scan_count,
+            (unsigned long)s_wrap_count,
+            (unsigned long)s_time_wrap_count,
+            (unsigned long)s_overflow_count,
+            (unsigned long)s_crc_fail_count,
+            (unsigned long)s_parse_fail_count);
     }
 }
 
@@ -338,25 +304,35 @@ static void process_raw_packet(const uint8_t* raw47, int64_t timestamp_us)
 static void lidar_read_task(void* /*arg*/)
 {
     ESP_LOGI(TAG, "Read task started");
-    uint8_t  raw[47];
+    uint8_t raw[47];
     uint32_t total_reads  = 0;
     uint32_t failed_reads = 0;
 
     while (true) {
         LYDSTO_Driver::MeasurementResult result{};
+
+        // Capture timestamp BEFORE the blocking read so that if read_sensor()
+        // blocks in phase 2 for up to 500ms, the timestamp still reflects
+        // approximately when we asked for data.  After the call succeeds we
+        // get the actual packet time from esp_timer.
         const bool ok = s_driver->read_sensor(result);
+        // Capture timestamp immediately after the read returns so it reflects
+        // when the packet was actually received (phase 1 path) or unblocked (phase 2).
+        const int64_t rx_time_us = esp_timer_get_time();
+
         ++total_reads;
         if (!ok) {
             ++failed_reads;
             if ((failed_reads % 100) == 0) {
-                ESP_LOGW(TAG, "read_sensor: %lu/%lu failed",
+                ESP_LOGW(TAG, "read_sensor: %lu/%lu reads failed",
                          (unsigned long)failed_reads, (unsigned long)total_reads);
             }
             vTaskDelay(pdMS_TO_TICKS(1));
             continue;
         }
+
         if (s_driver->get_last_packet(raw, sizeof(raw))) {
-            process_raw_packet(raw, result.timestamp_us);
+            process_raw_packet(raw, rx_time_us);
         }
         taskYIELD();
     }
@@ -383,7 +359,7 @@ static void lidar_lifecycle_task(void* /*arg*/)
         ESP_LOGE(TAG, "LYDSTO init failed: %s", init_err);
         delete s_driver;
         s_driver = nullptr;
-        s_state  = LidarSensorState::ERROR;
+        s_state = LidarSensorState::ERROR;
         StateMachine::recover();
         vTaskDelete(nullptr);
         return;
@@ -397,19 +373,16 @@ static void lidar_lifecycle_task(void* /*arg*/)
 
     s_scans[0].clear();
     s_scans[1].clear();
-    s_building_idx      = 0;
-    s_scan_ready        = false;
-    s_scan_count        = 0;
-    s_overflow_count    = 0;
-    s_crc_fail_count    = 0;
-    s_parse_fail_count  = 0;
-    s_wrap_count        = 0;
-    s_rev_start_us      = -1;
-    s_ang_vel_deg_per_us = 0.0f;
-    s_ang_vel_valid     = false;
-    s_accumulated_deg   = 0.0f;
-    s_last_end_angle    = -1.0f;
-    s_state             = LidarSensorState::RUNNING;
+    s_building_idx     = 0;
+    s_scan_ready       = false;
+    s_last_end_angle   = -1.0f;
+    s_scan_count       = 0;
+    s_overflow_count   = 0;
+    s_crc_fail_count   = 0;
+    s_parse_fail_count = 0;
+    s_wrap_count       = 0;
+    s_time_wrap_count  = 0;
+    s_state            = LidarSensorState::RUNNING;
 
     xTaskCreate(lidar_read_task, "lidar_read", 4096, nullptr, 3, &s_read_task);
     vTaskDelete(nullptr);
@@ -430,28 +403,48 @@ void lidar_setup()
 
 void lidar_stop()
 {
-    if (s_read_task) { vTaskDelete(s_read_task); s_read_task = nullptr; }
-    if (s_driver)    { delete s_driver;           s_driver    = nullptr; }
+    if (s_read_task) {
+        vTaskDelete(s_read_task);
+        s_read_task = nullptr;
+    }
+    if (s_driver) {
+        delete s_driver;
+        s_driver = nullptr;
+    }
     s_state = LidarSensorState::STOPPED;
     ESP_LOGI(TAG, "Stopped");
 }
 
-LidarSensorState lidar_get_state()  { return s_state; }
-bool             lidar_is_running() { return s_state == LidarSensorState::RUNNING; }
+LidarSensorState lidar_get_state() { return s_state; }
+bool lidar_is_running()            { return s_state == LidarSensorState::RUNNING; }
 
 bool lidar_get_latest_scan(LidarScan& out)
 {
     if (!s_scan_ready) return false;
     if (xSemaphoreTake(s_scan_mutex, pdMS_TO_TICKS(20)) != pdTRUE) return false;
-    if (!s_scan_ready) { xSemaphoreGive(s_scan_mutex); return false; }
-    out = s_scans[s_building_idx ^ 1];
+    if (!s_scan_ready) {
+        xSemaphoreGive(s_scan_mutex);
+        return false;
+    }
+    const int ready_idx = s_building_idx ^ 1;
+    out = s_scans[ready_idx];
     s_scan_ready = false;
     xSemaphoreGive(s_scan_mutex);
     return true;
 }
 
-bool     lidar_get_last_raw_packet(uint8_t* out, size_t len) {
-    return s_driver ? s_driver->get_last_packet(out, len) : false;
+bool lidar_get_last_raw_packet(uint8_t* out, size_t len)
+{
+    if (!s_driver) return false;
+    return s_driver->get_last_packet(out, len);
 }
-uint32_t lidar_get_packet_count() { return s_driver ? s_driver->get_packet_count() : 0u; }
-uint32_t lidar_get_scan_count()   { return s_scan_count; }
+
+uint32_t lidar_get_packet_count()
+{
+    return s_driver ? s_driver->get_packet_count() : 0u;
+}
+
+uint32_t lidar_get_scan_count()
+{
+    return s_scan_count;
+}
