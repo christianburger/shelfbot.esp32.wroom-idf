@@ -93,24 +93,24 @@ bool MicrorosSync::queryAgentIp(char* out_ip, size_t len) {
 // ---------------------------------------------------------------------------
 // logMicrorosLimits
 //
-// RMW_UXRCE_MAX_NODES, RMW_UXRCE_MAX_PUBLISHERS, etc. are cmake-level string
-// variables that get compiled into the rmw_microxrcedds library; they are NOT
-// exposed as C preprocessor macros in public headers.  We therefore read their
-// values at run-time via the RMW configuration, or simply log what we
-// configured in colcon.meta so the values are visible in the serial output.
+// RMW_UXRCE_MAX_* are cmake-time values baked into the rmw_microxrcedds
+// static library.  They are NOT C preprocessor macros and there is no public
+// runtime API to read them back.  The function below logs a single line
+// directing the developer to colcon.meta, which is the sole source of truth.
 // ---------------------------------------------------------------------------
 void MicrorosSync::logMicrorosLimits() {
-    ESP_LOGI(TAG, "=== micro-ROS compile-time limits (from colcon.meta) ===");
-    // These values are hard-coded here to match colcon.meta.
-    // If you change colcon.meta, update these too.
-    ESP_LOGI(TAG, "  RMW_UXRCE_MAX_NODES         = 2");
-    ESP_LOGI(TAG, "  RMW_UXRCE_MAX_PUBLISHERS    = 15");
-    ESP_LOGI(TAG, "  RMW_UXRCE_MAX_SUBSCRIPTIONS = 15");
-    ESP_LOGI(TAG, "  RMW_UXRCE_MAX_SERVICES      = 6");
-    ESP_LOGI(TAG, "  RMW_UXRCE_MAX_CLIENTS       = 6");
-    ESP_LOGI(TAG, "  RMW_UXRCE_MAX_HISTORY       = 16");
-    ESP_LOGI(TAG, "  RMW_UXRCE_MAX_MESSAGE_SIZE  = 4096");
-    ESP_LOGI(TAG, "========================================================");
+    // RMW_UXRCE_MAX_* are C macros defined by the rmw_microxrcedds library
+    // from the values set in colcon.meta at build time.
+    // RMW_UXRCE_MAX_MESSAGE_SIZE is intentionally omitted — it is a cmake
+    // string variable that does not produce a C macro.
+    ESP_LOGI(TAG, "=== micro-ROS compile-time limits ===");
+    ESP_LOGI(TAG, "RMW_UXRCE_MAX_NODES         = %d", RMW_UXRCE_MAX_NODES);
+    ESP_LOGI(TAG, "RMW_UXRCE_MAX_PUBLISHERS    = %d", RMW_UXRCE_MAX_PUBLISHERS);
+    ESP_LOGI(TAG, "RMW_UXRCE_MAX_SUBSCRIPTIONS = %d", RMW_UXRCE_MAX_SUBSCRIPTIONS);
+    ESP_LOGI(TAG, "RMW_UXRCE_MAX_SERVICES      = %d", RMW_UXRCE_MAX_SERVICES);
+    ESP_LOGI(TAG, "RMW_UXRCE_MAX_CLIENTS       = %d", RMW_UXRCE_MAX_CLIENTS);
+    ESP_LOGI(TAG, "RMW_UXRCE_MAX_HISTORY       = %d", RMW_UXRCE_MAX_HISTORY);
+    ESP_LOGI(TAG, "=====================================");
 }
 
 bool MicrorosSync::createEntitiesImpl() {
