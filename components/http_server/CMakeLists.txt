@@ -4,6 +4,7 @@ idf_component_register(
     REQUIRES
         idf_includes
         firmware_version
+        motor_control
         lidar_sensor
         json
 )

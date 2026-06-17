@@ -29,10 +29,15 @@ private:
 
     static esp_err_t register_uri_handlers(httpd_handle_t server);
 
-    // URI handlers
+    // Page handlers
     static esp_err_t root_handler(httpd_req_t* req);
+    static esp_err_t motor_page_handler(httpd_req_t* req);
     static esp_err_t lidar_page_handler(httpd_req_t* req);
     static esp_err_t lidar_js_handler(httpd_req_t* req);
+
+    // API handlers
+    static esp_err_t motor_status_handler(httpd_req_t* req);
+    static esp_err_t motor_set_handler(httpd_req_t* req);
     static esp_err_t lidar_api_handler(httpd_req_t* req);
 };
 

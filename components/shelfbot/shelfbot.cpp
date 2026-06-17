@@ -132,7 +132,7 @@ esp_err_t Shelfbot::begin() {
     MicrorosSync::getInstance().start();
 
     led_control_setup();
-    motor_control_setup();
+    motor_control_begin();
     lidar_setup();
 
     ESP_LOGI(TAG, "Initialization complete – components progressing independently");
