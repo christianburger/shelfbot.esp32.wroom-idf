@@ -1,26 +1,44 @@
+// http_server.cpp
+//
+// Memory model (ESP32-D0WD-V3, no PSRAM):
+//   Flash (4 MB)     — code + rodata (page HTML lives here via http_pages.cpp)
+//   Internal SRAM    — 520 KB total; ~100-150 KB available at runtime after
+//                      WiFi/BT stacks occupy ~200 KB and tasks use stacks.
+//   Heap budget      — cJSON motor objects: ~600 bytes peak.
+//                      LiDAR scan struct: 13.7 KB → declared static in handler
+//                      (BSS, not stack or heap).
+//   httpd stack      — 6 144 bytes (set in start()).  Enough for JSON + request
+//                      parsing.  The LiDAR scan struct must NOT live on this stack.
+//
+// No std::string, no new/delete, no malloc after init.
+// All page content is sent from flash via chunked transfer.
+
 #include <http_server.hpp>
+#include <http_pages.hpp>
+#include <firmware_version.hpp>
 #include <motor_control.hpp>
 #include <lidar_sensor.hpp>
 #include <lidar_scan.hpp>
 
-const char* HttpServer::TAG = "HttpServer";
-
+// Binary blobs embedded by CMakeLists.txt target_add_binary_data()
 extern const uint8_t binary_lidar_html_start[] asm("_binary_lidar_html_start");
 extern const uint8_t binary_lidar_html_end[]   asm("_binary_lidar_html_end");
 extern const uint8_t binary_lidar_viz_js_start[] asm("_binary_lidar_viz_js_start");
 extern const uint8_t binary_lidar_viz_js_end[]   asm("_binary_lidar_viz_js_end");
 
+const char* HttpServer::TAG = "HttpServer";
+
 // ---------------------------------------------------------------------------
 // CORS helpers
 // ---------------------------------------------------------------------------
 
-static void add_cors_headers(httpd_req_t* req) {
+void HttpServer::add_cors_headers(httpd_req_t* req) {
     httpd_resp_set_hdr(req, "Access-Control-Allow-Origin",  "*");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Methods", "GET, POST, OPTIONS");
     httpd_resp_set_hdr(req, "Access-Control-Allow-Headers", "Content-Type");
 }
 
-static esp_err_t options_handler(httpd_req_t* req) {
+esp_err_t HttpServer::options_handler(httpd_req_t* req) {
     add_cors_headers(req);
     httpd_resp_send(req, nullptr, 0);
     return ESP_OK;
@@ -30,72 +48,162 @@ static esp_err_t options_handler(httpd_req_t* req) {
 // Lifecycle
 // ---------------------------------------------------------------------------
 
+HttpServer& HttpServer::get_instance() {
+    static HttpServer instance;
+    return instance;
+}
+
 esp_err_t HttpServer::start() {
     if (server_ != nullptr) {
-        ESP_LOGW(TAG, "HTTP server already running");
+        ESP_LOGW(TAG, "start() called but server is already running — no-op");
         return ESP_OK;
     }
+
     ESP_LOGI(TAG, "Starting HTTP server...");
-    httpd_config_t config  = HTTPD_DEFAULT_CONFIG();
-    config.uri_match_fn    = httpd_uri_match_wildcard;
+
+    httpd_config_t config   = HTTPD_DEFAULT_CONFIG();
+    config.uri_match_fn     = httpd_uri_match_wildcard;
     config.max_uri_handlers = 20;
-    config.stack_size      = 8192;
+    // 6 144 bytes: enough for JSON + request parsing.
+    // LidarScan (13.7 KB) is declared static in lidar_api_handler — not on stack.
+    config.stack_size       = 6144;
+    // Allow a reasonable queue of pending connections.
+    config.backlog_conn     = 4;
 
     esp_err_t err = httpd_start(&server_, &config);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to start HTTP server: %s", esp_err_to_name(err));
+        ESP_LOGE(TAG, "httpd_start failed: %s", esp_err_to_name(err));
+        server_ = nullptr;
         return err;
     }
 
     err = register_uri_handlers(server_);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "Failed to register URI handlers");
-        httpd_stop(server_);
+        ESP_LOGE(TAG, "register_uri_handlers failed: %s — stopping httpd", esp_err_to_name(err));
+        esp_err_t stop_err = httpd_stop(server_);
+        if (stop_err != ESP_OK) {
+            ESP_LOGE(TAG, "httpd_stop also failed: %s", esp_err_to_name(stop_err));
+        }
         server_ = nullptr;
         return err;
     }
 
-    ESP_LOGI(TAG, "HTTP server started on port %d", config.server_port);
+    ESP_LOGI(TAG, "HTTP server started on port %d (stack=%u bytes, max_handlers=%u)",
+             (int)config.server_port,
+             (unsigned)config.stack_size,
+             (unsigned)config.max_uri_handlers);
     return ESP_OK;
 }
 
 esp_err_t HttpServer::stop() {
-    if (server_ == nullptr) return ESP_OK;
+    if (server_ == nullptr) {
+        ESP_LOGD(TAG, "stop() called but server is not running — no-op");
+        return ESP_OK;
+    }
     ESP_LOGI(TAG, "Stopping HTTP server...");
     esp_err_t err = httpd_stop(server_);
-    if (err == ESP_OK) server_ = nullptr;
+    if (err == ESP_OK) {
+        server_ = nullptr;
+        ESP_LOGI(TAG, "HTTP server stopped");
+    } else {
+        ESP_LOGE(TAG, "httpd_stop failed: %s", esp_err_to_name(err));
+    }
     return err;
 }
 
+// ---------------------------------------------------------------------------
+// URI handler registration
+// ---------------------------------------------------------------------------
+
 esp_err_t HttpServer::register_uri_handlers(const httpd_handle_t server) {
+    // Table of GET + POST handlers.
+    // Designated initialisers ensure every field is explicit.
     const httpd_uri_t routes[] = {
-        { .uri = "/",                 .method = HTTP_GET,  .handler = root_handler,         .user_ctx = nullptr },
-        { .uri = "/motor.html",       .method = HTTP_GET,  .handler = motor_page_handler,   .user_ctx = nullptr },
-        { .uri = "/lidar.html",       .method = HTTP_GET,  .handler = lidar_page_handler,   .user_ctx = nullptr },
-        { .uri = "/lidar_viz.js",     .method = HTTP_GET,  .handler = lidar_js_handler,     .user_ctx = nullptr },
-        { .uri = "/api/lidar",        .method = HTTP_GET,  .handler = lidar_api_handler,    .user_ctx = nullptr },
-        { .uri = "/api/motor/status", .method = HTTP_GET,  .handler = motor_status_handler, .user_ctx = nullptr },
-        { .uri = "/api/motor/set",    .method = HTTP_POST, .handler = motor_set_handler,    .user_ctx = nullptr },
+        {
+            .uri      = "/",
+            .method   = HTTP_GET,
+            .handler  = root_handler,
+            .user_ctx = nullptr
+        },
+        {
+            .uri      = "/motor.html",
+            .method   = HTTP_GET,
+            .handler  = motor_page_handler,
+            .user_ctx = nullptr
+        },
+        {
+            .uri      = "/lidar.html",
+            .method   = HTTP_GET,
+            .handler  = lidar_page_handler,
+            .user_ctx = nullptr
+        },
+        {
+            .uri      = "/lidar_viz.js",
+            .method   = HTTP_GET,
+            .handler  = lidar_js_handler,
+            .user_ctx = nullptr
+        },
+        {
+            .uri      = "/api/lidar",
+            .method   = HTTP_GET,
+            .handler  = lidar_api_handler,
+            .user_ctx = nullptr
+        },
+        {
+            .uri      = "/api/motor/status",
+            .method   = HTTP_GET,
+            .handler  = motor_status_handler,
+            .user_ctx = nullptr
+        },
+        {
+            .uri      = "/api/motor/set",
+            .method   = HTTP_POST,
+            .handler  = motor_set_handler,
+            .user_ctx = nullptr
+        },
     };
-    for (const auto& r : routes) {
-        httpd_register_uri_handler(server, &r);
+
+    const size_t nRoutes = sizeof(routes) / sizeof(routes[0]);
+    for (size_t i = 0; i < nRoutes; ++i) {
+        esp_err_t err = httpd_register_uri_handler(server, &routes[i]);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to register handler for %s %s: %s",
+                     (routes[i].method == HTTP_GET  ? "GET"  :
+                      routes[i].method == HTTP_POST ? "POST" : "?"),
+                     routes[i].uri,
+                     esp_err_to_name(err));
+            return err;
+        }
+        ESP_LOGD(TAG, "Registered %s %s",
+                 (routes[i].method == HTTP_GET  ? "GET"  :
+                  routes[i].method == HTTP_POST ? "POST" : "?"),
+                 routes[i].uri);
     }
 
+    // OPTIONS pre-flight handlers for CORS endpoints.
     const char* cors_endpoints[] = {
         "/api/lidar",
         "/api/motor/status",
         "/api/motor/set",
     };
-    for (const auto& endpoint : cors_endpoints) {
-        httpd_uri_t opt = {
-            .uri      = endpoint,
+    const size_t nCors = sizeof(cors_endpoints) / sizeof(cors_endpoints[0]);
+    for (size_t i = 0; i < nCors; ++i) {
+        const httpd_uri_t opt = {
+            .uri      = cors_endpoints[i],
             .method   = HTTP_OPTIONS,
             .handler  = options_handler,
             .user_ctx = nullptr
         };
-        httpd_register_uri_handler(server, &opt);
+        esp_err_t err = httpd_register_uri_handler(server, &opt);
+        if (err != ESP_OK) {
+            ESP_LOGE(TAG, "Failed to register OPTIONS %s: %s",
+                     cors_endpoints[i], esp_err_to_name(err));
+            return err;
+        }
     }
 
+    ESP_LOGI(TAG, "All URI handlers registered (%zu routes + %zu CORS OPTIONS)",
+             nRoutes, nCors);
     return ESP_OK;
 }
 
@@ -104,118 +212,76 @@ esp_err_t HttpServer::register_uri_handlers(const httpd_handle_t server) {
 // ---------------------------------------------------------------------------
 
 esp_err_t HttpServer::root_handler(httpd_req_t* req) {
-    const std::string html = std::string(R"(
-<!DOCTYPE html>
-<html>
-<head>
-    <title>Shelfbot ESP32</title>
-    <meta charset="UTF-8">
-    <meta name="viewport" content="width=device-width, initial-scale=1">
-    <style>
-        body { font-family: Inter, Arial, sans-serif; margin: 0; background:#0f172a; color:#e2e8f0; }
-        .container { max-width: 1100px; margin: 0 auto; padding: 28px; }
-        h1 { margin: 0 0 6px; }
-        .subtitle { color:#94a3b8; margin-bottom:24px; }
-        .grid { display:grid; grid-template-columns: repeat(auto-fit,minmax(240px,1fr)); gap:16px; }
-        .card { background:#1e293b; border:1px solid #334155; padding:16px; border-radius:12px; }
-        .card h3 { margin-top:0; }
-        code { background:#0b1220; padding:2px 6px; border-radius:4px; color:#93c5fd; }
-        a { color: #93c5fd; text-decoration: none; font-weight:600; }
-        a:hover { text-decoration: underline; }
-    </style>
-</head>
-<body>
-    <div class="container">
-        <h1>🤖 Shelfbot Dashboard</h1>
-        <p class="subtitle">Firmware: )") + FirmwareVersion::get_version_string() + R"(</p>
-        <div class="grid">
-            <div class="card"><h3>🗺️ LiDAR Viewer</h3><p><a href="/lidar.html">Open live LiDAR visualisation</a></p><code>/lidar.html</code></div>
-            <div class="card"><h3>🛰️ LiDAR API</h3><p><a href="/api/lidar">Open LiDAR JSON</a></p><code>GET /api/lidar</code></div>
-            <div class="card"><h3>⚙️ Motor Control</h3><p><a href="/motor.html">Open motor control page</a></p><code>/motor.html</code></div>
-            <div class="card"><h3>⚙️ Motor API</h3><p><a href="/api/motor/status">Open motor status JSON</a></p><code>GET /api/motor/status</code></div>
-        </div>
-    </div>
-</body>
-</html>
-)";
+    // kPageRoot is a flash rodata string — no heap needed.
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, html.c_str(), HTTPD_RESP_USE_STRLEN);
+    esp_err_t err = httpd_resp_send(req, kPageRoot, (ssize_t)kPageRootLen);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "root_handler: send failed: %s", esp_err_to_name(err));
+    }
+    return err;
 }
 
 esp_err_t HttpServer::motor_page_handler(httpd_req_t* req) {
-    std::string page = std::string(R"HTML(
-<!doctype html><html><head><meta name='viewport' content='width=device-width,initial-scale=1'>
-<style>
-body{font-family:Inter,Arial;background:#0b1020;color:#e2e8f0;margin:0;padding:20px}
-.top{display:flex;justify-content:space-between;align-items:center}.grid{display:grid;grid-template-columns:repeat(auto-fit,minmax(280px,1fr));gap:14px;margin-top:16px}
-.card{background:#141b34;border:1px solid #334155;border-radius:14px;padding:14px}.row{display:flex;gap:8px;align-items:center;margin:8px 0}
-input{width:100%;padding:8px;border-radius:8px;border:1px solid #475569;background:#0f172a;color:#e2e8f0}
-button{padding:8px 12px;border:0;border-radius:10px;background:#22c55e;color:#04110a;font-weight:700;cursor:pointer}
-.json{background:#020617;border-radius:10px;padding:10px;font-family:monospace;min-height:90px;white-space:pre-wrap}
-.pill{padding:2px 8px;border-radius:999px;background:#1e293b;font-size:12px}
-</style></head><body>
-<div class='top'><h2>Motor Control Dashboard</h2><a href='/' style='color:#93c5fd'>← Main Dashboard</a></div>
-<div class='pill'>Firmware: )HTML") + FirmwareVersion::get_version_string() + R"HTML(</div>
-<p>Per-motor independent set/get using micro-ROS units: <b>position_rad</b> and <b>velocity_rad_s</b>.</p>
-<div class='grid' id='motors'></div>
-<script>
-const N=5;
-function card(i){return `<div class='card'>
-  <div class='row'><h3 style='margin:0'>Motor ${i}</h3><span class='pill' id='run${i}'>--</span></div>
-  <div class='row'><label>Position (rad) — signed, 0 = continuous</label></div>
-  <div class='row'><input id='pos${i}' type='number' step='0.01' value='0'></div>
-  <div class='row'><label>Velocity (rad/s) — signed, 0 = stop</label></div>
-  <div class='row'><input id='vel${i}' type='number' step='0.01' value='0'></div>
-  <div class='row'>
-    <button onclick='send(${i})'>Apply</button>
-    <button style='background:#ef4444;color:#fff' onclick='stop(${i})'>Stop</button>
-  </div>
-  <div class='row' style='font-size:12px;color:#94a3b8'>
-    pos: <span id='apos${i}'>--</span> rad &nbsp;|&nbsp;
-    vel: <span id='avel${i}'>--</span> rad/s
-  </div>
-  <div class='json' id='json${i}'>Loading...</div></div>`;}
-document.getElementById('motors').innerHTML=[...Array(N).keys()].map(card).join('');
-async function load(){
-  try {
-    const data=await (await fetch('/api/motor/status')).json();
-    data.motors.forEach(m=>{
-      document.getElementById('run'+m.motor).textContent=m.running?'▶ RUNNING':'■ IDLE';
-      document.getElementById('run'+m.motor).style.background=m.running?'#14532d':'#1e293b';
-      document.getElementById('apos'+m.motor).textContent=m.position_rad.toFixed(4);
-      const vel=m.velocity_rad_s;
-      const velEl=document.getElementById('avel'+m.motor);
-      velEl.textContent=(vel>=0?'+':'')+vel.toFixed(4);
-      velEl.style.color=vel>0?'#4ade80':vel<0?'#f87171':'#94a3b8';
-      document.getElementById('json'+m.motor).textContent=JSON.stringify(m,null,2);
-    });
-  } catch(e) { console.error('status fetch failed',e); }
-}
-async function send(i){
-  const b={motor:i,position_rad:+document.getElementById('pos'+i).value,velocity_rad_s:+document.getElementById('vel'+i).value};
-  await fetch('/api/motor/set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify(b)});
-  load();
-}
-async function stop(i){
-  await fetch('/api/motor/set',{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({motor:i,position_rad:0,velocity_rad_s:0})});
-  load();
-}
-load(); setInterval(load,500);
-</script></body></html>)HTML";
+    // The motor page injects the firmware version string between prefix and
+    // suffix chunks.  Chunked transfer — no heap allocation.
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    return httpd_resp_send(req, page.c_str(), HTTPD_RESP_USE_STRLEN);
+
+    esp_err_t err;
+    err = httpd_resp_send_chunk(req, kPageMotorPrefix, (ssize_t)kPageMotorPrefixLen);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "motor_page_handler: send prefix failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    const char* ver = FirmwareVersion::get_version_string();
+    err = httpd_resp_send_chunk(req, ver, (ssize_t)strlen(ver));
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "motor_page_handler: send version failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    err = httpd_resp_send_chunk(req, kPageMotorSuffix, (ssize_t)kPageMotorSuffixLen);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "motor_page_handler: send suffix failed: %s", esp_err_to_name(err));
+        return err;
+    }
+
+    // Terminate chunked response.
+    err = httpd_resp_send_chunk(req, nullptr, 0);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "motor_page_handler: send terminator failed: %s", esp_err_to_name(err));
+    }
+    return err;
 }
 
 esp_err_t HttpServer::lidar_page_handler(httpd_req_t* req) {
+    const size_t len = (size_t)(binary_lidar_html_end - binary_lidar_html_start);
+    if (len == 0) {
+        ESP_LOGE(TAG, "lidar_page_handler: embedded lidar.html is empty");
+        return httpd_resp_send_500(req);
+    }
     httpd_resp_set_type(req, "text/html; charset=utf-8");
-    const size_t len = binary_lidar_html_end - binary_lidar_html_start;
-    return httpd_resp_send(req, reinterpret_cast<const char*>(binary_lidar_html_start), len);
+    esp_err_t err = httpd_resp_send(req,
+        reinterpret_cast<const char*>(binary_lidar_html_start), (ssize_t)len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "lidar_page_handler: send failed: %s", esp_err_to_name(err));
+    }
+    return err;
 }
 
 esp_err_t HttpServer::lidar_js_handler(httpd_req_t* req) {
+    const size_t len = (size_t)(binary_lidar_viz_js_end - binary_lidar_viz_js_start);
+    if (len == 0) {
+        ESP_LOGE(TAG, "lidar_js_handler: embedded lidar_viz.js is empty");
+        return httpd_resp_send_500(req);
+    }
     httpd_resp_set_type(req, "application/javascript; charset=utf-8");
-    const size_t len = binary_lidar_viz_js_end - binary_lidar_viz_js_start;
-    return httpd_resp_send(req, reinterpret_cast<const char*>(binary_lidar_viz_js_start), len);
+    esp_err_t err = httpd_resp_send(req,
+        reinterpret_cast<const char*>(binary_lidar_viz_js_start), (ssize_t)len);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "lidar_js_handler: send failed: %s", esp_err_to_name(err));
+    }
+    return err;
 }
 
 // ---------------------------------------------------------------------------
@@ -224,73 +290,127 @@ esp_err_t HttpServer::lidar_js_handler(httpd_req_t* req) {
 
 esp_err_t HttpServer::motor_status_handler(httpd_req_t* req) {
     add_cors_headers(req);
-    cJSON* root   = cJSON_CreateObject();
+
+    cJSON* root = cJSON_CreateObject();
+    if (!root) {
+        ESP_LOGE(TAG, "motor_status_handler: cJSON_CreateObject failed (heap exhausted?)");
+        return httpd_resp_send_500(req);
+    }
+
     cJSON* motors = cJSON_CreateArray();
+    if (!motors) {
+        ESP_LOGE(TAG, "motor_status_handler: cJSON_CreateArray failed");
+        cJSON_Delete(root);
+        return httpd_resp_send_500(req);
+    }
+    cJSON_AddItemToObject(root, "motors", motors);
+
     for (int i = 0; i < NUM_MOTORS; i++) {
         cJSON* m = cJSON_CreateObject();
+        if (!m) {
+            ESP_LOGE(TAG, "motor_status_handler: cJSON_CreateObject failed for motor %d", i);
+            cJSON_Delete(root);
+            return httpd_resp_send_500(req);
+        }
         cJSON_AddNumberToObject(m, "motor",          i);
         cJSON_AddNumberToObject(m, "position_rad",   motor_control_get_position(i));
         cJSON_AddNumberToObject(m, "velocity_rad_s", motor_control_get_velocity(i));
         cJSON_AddBoolToObject  (m, "running",        motor_control_is_motor_running(i));
         cJSON_AddItemToArray(motors, m);
     }
-    cJSON_AddItemToObject(root, "motors", motors);
+
     char* json = cJSON_PrintUnformatted(root);
-    httpd_resp_set_type(req, "application/json");
-    httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
-    cJSON_free(json);
     cJSON_Delete(root);
-    return ESP_OK;
+
+    if (!json) {
+        ESP_LOGE(TAG, "motor_status_handler: cJSON_PrintUnformatted returned NULL");
+        return httpd_resp_send_500(req);
+    }
+
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t err = httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "motor_status_handler: send failed: %s", esp_err_to_name(err));
+    }
+    cJSON_free(json);
+    return err;
 }
 
 esp_err_t HttpServer::motor_set_handler(httpd_req_t* req) {
     add_cors_headers(req);
 
-    static constexpr size_t MAX_BODY = 255;
-    if (req->content_len > MAX_BODY) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "request body too large (max 255 bytes)");
+    // Maximum body size: motor index (1 byte int) + two floats + JSON overhead.
+    // 255 bytes is more than sufficient and keeps the buffer on the stack.
+    static constexpr size_t MAX_BODY = 255u;
+
+    if ((size_t)req->content_len > MAX_BODY) {
+        ESP_LOGW(TAG, "motor_set_handler: body too large (%d > %zu bytes)",
+                 (int)req->content_len, MAX_BODY);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST,
+                                   "request body too large (max 255 bytes)");
     }
 
-    char buf[MAX_BODY + 1];
-    int len = httpd_req_recv(req, buf, MAX_BODY);
-    if (len <= 0) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid body");
+    // Stack-allocated receive buffer — no heap.
+    char buf[MAX_BODY + 1u];
+    int  received = httpd_req_recv(req, buf, MAX_BODY);
+    if (received <= 0) {
+        ESP_LOGW(TAG, "motor_set_handler: recv returned %d (%s)",
+                 received, received == 0 ? "connection closed" : "error");
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "invalid or empty body");
     }
-    buf[len] = '\0';
+    buf[received] = '\0';
 
     cJSON* body = cJSON_Parse(buf);
     if (!body) {
-        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "bad json");
+        ESP_LOGW(TAG, "motor_set_handler: JSON parse failed on: %.*s", received, buf);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "malformed JSON");
     }
 
-    cJSON* motor_item = cJSON_GetObjectItem(body, "motor");
-    cJSON* pos        = cJSON_GetObjectItem(body, "position_rad");
-    cJSON* vel        = cJSON_GetObjectItem(body, "velocity_rad_s");
+    const cJSON* motor_item = cJSON_GetObjectItemCaseSensitive(body, "motor");
+    const cJSON* pos        = cJSON_GetObjectItemCaseSensitive(body, "position_rad");
+    const cJSON* vel        = cJSON_GetObjectItemCaseSensitive(body, "velocity_rad_s");
 
-    if (cJSON_IsNumber(motor_item)) {
-        const uint8_t idx    = static_cast<uint8_t>(motor_item->valueint);
-        const float pos_rad  = cJSON_IsNumber(pos) ? static_cast<float>(pos->valuedouble) : 0.0f;
-        const float vel_rads = cJSON_IsNumber(vel) ? static_cast<float>(vel->valuedouble) : 0.0f;
-        motor_control_apply(idx, pos_rad, vel_rads);
+    if (!cJSON_IsNumber(motor_item)) {
+        ESP_LOGW(TAG, "motor_set_handler: missing or non-numeric 'motor' field");
+        cJSON_Delete(body);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "missing 'motor' field");
     }
+
+    const int    idx      = motor_item->valueint;
+    const float  pos_rad  = cJSON_IsNumber(pos) ? (float)pos->valuedouble  : 0.0f;
+    const float  vel_rads = cJSON_IsNumber(vel) ? (float)vel->valuedouble  : 0.0f;
+
+    if (idx < 0 || idx >= NUM_MOTORS) {
+        ESP_LOGW(TAG, "motor_set_handler: motor index %d out of range [0,%d)", idx, NUM_MOTORS);
+        cJSON_Delete(body);
+        return httpd_resp_send_err(req, HTTPD_400_BAD_REQUEST, "motor index out of range");
+    }
+
+    ESP_LOGD(TAG, "motor_set: motor=%d pos=%.4f vel=%.4f", idx, (double)pos_rad, (double)vel_rads);
+    motor_control_apply((uint8_t)idx, pos_rad, vel_rads);
     cJSON_Delete(body);
 
     httpd_resp_set_type(req, "application/json");
-    return httpd_resp_sendstr(req, "{\"ok\":true}");
+    esp_err_t err = httpd_resp_sendstr(req, "{\"ok\":true}");
+    if (err != ESP_OK) {
+        ESP_LOGE(TAG, "motor_set_handler: send failed: %s", esp_err_to_name(err));
+    }
+    return err;
 }
 
 // ---------------------------------------------------------------------------
 // LiDAR API handler
 //
-// LidarScan is ~14 KB — declaring it on the httpd task stack (8 KB) causes
-// an immediate stack overflow and LoadProhibited panic.  Declared static so
-// it lives in BSS.  The httpd server serialises requests on a single task so
-// this is safe: only one request handler runs at a time.
+// Memory note:
+//   LidarScan is ~13.7 KB.  The httpd task stack is 6 KB — declaring a
+//   LidarScan on the stack would immediately overflow it.  Declaring it
+//   static here means it lives in BSS (zero-initialized data segment).
+//   The httpd server serialises requests on a single task so a single
+//   static instance is safe: only one request handler runs at a time.
 //
-// Points are capped at MAX_JSON_POINTS before building the cJSON array.
-// A full 360° LYDSTO scan at ~150 pts/rev easily fits within 400 points.
-// Sending all 2000 possible points would allocate ~80 KB of heap per request
-// which exhausts the ESP32 heap under any load.
+//   cJSON points array: capped at MAX_JSON_POINTS.
+//   A full 360° LYDSTO scan is ~150 points.  400 points × ~42 bytes ≈ 17 KB
+//   of heap used by cJSON during serialisation, freed immediately after send.
 // ---------------------------------------------------------------------------
 
 esp_err_t HttpServer::lidar_api_handler(httpd_req_t* req) {
@@ -300,73 +420,94 @@ esp_err_t HttpServer::lidar_api_handler(httpd_req_t* req) {
     static LidarScan scan;
 
     if (!lidar_get_latest_scan(scan)) {
-        cJSON* err = cJSON_CreateObject();
-        cJSON_AddStringToObject(err, "error",     "No LiDAR scan available yet");
-        cJSON_AddBoolToObject  (err, "available", false);
-        char* json = cJSON_PrintUnformatted(err);
-        if (json) {
-            httpd_resp_set_type(req, "application/json");
-            httpd_resp_send(req, json, HTTPD_RESP_USE_STRLEN);
-            cJSON_free(json);
+        // No scan available — send a well-formed JSON error; do NOT crash.
+        static const char kNoScan[] =
+            "{\"error\":\"No LiDAR scan available yet\",\"available\":false}";
+        httpd_resp_set_type(req, "application/json");
+        esp_err_t err = httpd_resp_send(req, kNoScan, (ssize_t)(sizeof(kNoScan) - 1u));
+        if (err != ESP_OK) {
+            ESP_LOGW(TAG, "lidar_api_handler: send (no-scan) failed: %s", esp_err_to_name(err));
         }
-        cJSON_Delete(err);
-        return ESP_OK;
+        return err;
     }
 
+    // Build JSON response.
     cJSON* root = cJSON_CreateObject();
+    if (!root) {
+        ESP_LOGE(TAG, "lidar_api_handler: cJSON_CreateObject failed (heap exhausted?)");
+        return httpd_resp_send_500(req);
+    }
 
-    cJSON_AddNumberToObject(root, "timestamp_us", scan.end_time_us);
-    cJSON_AddNumberToObject(root, "timestamp_ms", scan.end_time_us / 1000);
-    cJSON_AddNumberToObject(root, "point_count",  scan.point_count);
+    cJSON_AddNumberToObject(root, "timestamp_us", (double)scan.end_time_us);
+    cJSON_AddNumberToObject(root, "timestamp_ms", (double)(scan.end_time_us / 1000));
+    cJSON_AddNumberToObject(root, "point_count",  (double)scan.point_count);
     cJSON_AddBoolToObject  (root, "complete",     scan.complete);
 
-    // Compute min distance and its angle
-    uint16_t min_mm    = 0xFFFF;
+    // Compute minimum distance and its angle.
+    uint16_t min_mm    = 0xFFFFu;
     float    min_angle = 0.0f;
     for (uint16_t i = 0; i < scan.point_count; ++i) {
-        if (scan.distances_mm[i] > 0 && scan.distances_mm[i] < min_mm) {
+        if (scan.distances_mm[i] > 0u && scan.distances_mm[i] < min_mm) {
             min_mm    = scan.distances_mm[i];
             min_angle = scan.angles_deg[i];
         }
     }
-    if (min_mm == 0xFFFF) min_mm = 0;
+    if (min_mm == 0xFFFFu) min_mm = 0u;
 
-    cJSON_AddNumberToObject(root, "distance_mm",            min_mm);
-    cJSON_AddNumberToObject(root, "distance_cm",            min_mm / 10.0f);
-    cJSON_AddNumberToObject(root, "min_distance_angle_deg", min_angle);
+    cJSON_AddNumberToObject(root, "distance_mm",            (double)min_mm);
+    cJSON_AddNumberToObject(root, "distance_cm",            (double)min_mm / 10.0);
+    cJSON_AddNumberToObject(root, "min_distance_angle_deg", (double)min_angle);
 
-    float start_deg = scan.point_count > 0 ? scan.angles_deg[0]                    : 0.0f;
-    float end_deg   = scan.point_count > 0 ? scan.angles_deg[scan.point_count - 1] : 0.0f;
-    cJSON_AddNumberToObject(root, "start_angle_deg", start_deg);
-    cJSON_AddNumberToObject(root, "end_angle_deg",   end_deg);
+    const float start_deg = (scan.point_count > 0u) ? scan.angles_deg[0]                     : 0.0f;
+    const float end_deg   = (scan.point_count > 0u) ? scan.angles_deg[scan.point_count - 1u] : 0.0f;
+    cJSON_AddNumberToObject(root, "start_angle_deg", (double)start_deg);
+    cJSON_AddNumberToObject(root, "end_angle_deg",   (double)end_deg);
 
-    // Cap points sent in the JSON response to avoid heap exhaustion.
-    // 400 points × ~42 bytes/point ≈ 17 KB JSON — well within heap budget.
-    // A full LYDSTO 360° scan is ~150 points so nothing is lost in practice.
-    static constexpr uint16_t MAX_JSON_POINTS = 400;
-    const uint16_t n = (scan.point_count < MAX_JSON_POINTS)
-                       ? scan.point_count : MAX_JSON_POINTS;
+    // Cap at MAX_JSON_POINTS to avoid exhausting heap.
+    static constexpr uint16_t MAX_JSON_POINTS = 400u;
+    const uint16_t n = (scan.point_count < MAX_JSON_POINTS) ? scan.point_count : MAX_JSON_POINTS;
 
     cJSON* points = cJSON_CreateArray();
-    for (uint16_t i = 0; i < n; ++i) {
+    if (!points) {
+        ESP_LOGE(TAG, "lidar_api_handler: cJSON_CreateArray failed");
+        cJSON_Delete(root);
+        return httpd_resp_send_500(req);
+    }
+
+    bool alloc_ok = true;
+    for (uint16_t i = 0; i < n && alloc_ok; ++i) {
         cJSON* pt = cJSON_CreateObject();
-        cJSON_AddNumberToObject(pt, "d",         scan.distances_mm[i]);
-        cJSON_AddNumberToObject(pt, "c",         scan.confidences[i]);
-        cJSON_AddNumberToObject(pt, "angle_deg", scan.angles_deg[i]);
+        if (!pt) {
+            ESP_LOGE(TAG, "lidar_api_handler: cJSON_CreateObject failed at point %u (heap low?)", (unsigned)i);
+            alloc_ok = false;
+            break;
+        }
+        cJSON_AddNumberToObject(pt, "d",         (double)scan.distances_mm[i]);
+        cJSON_AddNumberToObject(pt, "c",         (double)scan.confidences[i]);
+        cJSON_AddNumberToObject(pt, "angle_deg", (double)scan.angles_deg[i]);
         cJSON_AddItemToArray(points, pt);
     }
+
+    if (!alloc_ok) {
+        // Partial build — still try to send what we have rather than a 500.
+        ESP_LOGW(TAG, "lidar_api_handler: partial point array due to heap pressure");
+    }
+
     cJSON_AddItemToObject(root, "points", points);
 
     char* json_str = cJSON_PrintUnformatted(root);
-    esp_err_t ret = ESP_ERR_NO_MEM;
-    if (json_str) {
-        httpd_resp_set_type(req, "application/json");
-        ret = httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
-        cJSON_free(json_str);
-    } else {
+    cJSON_Delete(root);  // frees all children including points array
+
+    if (!json_str) {
         ESP_LOGE(TAG, "lidar_api_handler: cJSON_PrintUnformatted returned NULL (heap exhausted?)");
-        httpd_resp_send_500(req);
+        return httpd_resp_send_500(req);
     }
-    cJSON_Delete(root);
+
+    httpd_resp_set_type(req, "application/json");
+    esp_err_t ret = httpd_resp_send(req, json_str, HTTPD_RESP_USE_STRLEN);
+    if (ret != ESP_OK) {
+        ESP_LOGE(TAG, "lidar_api_handler: send failed: %s", esp_err_to_name(ret));
+    }
+    cJSON_free(json_str);
     return ret;
 }

@@ -6,6 +6,21 @@
 #include <vector>
 #include <string>
 
+// ---------------------------------------------------------------------------
+// StateMachine
+//
+// Locking model
+// -------------
+// All public methods acquire mutex_ themselves.  Internal helpers that are
+// called from already-locked contexts are suffixed _locked and must only be
+// called while the caller holds mutex_.
+//
+// changeState() is the sole write path for module states.  It is public and
+// self-locking so that external components (wifi_manager, microros_sync, etc.)
+// can call it safely without knowing about the internal mutex.  Internally,
+// advance() and recover() call changeState_locked() to avoid re-entrant locking.
+// ---------------------------------------------------------------------------
+
 class StateMachine {
 public:
     struct ModuleState {
@@ -42,7 +57,7 @@ public:
                                      const std::string& target_state,
                                      const Prerequisite& prereq);
 
-    // Read‑only queries
+    // Read-only queries — all self-locking.
     static bool isAtLeast(const std::string& module, const std::string& min_state);
     static bool isInState(const std::string& module, const std::string& state);
     static bool canTransition(const std::string& module, const std::string& new_state);
@@ -52,14 +67,15 @@ public:
                                      uint32_t poll_ms = 250);
     static const std::string& getState(const std::string& module);
 
-    // Orchestration – preferred way to progress most modules
-    static void advance();                     // progress all modules
+    // Orchestration — self-locking.
+    static void advance();                          // progress all modules
     static void advance(const std::string& module); // progress one module
-    static void recover();                     // reset error/recovery states
+    static void recover();                          // reset error/recovery states
 
-    // Direct state change – allowed ONLY for modules that own their state
-    // (e.g., wifi_manager reporting WiFi hardware state). Other components
-    // should use advance() or recover().
+    // Direct state change — self-locking public API.
+    // Safe to call from any component without holding the mutex.
+    // Use force_skip_prereqs=true only for components that own their state
+    // (e.g. wifi_manager reporting hardware events).
     static bool changeState(const std::string& module,
                             const std::string& new_state,
                             bool force_skip_prereqs = false);
@@ -75,8 +91,16 @@ private:
     static TaskHandle_t status_task_handle_;
     static bool         task_running_;
 
+    // ── Internal helpers (caller must hold mutex_) ────────────────────────────
     static bool prereqsSatisfied_locked(const std::string& module,
                                         const std::string& new_state);
+
+    // changeState_locked: write path used internally by advance() and recover()
+    // which already hold mutex_.  Identical logic to changeState() but without
+    // acquiring the lock a second time.
+    static bool changeState_locked(const std::string& module,
+                                   const std::string& new_state,
+                                   bool force_skip_prereqs = false);
 
     static void status_dump_task(void* arg);
     static void dumpAllStates();

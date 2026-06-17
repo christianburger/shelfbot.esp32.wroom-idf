@@ -1,5 +1,7 @@
 idf_component_register(
-    SRCS "http_server.cpp"
+    SRCS
+        "http_server.cpp"
+        "http_pages.cpp"
     INCLUDE_DIRS "include"
     REQUIRES
         idf_includes
@@ -9,5 +11,5 @@ idf_component_register(
         json
 )
 
-target_add_binary_data(${COMPONENT_LIB} "lidar.html" BINARY)
-target_add_binary_data(${COMPONENT_LIB} "lidar_viz.js" BINARY)
+target_add_binary_data(${COMPONENT_LIB} "lidar.html"    BINARY)
+target_add_binary_data(${COMPONENT_LIB} "lidar_viz.js"  BINARY)
