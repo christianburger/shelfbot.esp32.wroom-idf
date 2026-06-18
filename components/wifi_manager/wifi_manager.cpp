@@ -45,6 +45,14 @@ static_assert((EVT_GOT_IP       & (WM_CONNECTED_BIT | WM_DISCONNECTED_BIT)) == 0
 static_assert((EVT_DISCONNECTED & (WM_CONNECTED_BIT | WM_DISCONNECTED_BIT)) == 0);
 
 // ---------------------------------------------------------------------------
+// SNTP callback
+// ---------------------------------------------------------------------------
+static void sntp_sync_callback(struct timeval *tv) {
+    ESP_LOGI(TAG, "SNTP time sync received: sec=%lld, usec=%ld",
+             (long long)tv->tv_sec, tv->tv_usec);
+}
+
+// ---------------------------------------------------------------------------
 // SNTP
 // ---------------------------------------------------------------------------
 static bool s_sntp_started = false;
@@ -54,17 +62,18 @@ static void start_or_restart_sntp() {
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
     esp_sntp_setservername(1, "time.cloudflare.com");
+    ESP_LOGI(TAG, "SNTP client STARTING");
     esp_sntp_init();
+    ESP_LOGI(TAG, "SNTP client initialized, sync status: %d", esp_sntp_get_sync_status());
+    esp_log_level_set("sntp", ESP_LOG_VERBOSE);
+    // Register sync callback
+    esp_sntp_set_time_sync_notification_cb(sntp_sync_callback);
     s_sntp_started = true;
     ESP_LOGI(TAG, "SNTP client started (pool.ntp.org, time.cloudflare.com)");
 }
 
 // ---------------------------------------------------------------------------
-// Static state  (private — NOT a parallel state machine)
-//
-// s_info and the counters below are only for the wifi_manager_get_info()
-// public API (HTTP dashboard).  They do not drive any firmware logic.
-// The authoritative state is in StateMachine under module "wifi_manager".
+// Static state
 // ---------------------------------------------------------------------------
 static EventGroupHandle_t  s_evt           = nullptr;
 static esp_netif_t*        s_netif         = nullptr;
@@ -76,15 +85,12 @@ static uint32_t            s_reconnects    = 0;
 static int                 s_degrade_streak= 0;
 
 // ---------------------------------------------------------------------------
-// State machine helper – sets SM state and mirrors to s_info.state
+// State machine helper
 // ---------------------------------------------------------------------------
 static void set_wifi_state(WifiManagerState new_state) {
-    // Use force_skip_prereqs=true: wifi_manager has no prerequisites itself.
     StateMachine::changeState("wifi_manager",
                               stateToString(new_state),
                               /*force_skip_prereqs=*/true);
-
-    // Mirror to s_info for the HTTP dashboard
     portENTER_CRITICAL(&s_info_mux);
     switch (new_state) {
         case WifiManagerState::OFF:
@@ -136,12 +142,12 @@ static void on_ip_event(void*, esp_event_base_t, int32_t id, const void* data) {
         xEventGroupClearBits(s_evt, WM_DISCONNECTED_BIT | EVT_DISCONNECTED);
         xEventGroupSetBits  (s_evt, WM_CONNECTED_BIT | EVT_GOT_IP);
         set_wifi_state(WifiManagerState::CONNECTED);
-        start_or_restart_sntp();   // start SNTP immediately on IP assignment
+        start_or_restart_sntp();
     }
 }
 
 // ---------------------------------------------------------------------------
-// Scan: pick the strongest visible known AP, return credential index or -1
+// Scan: pick strongest visible known AP
 // ---------------------------------------------------------------------------
 static int scan_pick_best() {
     constexpr wifi_scan_config_t cfg = {
@@ -211,7 +217,6 @@ static esp_err_t start_connect(int ci) {
     return (r == ESP_OK) ? esp_wifi_connect() : r;
 }
 
-// Returns true if RSSI is bad enough that a roaming scan should be triggered.
 static bool monitor_rssi() {
     wifi_ap_record_t ap;
     if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return false;
@@ -231,9 +236,12 @@ static bool monitor_rssi() {
 }
 
 // ---------------------------------------------------------------------------
-// Manager task
+// Manager task — exposed for shelfbot.cpp to create with pinned-to-core.
+// Pinned to core 1 to keep WiFi driver ISRs away from the micro-ROS executor
+// which runs on core 0.
 // ---------------------------------------------------------------------------
-[[noreturn]] static void manager_task(void*) {
+
+void wifi_manager_task_fn(void* /*arg*/) {
     ESP_LOGI(TAG, "manager task started, %d slot(s), %d configured",
              CRED_COUNT, valid_cred_count());
 
@@ -242,9 +250,6 @@ static bool monitor_rssi() {
     bool skip_scan       = false;
 
     while (true) {
-        // ---------------------------------------------------------------
-        // 1. Scan for best available AP (unless we're mid-switch)
-        // ---------------------------------------------------------------
         if (!skip_scan) {
             if (valid_cred_count() == 0) {
                 if (!no_creds_logged) {
@@ -268,9 +273,6 @@ static bool monitor_rssi() {
         }
         skip_scan = false;
 
-        // ---------------------------------------------------------------
-        // 2. Connect
-        // ---------------------------------------------------------------
         set_wifi_state(WifiManagerState::CONNECTING);
         bool connected = false;
         ++s_reconnects;
@@ -299,9 +301,6 @@ static bool monitor_rssi() {
             continue;
         }
 
-        // ---------------------------------------------------------------
-        // 3. Connected – monitor until loss or roam decision
-        // ---------------------------------------------------------------
         s_connected_us  = esp_timer_get_time();
         s_degrade_streak = 0;
         publish_info(s_creds[ci].ssid, 0, false);
@@ -316,7 +315,6 @@ static bool monitor_rssi() {
             if (bits & EVT_DISCONNECTED) {
                 ESP_LOGW(TAG, "connection lost, rescanning");
                 s_connected_us = 0;
-                // SM state already set by on_wifi_event
                 break;
             }
 
@@ -351,13 +349,18 @@ static bool monitor_rssi() {
 // ---------------------------------------------------------------------------
 
 esp_err_t wifi_manager_init() {
-    s_evt = xEventGroupCreate();
-    // Register module only if not already registered
-    if (StateMachine::getState("wifi_manager").empty()) {
-      StateMachine::setInitial("wifi_manager", stateToString(WifiManagerState::OFF), orderedStates(WifiManagerState()));
+    // Guard against double-init (called from shelfbot.cpp begin() only once,
+    // but defensive check prevents issues if called again after a recover()).
+    if (s_evt != nullptr) {
+        ESP_LOGW(TAG, "wifi_manager_init called again — already initialised, skipping");
+        return ESP_OK;
     }
 
-    if (!s_evt) return ESP_ERR_NO_MEM;
+    s_evt = xEventGroupCreate();
+    if (!s_evt) {
+        ESP_LOGE(TAG, "xEventGroupCreate failed — out of memory");
+        return ESP_ERR_NO_MEM;
+    }
     xEventGroupSetBits(s_evt, WM_DISCONNECTED_BIT);
 
     ESP_ERROR_CHECK(esp_netif_init());
@@ -377,18 +380,11 @@ esp_err_t wifi_manager_init() {
         IP_EVENT, IP_EVENT_STA_GOT_IP,
         reinterpret_cast<esp_event_handler_t>(on_ip_event), nullptr));
 
-    // Register in state machine WITH ordered states so isAtLeast() works.
-    StateMachine::setInitial("wifi_manager",
-                             stateToString(WifiManagerState::OFF),
-                             orderedStates(WifiManagerState::OFF));
+    // Note: StateMachine::setInitial() for "wifi_manager" is called from
+    // shelfbot.cpp before wifi_manager_init() — do not call it again here.
 
-    const BaseType_t r = xTaskCreatePinnedToCore(
-        manager_task, "wifi_mgr", 4096, nullptr,
-        configMAX_PRIORITIES - 2, nullptr, 1);
-    if (r != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create manager task");
-        return ESP_FAIL;
-    }
+    // Task is created by shelfbot.cpp — do NOT spawn here.
+    ESP_LOGI(TAG, "wifi_manager_init complete — task will be created by shelfbot");
     return ESP_OK;
 }
 

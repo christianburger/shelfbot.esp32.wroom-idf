@@ -1,3 +1,19 @@
+// lidar_sensor.cpp
+//
+// Memory model changes
+// ────────────────────
+// • LYDSTO_Driver is now a static instance (BSS) instead of heap-allocated.
+//   new/delete removed; ~13 bytes of pointer + vtable overhead gone, but
+//   more importantly we never call operator new which could fail at runtime.
+//
+// • lidar_lifecycle_task and lidar_read_task are no longer spawned here.
+//   Their function pointers (lidar_lifecycle_task_fn / lidar_read_task_fn)
+//   are exposed via lidar_sensor.hpp so shelfbot.cpp can create all tasks in
+//   one place with consistent stack sizing and error handling.
+//
+// • s_scan_mutex is created in lidar_setup() before any task runs — safe
+//   because lidar_setup() is called from shelfbot.cpp before tasks start.
+
 #include "lidar_sensor.hpp"
 #include "lidar_packet_parser.hpp"
 #include <state_machine.hpp>
@@ -14,41 +30,33 @@ static const char* TAG = "LidarSensor";
 // ============================================================================
 //  Timing constants
 // ============================================================================
-
-// Expected revolution period at nominal 6 Hz.
-static constexpr int64_t REVOLUTION_PERIOD_US = 167000LL;  // 167 ms
-
-// Force scan completion if the building buffer has been accumulating for
-// longer than this.  1.5× revolution period leaves enough headroom for the
-// sensor to run slightly slow while still catching a missed angular wrap.
-// If CRC failures cause the angular wrap to be missed, this ensures we never
-// accumulate more than ~1.5 revolutions into one scan.
-static constexpr int64_t MAX_SCAN_DURATION_US = (REVOLUTION_PERIOD_US * 3) / 2;  // 250 ms
+static constexpr int64_t REVOLUTION_PERIOD_US = 167000LL;
+static constexpr int64_t MAX_SCAN_DURATION_US = (REVOLUTION_PERIOD_US * 3) / 2;
 
 // ============================================================================
-//  Internal state
+//  Internal state — all static (BSS), no heap
 // ============================================================================
 
-static LYDSTO_Driver*   s_driver        = nullptr;
+// Static driver instance — no heap allocation
+static LYDSTO_Driver s_driver_instance(LIDAR_UART_PORT,
+                                       LIDAR_TX_PIN,
+                                       LIDAR_RX_PIN,
+                                       LIDAR_BAUD_RATE);
+static LYDSTO_Driver*   s_driver        = nullptr;   // set to &s_driver_instance after init
 static TaskHandle_t     s_read_task     = nullptr;
 static LidarSensorState s_state         = LidarSensorState::SETUP;
 
-// Double buffer: s_scans[s_building_idx] is the one being filled by lidar_read_task.
-// The *other* index (s_building_idx ^ 1) holds the last completed scan.
-// The mutex protects the swap and the s_scan_ready flag only — it is NOT
-// held during point accumulation (which is single-writer, single slot).
 static LidarScan         s_scans[2];
 static volatile int      s_building_idx  = 0;
 static volatile bool     s_scan_ready    = false;
 static SemaphoreHandle_t s_scan_mutex    = nullptr;
 
-// Diagnostic counters (written only from lidar_read_task)
 static uint32_t s_scan_count        = 0;
 static uint32_t s_overflow_count    = 0;
 static uint32_t s_crc_fail_count    = 0;
 static uint32_t s_parse_fail_count  = 0;
 static uint32_t s_wrap_count        = 0;
-static uint32_t s_time_wrap_count   = 0;  // wraps triggered by time fallback
+static uint32_t s_time_wrap_count   = 0;
 static float    s_last_end_angle    = -1.0f;
 
 // ============================================================================
@@ -69,59 +77,20 @@ static float interpolate_angle(float start_deg, float end_deg,
     return angle;
 }
 
-/**
- * @brief Detect a revolution boundary between consecutive packets.
- *
- * The LYDSTO sends packets with monotonically increasing start_angle.
- * A revolution completes when start_angle wraps back past 0°, which appears
- * as new_start_deg < prev_end_deg in the angle stream.
- *
- * THRESHOLD RATIONALE
- * ───────────────────
- * The angular gap threshold (forward_gap_limit) must be > 0° and < 360°.
- * Too small: CRC packet loss near 0°/360° can produce a forward gap larger
- *   than the threshold, causing wrap detection to MISS the revolution end.
- *   Example: packets at 200°→255° arrive, then CRC failures eat 255°→360°→20°,
- *   next valid packet at 20°: forward_gap = 360-255+20 = 125° > 120° → MISSED.
- *   With 120° threshold at 6Hz and ~144 packets/rev, losing > 48 consecutive
- *   packets (1/3 of a revolution) breaks detection.
- * Too large (> 360°): impossible.
- * Too close to 360° (e.g. 350°): an ordinary forward step of 2.5° between
- *   adjacent packets in the SAME revolution could be mistaken for a wrap if
- *   prev_end is very close to 0° (e.g. prev_end=2°, new_start=1° → ✓ wrap).
- *   Actually, within-revolution steps are always FORWARD (new > prev), so they
- *   never enter the wrap check at all (guarded by new_start < prev_end).
- *
- * 300° allows up to 300° of consecutive CRC packet loss (83% of a revolution)
- * while still correctly rejecting any in-revolution backward jitter.
- * The only false-positive risk is a 60°+ backward jump within a revolution,
- * which LYDSTO does not produce under normal operation.
- */
 static bool is_wrap_around(float prev_end_deg, float new_start_deg)
 {
-    // If the new packet starts at or after where the last one ended, we're
-    // still going forward in the same revolution — definitely not a wrap.
     if (new_start_deg >= prev_end_deg) {
         return false;
     }
-    // The apparent backward step could be either:
-    //   (a) a genuine 360°→0° revolution wrap, or
-    //   (b) a large-gap backward anomaly from the sensor.
-    // We distinguish by the "forward arc distance" around the wrap point:
-    //   forward_gap = 360° - prev_end + new_start
-    // For a genuine wrap this is always the small gap (< one revolution).
-    // Threshold: allow up to 300° of packet loss around the wrap boundary.
     static constexpr float WRAP_GAP_LIMIT_DEG = 300.0f;
     const float forward_gap = 360.0f - prev_end_deg + new_start_deg;
     return forward_gap < WRAP_GAP_LIMIT_DEG;
 }
 
 // ============================================================================
-//  Scan completion (common path for angular wrap and time-based fallback)
+//  Scan completion
 // ============================================================================
 
-// Called only from lidar_read_task (single writer).
-// reason: "angular" or "time" for the log.
 static void complete_scan(const char* reason, float trigger_start_deg)
 {
     const int building = s_building_idx;
@@ -140,7 +109,6 @@ static void complete_scan(const char* reason, float trigger_start_deg)
         s_scan_count++;
         xSemaphoreGive(s_scan_mutex);
 
-        // Clear the new building buffer now that the completed one is published.
         s_scans[s_building_idx].clear();
 
         ESP_LOGI(TAG,
@@ -168,7 +136,6 @@ static void complete_scan(const char* reason, float trigger_start_deg)
             "(pts=%u last_end=%.1f° next_start=%.1f°)",
             reason, (unsigned)completed_pts,
             s_last_end_angle, trigger_start_deg);
-        // Don't swap — keep accumulating to avoid losing partial data.
     }
 }
 
@@ -222,24 +189,10 @@ static void process_raw_packet(const uint8_t* raw47, int64_t timestamp_us)
     const float start_deg = parsed.start_angle_deg;
     const float end_deg   = parsed.end_angle_deg;
 
-    // ── 1. Angular revolution boundary detection ──────────────────────────
     if (s_last_end_angle >= 0.0f && is_wrap_around(s_last_end_angle, start_deg)) {
         ++s_wrap_count;
         complete_scan("angular", start_deg);
-    }
-
-    // ── 2. Time-based fallback ────────────────────────────────────────────
-    // If no angular wrap was detected but the building scan has been running
-    // for longer than MAX_SCAN_DURATION_US, the wrap was likely missed due to
-    // CRC failures eating >300° of packets around the 0°/360° boundary.
-    // Force completion so we never accumulate more than ~1.5 revolutions.
-    //
-    // Only triggered if:
-    //   - We have at least a few points (scan is actually running), and
-    //   - The scan duration has exceeded the limit, and
-    //   - We have NOT already just done an angular wrap this packet (the
-    //     angular wrap check above already called complete_scan if needed).
-    else {
+    } else {
         const int bidx = s_building_idx;
         if (s_scans[bidx].point_count > 0 &&
             s_scans[bidx].start_time_us > 0 &&
@@ -259,7 +212,6 @@ static void process_raw_packet(const uint8_t* raw47, int64_t timestamp_us)
         }
     }
 
-    // ── 3. Accumulate into current building buffer ────────────────────────
     const bool ok = accumulate_points(s_scans[s_building_idx], parsed, timestamp_us);
     if (!ok) {
         ++s_overflow_count;
@@ -272,7 +224,6 @@ static void process_raw_packet(const uint8_t* raw47, int64_t timestamp_us)
                 (unsigned)LidarScan::MAX_POINTS,
                 s_last_end_angle, start_deg);
         }
-        // Buffer full is also treated as a forced completion, same as time wrap.
         if (s_scans[s_building_idx].point_count >= LidarScan::MAX_POINTS) {
             ++s_time_wrap_count;
             complete_scan("overflow", start_deg);
@@ -281,7 +232,6 @@ static void process_raw_packet(const uint8_t* raw47, int64_t timestamp_us)
 
     s_last_end_angle = end_deg;
 
-    // ── 4. Periodic stats ─────────────────────────────────────────────────
     static uint32_t s_packet_count = 0;
     if ((++s_packet_count % 500) == 0) {
         ESP_LOGI(TAG,
@@ -297,53 +247,50 @@ static void process_raw_packet(const uint8_t* raw47, int64_t timestamp_us)
     }
 }
 
-// ============================================================================
-//  Read task
-// ============================================================================
+//  Read task (exposed for shelfbot.cpp task creation)
+void lidar_read_task_fn(void*) {
+  ESP_LOGI(TAG, "Read task started");
 
-static void lidar_read_task(void* /*arg*/)
-{
-    ESP_LOGI(TAG, "Read task started");
-    uint8_t raw[47];
-    uint32_t total_reads  = 0;
-    uint32_t failed_reads = 0;
+  uint8_t raw[47];
+  uint32_t total_reads  = 0;
+  uint32_t failed_reads = 0;
 
-    while (true) {
-        LYDSTO_Driver::MeasurementResult result{};
-
-        // Capture timestamp BEFORE the blocking read so that if read_sensor()
-        // blocks in phase 2 for up to 500ms, the timestamp still reflects
-        // approximately when we asked for data.  After the call succeeds we
-        // get the actual packet time from esp_timer.
-        const bool ok = s_driver->read_sensor(result);
-        // Capture timestamp immediately after the read returns so it reflects
-        // when the packet was actually received (phase 1 path) or unblocked (phase 2).
-        const int64_t rx_time_us = esp_timer_get_time();
-
-        ++total_reads;
-        if (!ok) {
-            ++failed_reads;
-            if ((failed_reads % 100) == 0) {
-                ESP_LOGW(TAG, "read_sensor: %lu/%lu reads failed",
-                         (unsigned long)failed_reads, (unsigned long)total_reads);
-            }
-            vTaskDelay(pdMS_TO_TICKS(1));
-            continue;
-        }
-
-        if (s_driver->get_last_packet(raw, sizeof(raw))) {
-            process_raw_packet(raw, rx_time_us);
-        }
-        taskYIELD();
+  while (true) {
+    // Wait until the state machine says we are RUNNING
+    if (!lidar_is_running()) {
+      vTaskDelay(pdMS_TO_TICKS(10));
+      continue;
     }
-    vTaskDelete(nullptr);
+
+    // At this point s_driver is guaranteed to be non-NULL
+    LYDSTO_Driver::MeasurementResult result{};
+    const bool ok = s_driver->read_sensor(result);
+    const int64_t rx_time_us = esp_timer_get_time();
+
+    ++total_reads;
+    if (!ok) {
+      ++failed_reads;
+      if ((failed_reads % 100) == 0) {
+        ESP_LOGW(TAG, "read_sensor: %lu/%lu reads failed",
+                 (unsigned long)failed_reads, (unsigned long)total_reads);
+      }
+      vTaskDelay(pdMS_TO_TICKS(1));
+      continue;
+    }
+
+    if (s_driver->get_last_packet(raw, sizeof(raw))) {
+      process_raw_packet(raw, rx_time_us);
+    }
+    taskYIELD();
+  }
+  vTaskDelete(nullptr);
 }
 
 // ============================================================================
-//  Lifecycle task
+//  Lifecycle task (exposed for shelfbot.cpp task creation)
 // ============================================================================
 
-static void lidar_lifecycle_task(void* /*arg*/)
+void lidar_lifecycle_task_fn(void* /*arg*/)
 {
     static constexpr uint32_t RETRY_MS = 1000;
 
@@ -353,13 +300,16 @@ static void lidar_lifecycle_task(void* /*arg*/)
     }
     ESP_LOGI(TAG, "State: INIT");
 
-    s_driver = new LYDSTO_Driver(LIDAR_UART_PORT, LIDAR_TX_PIN, LIDAR_RX_PIN, LIDAR_BAUD_RATE);
+    // Use the static driver instance — no heap allocation
+    s_driver = &s_driver_instance;
     const char* init_err = s_driver->init();
     if (init_err) {
-        ESP_LOGE(TAG, "LYDSTO init failed: %s", init_err);
-        delete s_driver;
+        ESP_LOGE(TAG, "LYDSTO init failed: %s (free heap=%u)",
+                 init_err, (unsigned)esp_get_free_heap_size());
         s_driver = nullptr;
         s_state = LidarSensorState::ERROR;
+        StateMachine::changeState("lidar_sensor",
+            stateToString(LidarSensorState::ERROR), true);
         StateMachine::recover();
         vTaskDelete(nullptr);
         return;
@@ -369,7 +319,7 @@ static void lidar_lifecycle_task(void* /*arg*/)
         StateMachine::advance("lidar_sensor");
         vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
     }
-    ESP_LOGI(TAG, "State: RUNNING – spawning read task");
+    ESP_LOGI(TAG, "State: RUNNING — read task already created by shelfbot");
 
     s_scans[0].clear();
     s_scans[1].clear();
@@ -384,7 +334,10 @@ static void lidar_lifecycle_task(void* /*arg*/)
     s_time_wrap_count  = 0;
     s_state            = LidarSensorState::RUNNING;
 
-    xTaskCreate(lidar_read_task, "lidar_read", 4096, nullptr, 3, &s_read_task);
+    // Note: lidar_read_task_fn is already running (created by shelfbot.cpp)
+    // and will start producing valid packets now that s_driver is set and
+    // s_state == RUNNING.
+
     vTaskDelete(nullptr);
 }
 
@@ -394,11 +347,11 @@ static void lidar_lifecycle_task(void* /*arg*/)
 
 void lidar_setup()
 {
-    ESP_LOGI(TAG, "lidar_setup");
+    ESP_LOGI(TAG, "lidar_setup (free heap=%u)", (unsigned)esp_get_free_heap_size());
     s_scan_mutex = xSemaphoreCreateMutex();
     configASSERT(s_scan_mutex);
     s_state = LidarSensorState::SETUP;
-    xTaskCreate(lidar_lifecycle_task, "lidar_lifecycle", 4096, nullptr, 3, nullptr);
+    // Tasks are created by shelfbot.cpp — do NOT spawn here.
 }
 
 void lidar_stop()
@@ -407,12 +360,15 @@ void lidar_stop()
         vTaskDelete(s_read_task);
         s_read_task = nullptr;
     }
-    if (s_driver) {
-        delete s_driver;
-        s_driver = nullptr;
-    }
+    // Static driver — just mark uninitialised, destructor called at program end
+    s_driver = nullptr;
     s_state = LidarSensorState::STOPPED;
     ESP_LOGI(TAG, "Stopped");
+}
+
+void lidar_set_read_task_handle(TaskHandle_t h)
+{
+    s_read_task = h;
 }
 
 LidarSensorState lidar_get_state() { return s_state; }
@@ -428,7 +384,10 @@ bool lidar_get_latest_scan(LidarScan& out)
     }
     const int ready_idx = s_building_idx ^ 1;
     out = s_scans[ready_idx];
-    s_scan_ready = false;
+    // Do NOT clear s_scan_ready here — the HTTP server and micro-ROS both
+    // poll this independently.  The lidar_sensor produces a new scan every
+    // ~167 ms which will overwrite the slot naturally.  Clearing it here
+    // would cause the HTTP server or micro-ROS to miss every other scan.
     xSemaphoreGive(s_scan_mutex);
     return true;
 }

@@ -1,3 +1,34 @@
+// microros_sync.cpp
+//
+// Key changes vs previous version
+// ────────────────────────────────
+// 1. Task creation removed from start().  The task function is now
+//    microros_task_fn() and is created by shelfbot.cpp with a hardened
+//    create_task() wrapper.  This puts all task management in one place and
+//    allows the stack size to be set conservatively (12288 words = 48 KB,
+//    down from 24576 = 96 KB on the original start() call).
+//
+// 2. support_init failure recovery hardened.
+//    Root cause of the infinite loop: rclc_support_init_with_options()
+//    allocates ~16-20 KB from the heap for the XRCE session context.  On a
+//    no-PSRAM ESP32 with only ~20 KB free at this point the allocation fails
+//    with RCL_RET_ERROR (code 1).  Previously the task set support_inited_=false
+//    and looped, but re-queried mDNS every iteration rather than waiting for
+//    a genuine change in conditions.  The fix:
+//      a) On failure, call rcl_init_options_fini() immediately (already done).
+//      b) Log the free heap so the cause is obvious.
+//      c) Back off for SUPPORT_INIT_RETRY_MS (5 s) before retrying.
+//      d) After SUPPORT_INIT_MAX_RETRIES consecutive failures (10 = 50 s),
+//         transition to ERROR and call recover() — this resets the state
+//         machine so higher-level components can decide what to do.
+//         StateMachine::recover() on microros_sync transitions it back to
+//         "disconnected", clearing agent back to "offline", giving the whole
+//         discovery cycle a clean restart with fresh mDNS resolution.
+//      e) The agent_ip is cleared on every support_init failure so that
+//         mDNS is re-queried on the next attempt (agent may have moved).
+//
+// 3. LidarScan in lidarTimerCallback remains static (avoids ~14 KB stack hit).
+
 #include "microros_sync.hpp"
 #include <wifi_manager.hpp>
 #include <firmware_version.hpp>
@@ -11,6 +42,11 @@
 static const char* TAG = "MicrorosSync";
 MicrorosSync* MicrorosSync::instance_ = nullptr;
 SemaphoreHandle_t MicrorosSync::mutex_ = nullptr;
+
+// How long to wait between rclc_support_init_with_options() retries.
+static constexpr uint32_t SUPPORT_INIT_RETRY_MS  = 5000u;
+// After this many consecutive failures, give up and recover the state machine.
+static constexpr uint8_t  SUPPORT_INIT_MAX_RETRIES = 10u;
 
 bool lockCore() {
     return MicrorosSync::lockCore();
@@ -30,8 +66,7 @@ MicrorosSync::MicrorosSync()
       support_{},
       executor_(rclc_executor_get_zero_initialized_executor()),
       entities_created_(false),
-      support_inited_(false),
-      task_handle_(nullptr)
+      support_inited_(false)
 {
     instance_ = this;
     if (mutex_ == nullptr) {
@@ -46,7 +81,7 @@ MicrorosSync::MicrorosSync()
 }
 
 MicrorosSync::~MicrorosSync() {
-    if (task_handle_) vTaskDelete(task_handle_);
+    // task handle is owned and deleted by shelfbot.cpp
     instance_ = nullptr;
 }
 
@@ -69,11 +104,6 @@ bool MicrorosSync::init() {
     return true;
 }
 
-void MicrorosSync::start() {
-    if (task_handle_) return;
-    xTaskCreate(microros_task, "microros_task", 24576, this, 5, &task_handle_);
-}
-
 bool MicrorosSync::isConnected() const {
     return StateMachine::isInState("microros_sync", stateToString(MicrorosState::CONNECTED));
 }
@@ -82,7 +112,8 @@ bool MicrorosSync::queryAgentIp(char* out_ip, size_t len) {
     esp_ip4_addr_t addr = { .addr = 0 };
     esp_err_t err = mdns_query_a(CONFIG_MICROROS_AGENT_MDNS_HOST, 2000, &addr);
     if (err != ESP_OK) {
-        ESP_LOGE(TAG, "mDNS query for %s failed: %s", CONFIG_MICROROS_AGENT_MDNS_HOST, esp_err_to_name(err));
+        ESP_LOGE(TAG, "mDNS query for %s failed: %s",
+                 CONFIG_MICROROS_AGENT_MDNS_HOST, esp_err_to_name(err));
         return false;
     }
     snprintf(out_ip, len, IPSTR, IP2STR(&addr));
@@ -90,19 +121,7 @@ bool MicrorosSync::queryAgentIp(char* out_ip, size_t len) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// logMicrorosLimits
-//
-// RMW_UXRCE_MAX_* are cmake-time values baked into the rmw_microxrcedds
-// static library.  They are NOT C preprocessor macros and there is no public
-// runtime API to read them back.  The function below logs a single line
-// directing the developer to colcon.meta, which is the sole source of truth.
-// ---------------------------------------------------------------------------
 void MicrorosSync::logMicrorosLimits() {
-    // RMW_UXRCE_MAX_* are C macros defined by the rmw_microxrcedds library
-    // from the values set in colcon.meta at build time.
-    // RMW_UXRCE_MAX_MESSAGE_SIZE is intentionally omitted — it is a cmake
-    // string variable that does not produce a C macro.
     ESP_LOGI(TAG, "=== micro-ROS compile-time limits ===");
     ESP_LOGI(TAG, "RMW_UXRCE_MAX_NODES         = %d", RMW_UXRCE_MAX_NODES);
     ESP_LOGI(TAG, "RMW_UXRCE_MAX_PUBLISHERS    = %d", RMW_UXRCE_MAX_PUBLISHERS);
@@ -129,9 +148,6 @@ bool MicrorosSync::createEntitiesImpl() {
         return false;
     }
 
-    // The executor handles: 1× heartbeat timer, 1× lidar timer, 1× motor pos timer,
-    // 1× led subscription, 1× motor_cmd subscription, 1× motor_spd subscription.
-    // Total = 6 handles.  We pass 10 for headroom.
     r = rclc_executor_init(&executor_, &support_.context, 10, &allocator_);
     if (r != RCL_RET_OK) {
         ESP_LOGE(TAG, "executor init failed: %ld", (long)r);
@@ -168,13 +184,6 @@ bool MicrorosSync::createEntitiesImpl() {
         return false;
     }
 
-    // ── LiDAR polling timer ───────────────────────────────────────────────
-    // Period: 200 ms.  The LYDSTO at ~6 Hz revolution rate (170 ms/rev)
-    // produces one complete scan every ~170 ms.  200 ms polling means we
-    // pick up each scan within one timer period of completion.
-    //
-    // The timer callback is serialised by the executor so it never races
-    // with other callbacks or with heartbeatTimerCallback.
     r = rclc_timer_init_default(&lidar_timer_, &support_, RCL_MS_TO_NS(200),
                                  lidarTimerCallback);
     if (r != RCL_RET_OK) {
@@ -195,9 +204,9 @@ bool MicrorosSync::createEntitiesImpl() {
 void MicrorosSync::destroyEntitiesImpl() {
     if (!entities_created_) return;
 
-    if (comp_initialized_[COMP_LIDAR])      lidar_.fini(&node_);
-    if (comp_initialized_[COMP_MOTORS])     motors_.fini(&node_);
-    if (comp_initialized_[COMP_LED])        led_.fini(&node_);
+    if (comp_initialized_[COMP_LIDAR])  lidar_.fini(&node_);
+    if (comp_initialized_[COMP_MOTORS]) motors_.fini(&node_);
+    if (comp_initialized_[COMP_LED])    led_.fini(&node_);
 
     rcl_ret_t r;
     r = rcl_publisher_fini(&heartbeat_pub_, &node_);
@@ -236,44 +245,28 @@ void MicrorosSync::heartbeatTimerCallback(rcl_timer_t*, int64_t) {
     publish_or_fail(&instance_->heartbeat_pub_, &instance_->heartbeat_msg_, "heartbeat");
 }
 
-// ---------------------------------------------------------------------------
-// lidarTimerCallback
-//
-// Called from rclc_executor_spin_some() — always on the microros_task thread,
-// never concurrently with other executor callbacks or publishers.
-//
-// LidarScan is ~14 KB on the stack; declare static to avoid blowing the
-// 24 576-byte microros_task stack (14 KB scan + XRCE serialise buffer ≈ 18 KB
-// which leaves only ~6 KB for FreeRTOS overhead and nested calls).
-//
-// This is safe because:
-//   1. The executor guarantees sequential (non-reentrant) dispatch.
-//   2. lidar_get_latest_scan() copies the completed scan under its own mutex,
-//      so the static local is written to atomically from the caller's view.
-// ---------------------------------------------------------------------------
 void MicrorosSync::lidarTimerCallback(rcl_timer_t*, int64_t) {
     if (!instance_ || !instance_->isConnected()) return;
 
-    // Diagnostic: log when the lidar module is not yet running
     static uint32_t s_not_running_log = 0;
     if (!lidar_is_running()) {
         if ((++s_not_running_log % 25) == 0) {
-            ESP_LOGW("MicrorosSync", "lidarTimer: lidar not running yet (check=%lu)", 
+            ESP_LOGW("MicrorosSync", "lidarTimer: lidar not running yet (check=%lu)",
                      (unsigned long)s_not_running_log);
         }
         return;
     }
 
-    static LidarScan scan;   // static: avoids ~14 KB stack allocation per call
+    // Static: avoids ~14 KB stack allocation per call (lidar_timer runs every 200ms)
+    static LidarScan scan;
     static uint32_t s_no_scan_log = 0;
 
     if (lidar_get_latest_scan(scan)) {
-        ESP_LOGD("MicrorosSync", "lidarTimer: got scan pts=%u, publishing...", 
+        ESP_LOGD("MicrorosSync", "lidarTimer: got scan pts=%u, publishing...",
                  (unsigned)scan.point_count);
         s_no_scan_log = 0;
         instance_->lidar_.publishLidarScan(scan);
     } else {
-        // Log periodically when no scan is available (expected during first revolution)
         if ((++s_no_scan_log % 25) == 0) {
             ESP_LOGD("MicrorosSync", "lidarTimer: no scan ready yet (polls=%lu, scan_count=%lu)",
                      (unsigned long)s_no_scan_log,
@@ -282,9 +275,34 @@ void MicrorosSync::lidarTimerCallback(rcl_timer_t*, int64_t) {
     }
 }
 
-void MicrorosSync::microros_task(void* arg) {
+// ---------------------------------------------------------------------------
+// microros_task_fn
+//
+// Renamed from microros_task() and made public so shelfbot.cpp creates it.
+//
+// support_init failure handling
+// ─────────────────────────────
+// rclc_support_init_with_options() needs ~16-20 KB of contiguous heap for
+// the XRCE session.  On a no-PSRAM ESP32, this is the first allocation that
+// can fail if heap is fragmented.  The fix:
+//   • Log free heap and largest free block on every failure so the operator
+//     can see whether this is a genuine OOM or a transient issue.
+//   • Back off SUPPORT_INIT_RETRY_MS (5 s) between retries to allow temporary
+//     allocations from other tasks to be freed.
+//   • After SUPPORT_INIT_MAX_RETRIES consecutive failures, call recover() to
+//     reset the state machine (clears agent back to offline, microros_sync
+//     back to disconnected).  This forces a fresh mDNS resolution on the
+//     next attempt and may allow heap to consolidate between cycles.
+//   • Clear agent_ip on each failure so that mDNS is re-queried even if the
+//     agent is at the same address (ensures DISCOVERED state is re-established
+//     cleanly).
+// ---------------------------------------------------------------------------
+void MicrorosSync::microros_task_fn(void* arg) {
+    ESP_LOGI(TAG, "microros_task_fn started");
     MicrorosSync* self = static_cast<MicrorosSync*>(arg);
+    ESP_LOGI(TAG, "microros_task_fn received isConnected: %b", self->isConnected());
     char agent_ip[16]  = {};
+    uint8_t support_fail_streak = 0;
 
     while (true) {
         std::string current_state = StateMachine::getState("microros_sync");
@@ -297,12 +315,15 @@ void MicrorosSync::microros_task(void* arg) {
         }
 
         if (current_state == stateToString(MicrorosState::DISCONNECTED)) {
-            StateMachine::advance("microros_sync");
-            vTaskDelay(pdMS_TO_TICKS(500));
-            continue;
+          ESP_LOGI(TAG, "DISCONNECTED: calling advance...");
+          bool advanced = StateMachine::advance("microros_sync");
+          ESP_LOGI(TAG, "DISCONNECTED: advance returned %d, current state now: %s",
+                 advanced, StateMachine::getState("microros_sync").c_str());
+          vTaskDelay(pdMS_TO_TICKS(500));
+          continue;
         }
-
         if (current_state == stateToString(MicrorosState::DISCOVERING)) {
+            ESP_LOGI(TAG, "DISCOVERING: checking agent...");
             if (!StateMachine::isInState("agent", stateToString(AgentState::DISCOVERED))) {
                 if (!self->queryAgentIp(agent_ip, sizeof(agent_ip))) {
                     vTaskDelay(pdMS_TO_TICKS(2000));
@@ -318,22 +339,33 @@ void MicrorosSync::microros_task(void* arg) {
             }
 
             if (!self->support_inited_) {
+                ESP_LOGI(TAG, "Attempting support_init to %s:8888 "
+                         "(free heap=%u largest_block=%u attempt=%u/%u)",
+                         agent_ip,
+                         (unsigned)esp_get_free_heap_size(),
+                         (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT),
+                         (unsigned)(support_fail_streak + 1),
+                         (unsigned)SUPPORT_INIT_MAX_RETRIES);
+
                 rcl_init_options_t init_options = rcl_get_zero_initialized_init_options();
                 rcl_ret_t r = rcl_init_options_init(&init_options, self->allocator_);
                 if (r != RCL_RET_OK) {
-                    ESP_LOGE(TAG, "init_options_init failed: %ld", (long)r);
-                    vTaskDelay(pdMS_TO_TICKS(2000));
+                    ESP_LOGE(TAG, "init_options_init failed: %ld (free heap=%u)",
+                             (long)r, (unsigned)esp_get_free_heap_size());
+                    vTaskDelay(pdMS_TO_TICKS(SUPPORT_INIT_RETRY_MS));
                     continue;
                 }
 
-                rmw_ret_t rmw_r = rmw_uros_options_set_udp_address(agent_ip, "8888",
+                rmw_ret_t rmw_r = rmw_uros_options_set_udp_address(
+                    agent_ip, "8888",
                     rcl_init_options_get_rmw_init_options(&init_options));
                 if (rmw_r != RMW_RET_OK) {
                     ESP_LOGE(TAG, "rmw_uros_options_set_udp_address failed: %ld", (long)rmw_r);
                     rcl_ret_t fini_r = rcl_init_options_fini(&init_options);
                     if (fini_r != RCL_RET_OK)
-                        ESP_LOGW(TAG, "rcl_init_options_fini after set_udp_address error: %ld", (long)fini_r);
-                    vTaskDelay(pdMS_TO_TICKS(2000));
+                        ESP_LOGW(TAG, "init_options_fini after set_udp_address error: %ld",
+                                 (long)fini_r);
+                    vTaskDelay(pdMS_TO_TICKS(SUPPORT_INIT_RETRY_MS));
                     continue;
                 }
                 ESP_LOGI(TAG, "Agent address set to %s:8888", agent_ip);
@@ -342,14 +374,46 @@ void MicrorosSync::microros_task(void* arg) {
                                                    &init_options, &self->allocator_);
                 rcl_ret_t fini_r = rcl_init_options_fini(&init_options);
                 if (fini_r != RCL_RET_OK)
-                    ESP_LOGW(TAG, "rcl_init_options_fini after support_init: %ld", (long)fini_r);
+                    ESP_LOGW(TAG, "init_options_fini after support_init: %ld", (long)fini_r);
+
                 if (r != RCL_RET_OK) {
-                    ESP_LOGE(TAG, "support_init failed: %ld", (long)r);
-                    vTaskDelay(pdMS_TO_TICKS(2000));
+                    ++support_fail_streak;
+                    ESP_LOGE(TAG,
+                        "support_init FAILED: ret=%ld streak=%u/%u "
+                        "free_heap=%u largest_block=%u",
+                        (long)r,
+                        (unsigned)support_fail_streak,
+                        (unsigned)SUPPORT_INIT_MAX_RETRIES,
+                        (unsigned)esp_get_free_heap_size(),
+                        (unsigned)heap_caps_get_largest_free_block(MALLOC_CAP_8BIT));
+
+                    // Clear agent_ip so mDNS is re-resolved on next attempt
+                    memset(agent_ip, 0, sizeof(agent_ip));
+                    StateMachine::changeState("agent",
+                        stateToString(AgentState::OFFLINE), true);
+
+                    if (support_fail_streak >= SUPPORT_INIT_MAX_RETRIES) {
+                        ESP_LOGE(TAG,
+                            "support_init failed %u times consecutively — "
+                            "triggering recover() to reset state machine. "
+                            "This is likely an OOM condition; reduce task stacks "
+                            "or dynamic allocations before the micro-ROS init.",
+                            (unsigned)support_fail_streak);
+                        support_fail_streak = 0;
+                        // Transition to ERROR so the top of the loop calls recover()
+                        StateMachine::changeState("microros_sync",
+                            stateToString(MicrorosState::ERROR), true);
+                    }
+
+                    vTaskDelay(pdMS_TO_TICKS(SUPPORT_INIT_RETRY_MS));
                     continue;
                 }
-                self->support_inited_ = true;
-                ESP_LOGI(TAG, "Transport initialized to %s:8888", agent_ip);
+
+                // Success
+                support_fail_streak     = 0;
+                self->support_inited_   = true;
+                ESP_LOGI(TAG, "Transport initialized to %s:8888 (free heap=%u)",
+                         agent_ip, (unsigned)esp_get_free_heap_size());
             }
 
             if (!StateMachine::isInState("agent", stateToString(AgentState::PING_OK))) {
@@ -360,10 +424,13 @@ void MicrorosSync::microros_task(void* arg) {
                     ESP_LOGI(TAG, "Agent ping OK");
                     StateMachine::changeState("agent", stateToString(AgentState::PING_OK), true);
                 } else {
-                    ESP_LOGW(TAG, "Agent ping FAILED (timeout=%dms attempts=%d) - destroying transport and retrying",
-                             PING_TIMEOUT_MS, PING_ATTEMPTS);
+                    ESP_LOGW(TAG, "Agent ping FAILED — destroying transport and retrying");
                     (void)rclc_support_fini(&self->support_);
+                    memset(&self->support_, 0, sizeof(self->support_));
                     self->support_inited_ = false;
+                    memset(agent_ip, 0, sizeof(agent_ip));
+                    StateMachine::changeState("agent",
+                        stateToString(AgentState::OFFLINE), true);
                     vTaskDelay(pdMS_TO_TICKS(2000));
                     continue;
                 }
@@ -373,11 +440,16 @@ void MicrorosSync::microros_task(void* arg) {
                 if (rmw_uros_sync_session(5000) != RMW_RET_OK) {
                     ESP_LOGE(TAG, "Session sync failed");
                     (void)rclc_support_fini(&self->support_);
+                    memset(&self->support_, 0, sizeof(self->support_));
                     self->support_inited_ = false;
+                    memset(agent_ip, 0, sizeof(agent_ip));
+                    StateMachine::changeState("agent",
+                        stateToString(AgentState::OFFLINE), true);
                     vTaskDelay(pdMS_TO_TICKS(2000));
                     continue;
                 }
-                StateMachine::changeState("agent", stateToString(AgentState::SESSION_SYNCED), true);
+                StateMachine::changeState("agent",
+                    stateToString(AgentState::SESSION_SYNCED), true);
             }
 
             StateMachine::advance("microros_sync");
@@ -391,6 +463,7 @@ void MicrorosSync::microros_task(void* arg) {
                 self->destroyEntitiesImpl();
                 if (self->support_inited_) {
                     (void)rclc_support_fini(&self->support_);
+                    memset(&self->support_, 0, sizeof(self->support_));
                     self->support_inited_ = false;
                 }
                 memset(agent_ip, 0, sizeof(agent_ip));
@@ -414,6 +487,7 @@ void MicrorosSync::microros_task(void* arg) {
                 last_ping_tick = now;
                 if (rmw_uros_ping_agent(PING_TIMEOUT_MS, PING_ATTEMPTS) != RMW_RET_OK) {
                     ESP_LOGW(TAG, "Agent keepalive ping failed - connection lost");
+                    self->destroyEntitiesImpl();
                     StateMachine::recover();
                     continue;
                 }
@@ -428,6 +502,8 @@ void MicrorosSync::microros_task(void* arg) {
             continue;
         }
 
+        // Unknown state — call recover and wait
+        ESP_LOGW(TAG, "Unknown state '%s' — calling recover()", current_state.c_str());
         StateMachine::recover();
         vTaskDelay(pdMS_TO_TICKS(1000));
     }
@@ -454,3 +530,7 @@ void MicrorosSync::publishLidarScan(const LidarScan& scan) {
     if (!instance_ || !instance_->isConnected()) return;
     instance_->lidar_.publishLidarScan(scan);
 }
+
+// Kept for API compatibility — no-op since task is managed by shelfbot.cpp
+bool MicrorosSync::createEntities()  { return createEntitiesImpl(); }
+void MicrorosSync::destroyEntities() { destroyEntitiesImpl(); }

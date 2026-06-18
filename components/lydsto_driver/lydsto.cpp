@@ -2,29 +2,22 @@
 //
 // KEY CHANGES from original:
 //
-// 1. readPacket() timeout behaviour:
-//    Original: single 500 ms deadline — blocks until one packet arrives or
-//    times out, regardless of how many packets are already buffered.
-//    Revised:  two-phase approach:
-//      Phase 1 (non-blocking drain): if bytes are already in the UART buffer
-//              or parser_buf_, parse as many complete packets as possible with
-//              zero additional blocking time.
-//      Phase 2 (blocking wait):      only if phase 1 produced nothing, block
-//              for up to timeout_ms_ waiting for the next packet to arrive.
-//    This means a caller looping on readPacket() drains the hardware FIFO at
-//    full UART speed rather than one-packet-per-call.
+// 1. readPacket() timeout behaviour (two-phase approach):
+//    Phase 1 (non-blocking drain): if bytes are already buffered, parse as
+//    many complete packets as possible with zero additional blocking time.
+//    Phase 2 (blocking wait): only if phase 1 produced nothing, block for up
+//    to timeout_ms_ waiting for the next packet to arrive.
 //
-// 2. read_sensor() unchanged in interface — still returns one
-//    MeasurementResult. The change is that successive calls from
-//    continuous_read_loop now return distinct packets instead of the same
-//    one repeated.
+// 2. UART RX buffer: 1024 bytes (~21 packets of 47 bytes).
+//    The original 8192 bytes caused malloc failure on a no-PSRAM ESP32
+//    when heap was already fragmented after boot (~20 KB free).
+//    At 115200 baud, 47 bytes arrive in ~4 ms; the read task polls
+//    continuously so a 1 KB buffer is more than sufficient.
 //
-// 3. UART RX buffer enlarged from 4096 to 8192 bytes in init() to hold
-//    ~174 packets (47 bytes each) before overflow, giving the task more
-//    headroom if it briefly falls behind.
+// 3. Flush threshold 6144 → 900 (scaled to new buffer size).
 //
-// 4. Flush threshold raised from 1024 to 6144 bytes — only flush when the
-//    buffer is nearly full, not after a modest backlog.
+// 4. parser_buf_ kept at 512 bytes (internal software reassembly buffer —
+//    lives in BSS, not heap).
 
 #include <lydsto.hpp>
 
@@ -99,14 +92,19 @@ const char* LYDSTO_Driver::init() {
                      UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE) != ESP_OK)
         return "uart_set_pin failed";
 
-    // Enlarged RX buffer: 8192 bytes ≈ 174 packets of 47 bytes each.
-    // Gives the task more headroom before packets start being dropped.
-    if (uart_driver_install(uart_port_, 8192, 0, 0, nullptr, 0) != ESP_OK)
+    // 1024-byte RX buffer: ~21 packets of 47 bytes.
+    // The lidar_read_task polls continuously (no sleep between reads),
+    // so packets never accumulate.  A small buffer prevents malloc failure
+    // on no-PSRAM ESP32 where only ~20 KB of heap may remain at this point.
+    ESP_LOGI(TAG, "Installing UART driver (RX buf=1024, free heap=%u)",
+             (unsigned)esp_get_free_heap_size());
+    if (uart_driver_install(uart_port_, 1024, 0, 0, nullptr, 0) != ESP_OK)
         return "uart_driver_install failed";
 
     uart_flush_input(uart_port_);
     initialized_ = true;
-    ESP_LOGI(TAG, "UART init done (RX buffer 8192 bytes)");
+    ESP_LOGI(TAG, "UART init done (RX buffer 1024 bytes, free heap=%u)",
+             (unsigned)esp_get_free_heap_size());
     return nullptr;
 }
 
@@ -156,10 +154,6 @@ bool LYDSTO_Driver::extractMinDistance(const uint8_t* p,
 
 // ---------------------------------------------------------------------------
 // tryParseFromBuffer
-//
-// Scan parser_buf_[0..parser_len_) for a valid PACKET_LEN-byte frame.
-// If found: copy it to *packet, consume it from the buffer, return true.
-// If not found: return false (caller should fetch more bytes first).
 // ---------------------------------------------------------------------------
 bool LYDSTO_Driver::tryParseFromBuffer(uint8_t* packet) {
     for (size_t i = 0; i + PACKET_LEN <= parser_len_; ++i) {
@@ -169,7 +163,6 @@ bool LYDSTO_Driver::tryParseFromBuffer(uint8_t* packet) {
             memcpy(last_packet_, packet,          PACKET_LEN);
             has_last_packet_ = true;
             valid_packets_++;
-            // Remove consumed bytes from the front of the buffer
             const size_t remain = parser_len_ - (i + PACKET_LEN);
             memmove(parser_buf_, parser_buf_ + i + PACKET_LEN, remain);
             parser_len_ = remain;
@@ -180,35 +173,14 @@ bool LYDSTO_Driver::tryParseFromBuffer(uint8_t* packet) {
 }
 
 // ---------------------------------------------------------------------------
-// readPacket  (revised)
-//
-// Two-phase strategy:
-//
-//   Phase 1 — non-blocking drain
-//     Pull all bytes currently sitting in the UART hardware FIFO into
-//     parser_buf_ using a zero-wait uart_read_bytes call, then attempt to
-//     parse a complete packet. Repeat until either a packet is found or the
-//     FIFO is empty.  This processes the entire backlog at memory speed
-//     without any blocking delays.
-//
-//   Phase 2 — blocking wait
-//     Only entered if phase 1 produced nothing (FIFO was empty when called).
-//     Block for up to timeout_ms_ in 20 ms slices waiting for new bytes to
-//     arrive, then attempt to parse. This is the original behaviour and
-//     handles the steady-state case where the caller is faster than the lidar.
-//
-// The result: a tight caller loop (continuous_read_loop) will drain all
-// buffered packets in rapid succession instead of returning one packet per
-// 500 ms timeout cycle.
+// readPacket  (two-phase strategy — see file header)
 // ---------------------------------------------------------------------------
 bool LYDSTO_Driver::readPacket(uint8_t* packet) {
     timeout_occurred_ = false;
     static int sample_log_budget = 8;
 
-    // ── Helper: pull all available bytes from UART into parser_buf_ ──────
     auto drain_uart = [&]() {
         uint8_t rx_tmp[128];
-        // Use a 0-tick wait — non-blocking, take only what's there right now
         int n = uart_read_bytes(uart_port_, rx_tmp, sizeof(rx_tmp),
                                 pdMS_TO_TICKS(0));
         if (n <= 0) return;
@@ -229,9 +201,6 @@ bool LYDSTO_Driver::readPacket(uint8_t* packet) {
     };
 
     // ── Phase 1: non-blocking drain ───────────────────────────────────────
-    // Keep pulling bytes and parsing until the FIFO is empty.
-    // On a typical call when packets are backlogged this returns immediately
-    // with a complete packet.
     {
         size_t buffered = 0;
         uart_get_buffered_data_len(uart_port_, &buffered);
@@ -241,21 +210,17 @@ bool LYDSTO_Driver::readPacket(uint8_t* packet) {
             if (tryParseFromBuffer(packet)) {
                 return true;
             }
-            // Trim unparseable leading bytes to prevent buffer growth
             if (parser_len_ > PACKET_LEN) {
                 const size_t keep = PACKET_LEN - 1;
                 memmove(parser_buf_,
                         parser_buf_ + (parser_len_ - keep), keep);
                 parser_len_ = keep;
             }
-            // Check if there are still bytes in the hardware FIFO
             uart_get_buffered_data_len(uart_port_, &buffered);
         }
     }
 
     // ── Phase 2: blocking wait ────────────────────────────────────────────
-    // FIFO was empty — wait for the next packet from the lidar (up to
-    // timeout_ms_). This is the original code path for steady-state operation.
     const int64_t deadline =
         esp_timer_get_time() + static_cast<int64_t>(timeout_ms_) * 1000;
 
@@ -291,13 +256,12 @@ bool LYDSTO_Driver::readPacket(uint8_t* packet) {
         }
     }
 
-    // Timed out
     timeout_occurred_ = true;
     return false;
 }
 
 // ---------------------------------------------------------------------------
-// read_sensor  (unchanged interface)
+// read_sensor
 // ---------------------------------------------------------------------------
 bool LYDSTO_Driver::read_sensor(MeasurementResult& result) {
     result = {};
@@ -330,9 +294,9 @@ bool LYDSTO_Driver::read_sensor(MeasurementResult& result) {
             log_hex_preview("Parser tail", parser_buf_, parser_len_);
         }
 
-        // Flush only when nearly full — raised threshold avoids discarding
-        // packets that arrived during a brief processing delay.
-        if (buffered > 6144) {
+        // Flush when buffer is nearly full (scaled to 1024-byte buffer).
+        // 900 bytes leaves one packet worth of headroom.
+        if (buffered > 900) {
             ESP_LOGW(TAG, "RX buffer nearly full (%u bytes), flushing",
                      static_cast<unsigned>(buffered));
             uart_flush_input(uart_port_);

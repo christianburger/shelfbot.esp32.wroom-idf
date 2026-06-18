@@ -2,20 +2,14 @@
 //
 // Locking model
 // -------------
-// Public methods are self-locking — they acquire mutex_ on entry.
-// Internal helpers (_locked suffix) require the caller to hold mutex_.
+// All public methods attempt to take the internal mutex with a 100 ms timeout.
+// If the mutex cannot be acquired within that time, the method logs an error
+// and returns a safe default (false, empty string, or does nothing).
+// This prevents indefinite blocking and makes the system robust against
+// accidental long holds by other tasks.
 //
-// The critical fix vs previous versions:
-//   changeState() is now self-locking.  Previously it was documented as
-//   "caller must hold mutex_" but external components (wifi_manager,
-//   microros_sync) called it without holding it, producing races and the
-//   spurious "S -> S" log lines.  Now:
-//
-//     changeState()        — public, acquires mutex_, safe from anywhere.
-//     changeState_locked() — private, no lock, called by advance()/recover()
-//                            which already hold mutex_.
-//
-//   Both share the same body via the private implementation below.
+// Internal helpers (_locked suffix) require the caller to hold the mutex.
+// They are not protected by the timeout mechanism.
 
 #include "state_machine.hpp"
 #include "state_machine_lifecycle.hpp"
@@ -27,7 +21,7 @@ static const char* TAG = "StateMachine";
 // ---------------------------------------------------------------------------
 // Static member definitions
 // ---------------------------------------------------------------------------
-std::mutex StateMachine::mutex_;
+SemaphoreHandle_t StateMachine::mutex_ = nullptr;
 std::unordered_map<std::string, StateMachine::ModuleState> StateMachine::modules_;
 std::unordered_map<
     std::string,
@@ -37,6 +31,25 @@ TaskHandle_t StateMachine::status_task_handle_ = nullptr;
 bool         StateMachine::task_running_       = false;
 
 // ---------------------------------------------------------------------------
+// Mutex helpers with timeout
+// ---------------------------------------------------------------------------
+bool StateMachine::takeMutex() {
+    if (mutex_ == nullptr) {
+        ESP_LOGE(TAG, "takeMutex: mutex not initialized");
+        return false;
+    }
+    if (xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) != pdTRUE) {
+        ESP_LOGE(TAG, "takeMutex: timeout (100 ms) - lock held by another task");
+        return false;
+    }
+    return true;
+}
+
+void StateMachine::giveMutex() {
+    if (mutex_) xSemaphoreGive(mutex_);
+}
+
+// ---------------------------------------------------------------------------
 // init
 // ---------------------------------------------------------------------------
 void StateMachine::init() {
@@ -44,6 +57,14 @@ void StateMachine::init() {
         ESP_LOGW(TAG, "init() called again — already running, ignoring");
         return;
     }
+
+    // Create the mutex
+    if (mutex_ == nullptr) {
+        mutex_ = xSemaphoreCreateMutex();
+        configASSERT(mutex_ != nullptr);
+        ESP_LOGI(TAG, "StateMachine mutex created");
+    }
+
     task_running_ = true;
     const BaseType_t ret = xTaskCreate(
         status_dump_task, "sm_dump", 4096, nullptr,
@@ -64,24 +85,28 @@ void StateMachine::init() {
 bool StateMachine::setInitial(const std::string& module,
                               const std::string& initial_state,
                               const std::vector<std::string>& ordered_states) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    if (!takeMutex()) return false;
+
+    bool result = false;
     if (modules_.find(module) != modules_.end()) {
         ESP_LOGW(TAG, "setInitial: module '%s' already registered — ignoring duplicate",
                  module.c_str());
-        return false;
+    } else {
+        if (!ordered_states.empty()) {
+            bool found = false;
+            for (const auto& s : ordered_states)
+                if (s == initial_state) { found = true; break; }
+            if (!found)
+                ESP_LOGE(TAG, "setInitial: module '%s' initial_state '%s' not in ordered_states",
+                         module.c_str(), initial_state.c_str());
+        }
+        modules_.emplace(module, ModuleState(initial_state, ordered_states));
+        ESP_LOGI(TAG, "Registered module '%-20s' initial state: %s",
+                 module.c_str(), initial_state.c_str());
+        result = true;
     }
-    if (!ordered_states.empty()) {
-        bool found = false;
-        for (const auto& s : ordered_states)
-            if (s == initial_state) { found = true; break; }
-        if (!found)
-            ESP_LOGE(TAG, "setInitial: module '%s' initial_state '%s' not in ordered_states",
-                     module.c_str(), initial_state.c_str());
-    }
-    modules_.emplace(module, ModuleState(initial_state, ordered_states));
-    ESP_LOGI(TAG, "Registered module '%-20s' initial state: %s",
-             module.c_str(), initial_state.c_str());
-    return true;
+    giveMutex();
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -90,7 +115,8 @@ bool StateMachine::setInitial(const std::string& module,
 void StateMachine::registerPrerequisite(const std::string& module,
                                          const std::string& target_state,
                                          const Prerequisite& prereq) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    if (!takeMutex()) return;
+
     if (modules_.find(module) == modules_.end())
         ESP_LOGE(TAG, "registerPrerequisite: subject module '%s' not yet registered",
                  module.c_str());
@@ -101,6 +127,8 @@ void StateMachine::registerPrerequisite(const std::string& module,
     ESP_LOGI(TAG, "Prereq: '%s'->'%s' requires '%s'>='%s'",
              module.c_str(), target_state.c_str(),
              prereq.prereq_module.c_str(), prereq.min_state.c_str());
+
+    giveMutex();
 }
 
 // ---------------------------------------------------------------------------
@@ -143,9 +171,6 @@ bool StateMachine::prereqsSatisfied_locked(const std::string& module,
 
 // ---------------------------------------------------------------------------
 // changeState_locked  (private — mutex must already be held by caller)
-//
-// This is the single write path for module states.  Both changeState() (public,
-// self-locking) and the internal advance()/recover() callers end up here.
 // ---------------------------------------------------------------------------
 bool StateMachine::changeState_locked(const std::string& module,
                                       const std::string& new_state,
@@ -178,13 +203,15 @@ bool StateMachine::changeState_locked(const std::string& module,
 }
 
 // ---------------------------------------------------------------------------
-// changeState  (public — self-locking, safe to call from any component)
+// changeState  (public — self-locking with timeout)
 // ---------------------------------------------------------------------------
 bool StateMachine::changeState(const std::string& module,
                                const std::string& new_state,
                                bool force_skip_prereqs) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return changeState_locked(module, new_state, force_skip_prereqs);
+    if (!takeMutex()) return false;
+    bool result = changeState_locked(module, new_state, force_skip_prereqs);
+    giveMutex();
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -192,8 +219,10 @@ bool StateMachine::changeState(const std::string& module,
 // ---------------------------------------------------------------------------
 bool StateMachine::canTransition(const std::string& module,
                                   const std::string& new_state) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return prereqsSatisfied_locked(module, new_state);
+    if (!takeMutex()) return false;
+    bool result = prereqsSatisfied_locked(module, new_state);
+    giveMutex();
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -207,8 +236,14 @@ bool StateMachine::waitForPrerequisites(const std::string& module,
     const TickType_t timeout = pdMS_TO_TICKS(timeout_ms);
     const TickType_t poll    = pdMS_TO_TICKS(poll_ms);
     while (true) {
-        { std::lock_guard<std::mutex> lock(mutex_);
-          if (prereqsSatisfied_locked(module, target_state)) return true; }
+        if (!takeMutex()) {
+            // If we can't get the lock, wait and try again
+            vTaskDelay(poll);
+            continue;
+        }
+        bool satisfied = prereqsSatisfied_locked(module, target_state);
+        giveMutex();
+        if (satisfied) return true;
         if ((xTaskGetTickCount() - start) >= timeout) {
             ESP_LOGW(TAG, "waitForPrerequisites: timeout (%u ms) for '%s'->'%s'",
                      (unsigned)timeout_ms, module.c_str(), target_state.c_str());
@@ -223,26 +258,34 @@ bool StateMachine::waitForPrerequisites(const std::string& module,
 // ---------------------------------------------------------------------------
 bool StateMachine::isAtLeast(const std::string& module,
                               const std::string& min_state) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    if (!takeMutex()) return false;
     auto it = modules_.find(module);
-    if (it == modules_.end()) return false;
+    if (it == modules_.end()) {
+        giveMutex();
+        return false;
+    }
     const int cur  = it->second.current_rank();
     const int need = it->second.rank(min_state);
     if (need < 0) {
         ESP_LOGE(TAG, "isAtLeast: unknown state '%s' for module '%s'",
                  min_state.c_str(), module.c_str());
+        giveMutex();
         return false;
     }
-    return cur >= need;
+    bool result = cur >= need;
+    giveMutex();
+    return result;
 }
 
 // ---------------------------------------------------------------------------
 // isInState
 // ---------------------------------------------------------------------------
 bool StateMachine::isInState(const std::string& module, const std::string& state) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    if (!takeMutex()) return false;
     auto it = modules_.find(module);
-    return (it != modules_.end()) && (it->second.current_state == state);
+    bool result = (it != modules_.end()) && (it->second.current_state == state);
+    giveMutex();
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -250,9 +293,15 @@ bool StateMachine::isInState(const std::string& module, const std::string& state
 // ---------------------------------------------------------------------------
 const std::string& StateMachine::getState(const std::string& module) {
     static const std::string empty;
-    std::lock_guard<std::mutex> lock(mutex_);
+    if (!takeMutex()) return empty;
     auto it = modules_.find(module);
-    return (it != modules_.end()) ? it->second.current_state : empty;
+    if (it != modules_.end()) {
+        const std::string& result = it->second.current_state;
+        giveMutex();
+        return result;
+    }
+    giveMutex();
+    return empty;
 }
 
 // ---------------------------------------------------------------------------
@@ -272,10 +321,11 @@ static std::vector<std::string> getOrderedStates(const std::string& module) {
 }
 
 // ---------------------------------------------------------------------------
-// advance (all modules)
+// advance (all modules) - unused, kept as void
 // ---------------------------------------------------------------------------
 void StateMachine::advance() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    if (!takeMutex()) return;
+
     std::unordered_map<std::string, std::string> current_map;
     current_map.reserve(modules_.size());
     for (const auto& kv : modules_) current_map[kv.first] = kv.second.current_state;
@@ -306,19 +356,24 @@ void StateMachine::advance() {
             }
         }
     } while (changed);
+
+    giveMutex();
 }
 
 // ---------------------------------------------------------------------------
-// advance (single module)
+// advance (single module) - returns bool and logs reason on failure
 // ---------------------------------------------------------------------------
-void StateMachine::advance(const std::string& module) {
-    std::lock_guard<std::mutex> lock(mutex_);
+bool StateMachine::advance(const std::string& module) {
+    if (!takeMutex()) return false;
+
     auto it = modules_.find(module);
     if (it == modules_.end()) {
-        ESP_LOGW(TAG, "advance('%s'): module not registered", module.c_str());
-        return;
+        ESP_LOGW(TAG, "advance('%s') FAILED: module not registered", module.c_str());
+        giveMutex();
+        return false;
     }
 
+    // Build current state map for transition rule checks
     std::unordered_map<std::string, std::string> current_map;
     current_map.reserve(modules_.size());
     for (const auto& kv : modules_) current_map[kv.first] = kv.second.current_state;
@@ -326,35 +381,64 @@ void StateMachine::advance(const std::string& module) {
     const std::string& current = it->second.current_state;
     const auto ordered = getOrderedStates(module);
     if (ordered.empty()) {
-        ESP_LOGW(TAG, "advance('%s'): no ordered state list", module.c_str());
-        return;
+        ESP_LOGW(TAG, "advance('%s') FAILED: no ordered state list", module.c_str());
+        giveMutex();
+        return false;
     }
 
     int cur_idx = -1;
     for (size_t i = 0; i < ordered.size(); ++i)
         if (ordered[i] == current) { cur_idx = (int)i; break; }
     if (cur_idx < 0) {
-        ESP_LOGE(TAG, "advance('%s'): current state '%s' not in ordered list",
+        ESP_LOGE(TAG, "advance('%s') FAILED: current state '%s' not in ordered list",
                  module.c_str(), current.c_str());
-        return;
+        giveMutex();
+        return false;
     }
 
+    // Check if already at the last state
+    if ((size_t)cur_idx == ordered.size() - 1) {
+        ESP_LOGD(TAG, "advance('%s'): already at final state '%s'", module.c_str(), current.c_str());
+        giveMutex();
+        return false;
+    }
+
+    // Try each next state in order
     for (size_t ni = (size_t)cur_idx + 1; ni < ordered.size(); ++ni) {
         const std::string& next = ordered[ni];
-        if (!prereqsSatisfied_locked(module, next)) continue;
-        if (!::is_allowed_transition(module, next, current_map)) continue;
-        changeState_locked(module, next, true);
-        return;
+
+        // Check prerequisites
+        if (!prereqsSatisfied_locked(module, next)) {
+            ESP_LOGW(TAG, "advance('%s') -> '%s' BLOCKED by prerequisites", module.c_str(), next.c_str());
+            // Log the first unsatisfied prerequisite for debugging
+            continue;
+        }
+
+        // Check allowed transitions
+        if (!::is_allowed_transition(module, next, current_map)) {
+            ESP_LOGW(TAG, "advance('%s') -> '%s' NOT ALLOWED by transition rules", module.c_str(), next.c_str());
+            continue;
+        }
+
+        // Attempt the transition
+        if (changeState_locked(module, next, true)) {
+            ESP_LOGI(TAG, "advance('%s') -> '%s' SUCCEEDED", module.c_str(), next.c_str());
+            giveMutex();
+            return true;
+        }
+        // If changeState_locked returns false, it already logged the reason
+        break; // stop at first eligible transition that fails
     }
-    ESP_LOGD(TAG, "advance('%s'): no eligible transition from '%s'",
-             module.c_str(), current.c_str());
+
+    giveMutex();
+    return false;
 }
 
 // ---------------------------------------------------------------------------
 // recover
 // ---------------------------------------------------------------------------
 void StateMachine::recover() {
-    std::lock_guard<std::mutex> lock(mutex_);
+    if (!takeMutex()) return;
 
     for (auto& kv : modules_) {
         const std::string& module = kv.first;
@@ -396,18 +480,21 @@ void StateMachine::recover() {
                 ESP_LOGW(TAG, "recover: time_sync -> unsynced (wifi disconnected)");
         }
     }
+
+    giveMutex();
 }
 
 // ---------------------------------------------------------------------------
 // Status dump task
 // ---------------------------------------------------------------------------
 void StateMachine::dumpAllStates() {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (modules_.empty()) { ESP_LOGI(TAG, "No modules registered"); return; }
+    if (!takeMutex()) return;
+    if (modules_.empty()) { ESP_LOGI(TAG, "No modules registered"); giveMutex(); return; }
     ESP_LOGI(TAG, "===== State Machine Status =====");
     for (const auto& kv : modules_)
         ESP_LOGI(TAG, "  %-24s : %s", kv.first.c_str(), kv.second.current_state.c_str());
     ESP_LOGI(TAG, "================================");
+    giveMutex();
 }
 
 void StateMachine::status_dump_task(void* /*arg*/) {

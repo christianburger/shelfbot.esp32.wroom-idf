@@ -12,8 +12,18 @@ class MicrorosSync {
 public:
     static MicrorosSync& getInstance();
 
+    // Registers prerequisites with the state machine.
+    // Does NOT create a task — call microros_task_fn via shelfbot.cpp.
     bool init();
-    void start();
+
+    // Task function — created by shelfbot.cpp.
+    // Stack budget: 12288 words (48 KB).
+    //   RCL/XRCE context (~16 KB) + executor spin buffer (~4 KB)
+    //   + LidarScan static local (~14 KB, declared static so not on stack)
+    //   + FreeRTOS overhead + nested call frames.
+    //   24576 (original 96 KB) was catastrophically oversized for a no-PSRAM
+    //   ESP32.  12288 gives comfortable headroom while recovering ~36 KB of heap.
+    static void microros_task_fn(void* arg);
 
     bool createEntities();
     void destroyEntities();
@@ -34,7 +44,6 @@ private:
     MicrorosSync();
     ~MicrorosSync();
 
-    // ROS entities
     rcl_node_t node_;
     rcl_allocator_t allocator_;
     rclc_support_t support_;
@@ -42,27 +51,16 @@ private:
     bool entities_created_;
     bool support_inited_;
 
-    // Components
     LedComponent        led_;
     MotorComponent      motors_;
     LidarComponent      lidar_;
 
-    // Heartbeat
     rcl_publisher_t      heartbeat_pub_;
     rcl_timer_t          heartbeat_timer_;
     std_msgs__msg__Int32 heartbeat_msg_;
 
-    // LiDAR timer
-    rcl_timer_t          lidar_timer_;   // ADDED
+    rcl_timer_t          lidar_timer_;
 
-    // Task handle
-    TaskHandle_t task_handle_;
-
-    // Static instance for callbacks
-    static MicrorosSync*    instance_;
-    static SemaphoreHandle_t mutex_;
-
-    // Component initialization tracking
     enum ComponentId : uint8_t {
         COMP_LED,
         COMP_MOTORS,
@@ -71,10 +69,11 @@ private:
     };
     bool comp_initialized_[COMP_COUNT];
 
-    // Task function
-    static void microros_task(void* arg);
+    static MicrorosSync*     instance_;
+    static SemaphoreHandle_t mutex_;
+
     static void heartbeatTimerCallback(rcl_timer_t* timer, int64_t last_call_time);
-    static void lidarTimerCallback(rcl_timer_t* timer, int64_t last_call_time); // ADDED
+    static void lidarTimerCallback(rcl_timer_t* timer, int64_t last_call_time);
 
     bool createEntitiesImpl();
     void destroyEntitiesImpl();

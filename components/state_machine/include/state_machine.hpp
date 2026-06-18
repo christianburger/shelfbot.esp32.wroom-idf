@@ -1,7 +1,6 @@
 #pragma once
 
 #include <idf_c_includes.hpp>
-#include <mutex>
 #include <unordered_map>
 #include <vector>
 #include <string>
@@ -11,14 +10,14 @@
 //
 // Locking model
 // -------------
-// All public methods acquire mutex_ themselves.  Internal helpers that are
-// called from already-locked contexts are suffixed _locked and must only be
-// called while the caller holds mutex_.
+// All public methods attempt to take the internal mutex with a 100 ms timeout.
+// If the mutex cannot be acquired within that time, the method logs an error
+// and returns a safe default (false, empty string, or does nothing).
+// This prevents indefinite blocking and makes the system robust against
+// accidental long holds by other tasks.
 //
-// changeState() is the sole write path for module states.  It is public and
-// self-locking so that external components (wifi_manager, microros_sync, etc.)
-// can call it safely without knowing about the internal mutex.  Internally,
-// advance() and recover() call changeState_locked() to avoid re-entrant locking.
+// Internal helpers suffixed with _locked must only be called while the
+// caller holds the mutex.
 // ---------------------------------------------------------------------------
 
 class StateMachine {
@@ -57,7 +56,7 @@ public:
                                      const std::string& target_state,
                                      const Prerequisite& prereq);
 
-    // Read-only queries — all self-locking.
+    // Read-only queries — all self-locking with timeout.
     static bool isAtLeast(const std::string& module, const std::string& min_state);
     static bool isInState(const std::string& module, const std::string& state);
     static bool canTransition(const std::string& module, const std::string& new_state);
@@ -67,12 +66,12 @@ public:
                                      uint32_t poll_ms = 250);
     static const std::string& getState(const std::string& module);
 
-    // Orchestration — self-locking.
-    static void advance();                          // progress all modules
-    static void advance(const std::string& module); // progress one module
+    // Orchestration — self-locking with timeout.
+    static void advance();                          // progress all modules (void, not used)
+    static bool advance(const std::string& module); // progress one module, returns true if transitioned
     static void recover();                          // reset error/recovery states
 
-    // Direct state change — self-locking public API.
+    // Direct state change — self-locking with timeout.
     // Safe to call from any component without holding the mutex.
     // Use force_skip_prereqs=true only for components that own their state
     // (e.g. wifi_manager reporting hardware events).
@@ -81,7 +80,7 @@ public:
                             bool force_skip_prereqs = false);
 
 private:
-    static std::mutex mutex_;
+    static SemaphoreHandle_t mutex_;
     static std::unordered_map<std::string, ModuleState> modules_;
     static std::unordered_map<
         std::string,
@@ -104,4 +103,8 @@ private:
 
     static void status_dump_task(void* arg);
     static void dumpAllStates();
+
+    // Helper to safely take the mutex with a timeout.
+    static bool takeMutex();
+    static void giveMutex();
 };
