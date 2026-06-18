@@ -13,7 +13,7 @@ public:
     static MicrorosSync& getInstance();
 
     bool init();
-    void start();
+    void start();     // now just does setup; task is created externally
 
     bool createEntities();
     void destroyEntities();
@@ -29,6 +29,9 @@ public:
 
     static bool lockCore();
     static void unlockCore();
+
+    // ── Task function (made public so it can be passed to create_task) ──
+    static void microros_task(void* arg);
 
 private:
     MicrorosSync();
@@ -53,10 +56,7 @@ private:
     std_msgs__msg__Int32 heartbeat_msg_;
 
     // LiDAR timer
-    rcl_timer_t          lidar_timer_;   // ADDED
-
-    // Task handle
-    TaskHandle_t task_handle_;
+    rcl_timer_t          lidar_timer_;
 
     // Static instance for callbacks
     static MicrorosSync*    instance_;
@@ -71,10 +71,9 @@ private:
     };
     bool comp_initialized_[COMP_COUNT];
 
-    // Task function
-    static void microros_task(void* arg);
+    // Internal helpers
     static void heartbeatTimerCallback(rcl_timer_t* timer, int64_t last_call_time);
-    static void lidarTimerCallback(rcl_timer_t* timer, int64_t last_call_time); // ADDED
+    static void lidarTimerCallback(rcl_timer_t* timer, int64_t last_call_time);
 
     bool createEntitiesImpl();
     void destroyEntitiesImpl();

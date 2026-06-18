@@ -30,8 +30,7 @@ MicrorosSync::MicrorosSync()
       support_{},
       executor_(rclc_executor_get_zero_initialized_executor()),
       entities_created_(false),
-      support_inited_(false),
-      task_handle_(nullptr)
+      support_inited_(false)
 {
     instance_ = this;
     if (mutex_ == nullptr) {
@@ -46,16 +45,24 @@ MicrorosSync::MicrorosSync()
 }
 
 MicrorosSync::~MicrorosSync() {
-    if (task_handle_) vTaskDelete(task_handle_);
+    // Task is deleted externally; do not delete it here.
     instance_ = nullptr;
 }
 
+// ─── Lock helpers (defensive) ──────────────────────────────────────────────
 bool MicrorosSync::lockCore() {
-    return mutex_ && xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) == pdTRUE;
+    if (mutex_ == nullptr) {
+        ESP_LOGE(TAG, "lockCore: mutex is NULL – cannot lock!");
+        return false;
+    }
+    // The mutex is a binary semaphore; xSemaphoreTake is safe.
+    return xSemaphoreTake(mutex_, pdMS_TO_TICKS(100)) == pdTRUE;
 }
 
 void MicrorosSync::unlockCore() {
-    if (mutex_) xSemaphoreGive(mutex_);
+    if (mutex_ != nullptr) {
+        xSemaphoreGive(mutex_);
+    }
 }
 
 bool MicrorosSync::init() {
@@ -70,8 +77,8 @@ bool MicrorosSync::init() {
 }
 
 void MicrorosSync::start() {
-    if (task_handle_) return;
-    xTaskCreate(microros_task, "microros_task", 24576, this, 5, &task_handle_);
+    // Task is now created externally (in Shelfbot::begin()).
+    ESP_LOGI(TAG, "micro-ROS sync ready; task created externally");
 }
 
 bool MicrorosSync::isConnected() const {
@@ -90,19 +97,7 @@ bool MicrorosSync::queryAgentIp(char* out_ip, size_t len) {
     return true;
 }
 
-// ---------------------------------------------------------------------------
-// logMicrorosLimits
-//
-// RMW_UXRCE_MAX_* are cmake-time values baked into the rmw_microxrcedds
-// static library.  They are NOT C preprocessor macros and there is no public
-// runtime API to read them back.  The function below logs a single line
-// directing the developer to colcon.meta, which is the sole source of truth.
-// ---------------------------------------------------------------------------
 void MicrorosSync::logMicrorosLimits() {
-    // RMW_UXRCE_MAX_* are C macros defined by the rmw_microxrcedds library
-    // from the values set in colcon.meta at build time.
-    // RMW_UXRCE_MAX_MESSAGE_SIZE is intentionally omitted — it is a cmake
-    // string variable that does not produce a C macro.
     ESP_LOGI(TAG, "=== micro-ROS compile-time limits ===");
     ESP_LOGI(TAG, "RMW_UXRCE_MAX_NODES         = %d", RMW_UXRCE_MAX_NODES);
     ESP_LOGI(TAG, "RMW_UXRCE_MAX_PUBLISHERS    = %d", RMW_UXRCE_MAX_PUBLISHERS);
@@ -129,9 +124,6 @@ bool MicrorosSync::createEntitiesImpl() {
         return false;
     }
 
-    // The executor handles: 1× heartbeat timer, 1× lidar timer, 1× motor pos timer,
-    // 1× led subscription, 1× motor_cmd subscription, 1× motor_spd subscription.
-    // Total = 6 handles.  We pass 10 for headroom.
     r = rclc_executor_init(&executor_, &support_.context, 10, &allocator_);
     if (r != RCL_RET_OK) {
         ESP_LOGE(TAG, "executor init failed: %ld", (long)r);
@@ -168,13 +160,6 @@ bool MicrorosSync::createEntitiesImpl() {
         return false;
     }
 
-    // ── LiDAR polling timer ───────────────────────────────────────────────
-    // Period: 200 ms.  The LYDSTO at ~6 Hz revolution rate (170 ms/rev)
-    // produces one complete scan every ~170 ms.  200 ms polling means we
-    // pick up each scan within one timer period of completion.
-    //
-    // The timer callback is serialised by the executor so it never races
-    // with other callbacks or with heartbeatTimerCallback.
     r = rclc_timer_init_default(&lidar_timer_, &support_, RCL_MS_TO_NS(200),
                                  lidarTimerCallback);
     if (r != RCL_RET_OK) {
@@ -236,25 +221,10 @@ void MicrorosSync::heartbeatTimerCallback(rcl_timer_t*, int64_t) {
     publish_or_fail(&instance_->heartbeat_pub_, &instance_->heartbeat_msg_, "heartbeat");
 }
 
-// ---------------------------------------------------------------------------
-// lidarTimerCallback
-//
-// Called from rclc_executor_spin_some() — always on the microros_task thread,
-// never concurrently with other executor callbacks or publishers.
-//
-// LidarScan is ~14 KB on the stack; declare static to avoid blowing the
-// 24 576-byte microros_task stack (14 KB scan + XRCE serialise buffer ≈ 18 KB
-// which leaves only ~6 KB for FreeRTOS overhead and nested calls).
-//
-// This is safe because:
-//   1. The executor guarantees sequential (non-reentrant) dispatch.
-//   2. lidar_get_latest_scan() copies the completed scan under its own mutex,
-//      so the static local is written to atomically from the caller's view.
-// ---------------------------------------------------------------------------
+// ─── LiDAR timer callback ──────────────────────────────────────────────────
 void MicrorosSync::lidarTimerCallback(rcl_timer_t*, int64_t) {
     if (!instance_ || !instance_->isConnected()) return;
 
-    // Diagnostic: log when the lidar module is not yet running
     static uint32_t s_not_running_log = 0;
     if (!lidar_is_running()) {
         if ((++s_not_running_log % 25) == 0) {
@@ -264,7 +234,7 @@ void MicrorosSync::lidarTimerCallback(rcl_timer_t*, int64_t) {
         return;
     }
 
-    static LidarScan scan;   // static: avoids ~14 KB stack allocation per call
+    static LidarScan scan;
     static uint32_t s_no_scan_log = 0;
 
     if (lidar_get_latest_scan(scan)) {
@@ -273,7 +243,6 @@ void MicrorosSync::lidarTimerCallback(rcl_timer_t*, int64_t) {
         s_no_scan_log = 0;
         instance_->lidar_.publishLidarScan(scan);
     } else {
-        // Log periodically when no scan is available (expected during first revolution)
         if ((++s_no_scan_log % 25) == 0) {
             ESP_LOGD("MicrorosSync", "lidarTimer: no scan ready yet (polls=%lu, scan_count=%lu)",
                      (unsigned long)s_no_scan_log,
@@ -282,6 +251,7 @@ void MicrorosSync::lidarTimerCallback(rcl_timer_t*, int64_t) {
     }
 }
 
+// ─── Task function (now public) ────────────────────────────────────────────
 void MicrorosSync::microros_task(void* arg) {
     MicrorosSync* self = static_cast<MicrorosSync*>(arg);
     char agent_ip[16]  = {};

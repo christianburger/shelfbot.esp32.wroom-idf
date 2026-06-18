@@ -101,7 +101,7 @@ const char* LYDSTO_Driver::init() {
 
     // Enlarged RX buffer: 8192 bytes ≈ 174 packets of 47 bytes each.
     // Gives the task more headroom before packets start being dropped.
-    if (uart_driver_install(uart_port_, 8192, 0, 0, nullptr, 0) != ESP_OK)
+    if (uart_driver_install(uart_port_, 1024, 0, 0, nullptr, 0) != ESP_OK)
         return "uart_driver_install failed";
 
     uart_flush_input(uart_port_);
