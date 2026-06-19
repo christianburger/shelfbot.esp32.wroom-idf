@@ -1,18 +1,32 @@
 // lidar_sensor.cpp
 //
-// Memory model changes
-// ────────────────────
-// • LYDSTO_Driver is now a static instance (BSS) instead of heap-allocated.
-//   new/delete removed; ~13 bytes of pointer + vtable overhead gone, but
-//   more importantly we never call operator new which could fail at runtime.
+// Task model changes
+// ──────────────────
+// • lidar_read_task_fn runs until s_stop_requested is set, then calls
+//   vTaskDelete(nullptr) on itself.  lidar_stop() sets the flag and gives
+//   the task ~20 ms to exit before releasing the driver handle.
+//   This replaces the previous vTaskDelete(s_read_task) which was unsafe:
+//   deleting a task from outside while it may hold a mutex or be blocked
+//   inside UART I/O leaves primitives permanently locked.
 //
-// • lidar_lifecycle_task and lidar_read_task are no longer spawned here.
-//   Their function pointers (lidar_lifecycle_task_fn / lidar_read_task_fn)
-//   are exposed via lidar_sensor.hpp so shelfbot.cpp can create all tasks in
-//   one place with consistent stack sizing and error handling.
+// • lidar_lifecycle_task_fn is a one-shot init task that terminates itself
+//   with vTaskDelete(nullptr) on both the error path and on successful
+//   completion (once RUNNING is reached the read task is already running and
+//   the lifecycle task has nothing more to do).
 //
-// • s_scan_mutex is created in lidar_setup() before any task runs — safe
-//   because lidar_setup() is called from shelfbot.cpp before tasks start.
+// Advance / retry model
+// ─────────────────────
+// Both while-loops in lidar_lifecycle_task_fn call advance() and delay 1 s
+// on every iteration.  If advance() returns false because shelfbot is not yet
+// RUNNING (prerequisite for SETUP→INIT), the task simply keeps retrying.
+// No manual prerequisite check is needed — advance() reports the block via
+// LOGD and the caller just waits.
+//
+// Memory model — unchanged
+// ────────────────────────
+// • LYDSTO_Driver is a static instance (BSS); no heap allocation.
+// • LidarScan double-buffer (s_scans[2]) is static BSS.
+// • s_scan_mutex is created in lidar_setup() before any task runs.
 
 #include "lidar_sensor.hpp"
 #include "lidar_packet_parser.hpp"
@@ -37,14 +51,18 @@ static constexpr int64_t MAX_SCAN_DURATION_US = (REVOLUTION_PERIOD_US * 3) / 2;
 //  Internal state — all static (BSS), no heap
 // ============================================================================
 
-// Static driver instance — no heap allocation
 static LYDSTO_Driver s_driver_instance(LIDAR_UART_PORT,
                                        LIDAR_TX_PIN,
                                        LIDAR_RX_PIN,
                                        LIDAR_BAUD_RATE);
-static LYDSTO_Driver*   s_driver        = nullptr;   // set to &s_driver_instance after init
+static LYDSTO_Driver*   s_driver        = nullptr;
 static TaskHandle_t     s_read_task     = nullptr;
 static LidarSensorState s_state         = LidarSensorState::SETUP;
+
+// Stop flag for the read task.  Set by lidar_stop(); checked by
+// lidar_read_task_fn on every iteration.  Declared volatile so the compiler
+// does not cache it in a register across the loop body.
+static volatile bool     s_stop_requested = false;
 
 static LidarScan         s_scans[2];
 static volatile int      s_building_idx  = 0;
@@ -79,9 +97,7 @@ static float interpolate_angle(float start_deg, float end_deg,
 
 static bool is_wrap_around(float prev_end_deg, float new_start_deg)
 {
-    if (new_start_deg >= prev_end_deg) {
-        return false;
-    }
+    if (new_start_deg >= prev_end_deg) return false;
     static constexpr float WRAP_GAP_LIMIT_DEG = 300.0f;
     const float forward_gap = 360.0f - prev_end_deg + new_start_deg;
     return forward_gap < WRAP_GAP_LIMIT_DEG;
@@ -247,60 +263,88 @@ static void process_raw_packet(const uint8_t* raw47, int64_t timestamp_us)
     }
 }
 
-//  Read task (exposed for shelfbot.cpp task creation)
+// ============================================================================
+//  lidar_read_task_fn  (exposed for shelfbot.cpp task creation)
+//
+//  Stack budget: 2560 words (10 KB) — tight UART read loop, no std::string.
+//
+//  Termination: checks s_stop_requested on every iteration.  When set (by
+//  lidar_stop()), the task clears s_read_task and calls vTaskDelete(nullptr)
+//  to delete itself cleanly.  This is the ONLY safe way to terminate a task
+//  that may be blocked inside UART I/O — external vTaskDelete() is unsafe
+//  because it can leave the UART driver mutex permanently locked.
+// ============================================================================
 void lidar_read_task_fn(void*) {
-  ESP_LOGI(TAG, "Read task started");
+    ESP_LOGI(TAG, "Read task started");
 
-  uint8_t raw[47];
-  uint32_t total_reads  = 0;
-  uint32_t failed_reads = 0;
+    uint8_t raw[47];
+    uint32_t total_reads  = 0;
+    uint32_t failed_reads = 0;
 
-  while (true) {
-    // Wait until the state machine says we are RUNNING
-    if (!lidar_is_running()) {
-      vTaskDelay(pdMS_TO_TICKS(10));
-      continue;
+    while (!s_stop_requested) {
+        // Gate: don't attempt reads until the lifecycle task has initialised
+        // the driver and set s_state = RUNNING.
+        if (!lidar_is_running()) {
+            vTaskDelay(pdMS_TO_TICKS(10));
+            continue;
+        }
+
+        LYDSTO_Driver::MeasurementResult result{};
+        const bool ok = s_driver->read_sensor(result);
+        const int64_t rx_time_us = esp_timer_get_time();
+
+        ++total_reads;
+        if (!ok) {
+            ++failed_reads;
+            if ((failed_reads % 100) == 0) {
+                ESP_LOGW(TAG, "read_sensor: %lu/%lu reads failed",
+                         (unsigned long)failed_reads, (unsigned long)total_reads);
+            }
+            vTaskDelay(pdMS_TO_TICKS(1));
+            continue;
+        }
+
+        if (s_driver->get_last_packet(raw, sizeof(raw))) {
+            process_raw_packet(raw, rx_time_us);
+        }
+        taskYIELD();
     }
 
-    // At this point s_driver is guaranteed to be non-NULL
-    LYDSTO_Driver::MeasurementResult result{};
-    const bool ok = s_driver->read_sensor(result);
-    const int64_t rx_time_us = esp_timer_get_time();
-
-    ++total_reads;
-    if (!ok) {
-      ++failed_reads;
-      if ((failed_reads % 100) == 0) {
-        ESP_LOGW(TAG, "read_sensor: %lu/%lu reads failed",
-                 (unsigned long)failed_reads, (unsigned long)total_reads);
-      }
-      vTaskDelay(pdMS_TO_TICKS(1));
-      continue;
-    }
-
-    if (s_driver->get_last_packet(raw, sizeof(raw))) {
-      process_raw_packet(raw, rx_time_us);
-    }
-    taskYIELD();
-  }
-  vTaskDelete(nullptr);
+    // Stop was requested — exit cleanly.
+    ESP_LOGI(TAG, "Read task: stop requested, exiting (reads=%lu failed=%lu)",
+             (unsigned long)total_reads, (unsigned long)failed_reads);
+    s_read_task = nullptr;
+    vTaskDelete(nullptr);
 }
 
 // ============================================================================
-//  Lifecycle task (exposed for shelfbot.cpp task creation)
+//  lidar_lifecycle_task_fn  (exposed for shelfbot.cpp task creation)
+//
+//  Stack budget: 2560 words (10 KB).
+//
+//  This is a ONE-SHOT task: it advances the state machine from SETUP to
+//  RUNNING, waits for the driver to initialise, then calls vTaskDelete(nullptr)
+//  because it has nothing more to do.  The actual ongoing work is done by
+//  lidar_read_task_fn (a permanent task).
+//
+//  Retry model: advance() returns false when prerequisites are not yet met
+//  (shelfbot must be RUNNING for SETUP→INIT).  The task delays 1 s and retries
+//  — this is the correct pattern for a condition that changes asynchronously.
 // ============================================================================
-
 void lidar_lifecycle_task_fn(void* /*arg*/)
 {
     static constexpr uint32_t RETRY_MS = 1000;
 
+    // SETUP → INIT
+    // Prerequisite: shelfbot >= RUNNING.
+    // Retries every RETRY_MS until satisfied.
     while (!StateMachine::isInState("lidar_sensor", stateToString(LidarSensorState::INIT))) {
         StateMachine::advance("lidar_sensor");
         vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
     }
     ESP_LOGI(TAG, "State: INIT");
 
-    // Use the static driver instance — no heap allocation
+    // Initialise the driver (static instance — no heap allocation).
     s_driver = &s_driver_instance;
     const char* init_err = s_driver->init();
     if (init_err) {
@@ -315,12 +359,15 @@ void lidar_lifecycle_task_fn(void* /*arg*/)
         return;
     }
 
+    // INIT → RUNNING
+    // No prerequisites — should succeed immediately.
     while (!StateMachine::isInState("lidar_sensor", stateToString(LidarSensorState::RUNNING))) {
         StateMachine::advance("lidar_sensor");
         vTaskDelay(pdMS_TO_TICKS(RETRY_MS));
     }
     ESP_LOGI(TAG, "State: RUNNING — read task already created by shelfbot");
 
+    // Reset accumulator state.
     s_scans[0].clear();
     s_scans[1].clear();
     s_building_idx     = 0;
@@ -334,10 +381,11 @@ void lidar_lifecycle_task_fn(void* /*arg*/)
     s_time_wrap_count  = 0;
     s_state            = LidarSensorState::RUNNING;
 
-    // Note: lidar_read_task_fn is already running (created by shelfbot.cpp)
-    // and will start producing valid packets now that s_driver is set and
+    // lidar_read_task_fn is already running (created by shelfbot.cpp) and
+    // will start producing valid packets now that s_driver is set and
     // s_state == RUNNING.
-
+    //
+    // This one-shot lifecycle task is done; delete itself.
     vTaskDelete(nullptr);
 }
 
@@ -348,21 +396,49 @@ void lidar_lifecycle_task_fn(void* /*arg*/)
 void lidar_setup()
 {
     ESP_LOGI(TAG, "lidar_setup (free heap=%u)", (unsigned)esp_get_free_heap_size());
-    s_scan_mutex = xSemaphoreCreateMutex();
+    s_scan_mutex      = xSemaphoreCreateMutex();
+    s_stop_requested  = false;
     configASSERT(s_scan_mutex);
     s_state = LidarSensorState::SETUP;
-    // Tasks are created by shelfbot.cpp — do NOT spawn here.
 }
 
+// ---------------------------------------------------------------------------
+// lidar_stop — signal the read task to exit cleanly.
+//
+// Sets s_stop_requested = true and waits briefly for lidar_read_task_fn to
+// notice and call vTaskDelete(nullptr) on itself.  We do NOT call
+// vTaskDelete(s_read_task) from here: if the task is blocked inside
+// uart_read_bytes() or holding the UART ISR spinlock, an external delete
+// leaves those resources permanently locked.
+//
+// The 50 ms wait is generous: the read loop either exits uart_read_bytes()
+// within its 20 ms blocking timeout, or returns immediately from taskYIELD().
+// ---------------------------------------------------------------------------
 void lidar_stop()
 {
-    if (s_read_task) {
-        vTaskDelete(s_read_task);
-        s_read_task = nullptr;
+    if (s_read_task == nullptr && !lidar_is_running()) {
+        ESP_LOGD(TAG, "lidar_stop: already stopped");
+        return;
     }
-    // Static driver — just mark uninitialised, destructor called at program end
+
+    ESP_LOGI(TAG, "lidar_stop: requesting read task stop");
+    s_stop_requested = true;
+
+    // Give the read task up to 100 ms to notice the flag and exit.
+    // The UART read timeout is 20 ms, so one or two iterations suffice.
+    for (int i = 0; i < 10 && s_read_task != nullptr; ++i) {
+        vTaskDelay(pdMS_TO_TICKS(10));
+    }
+
+    if (s_read_task != nullptr) {
+        ESP_LOGW(TAG, "lidar_stop: read task did not exit within 100 ms — "
+                 "handle may be stale (task may have already self-deleted)");
+    }
+
+    // Driver dereference is now safe: the read task is no longer calling
+    // s_driver->read_sensor().
     s_driver = nullptr;
-    s_state = LidarSensorState::STOPPED;
+    s_state  = LidarSensorState::STOPPED;
     ESP_LOGI(TAG, "Stopped");
 }
 
@@ -384,10 +460,6 @@ bool lidar_get_latest_scan(LidarScan& out)
     }
     const int ready_idx = s_building_idx ^ 1;
     out = s_scans[ready_idx];
-    // Do NOT clear s_scan_ready here — the HTTP server and micro-ROS both
-    // poll this independently.  The lidar_sensor produces a new scan every
-    // ~167 ms which will overwrite the slot naturally.  Clearing it here
-    // would cause the HTTP server or micro-ROS to miss every other scan.
     xSemaphoreGive(s_scan_mutex);
     return true;
 }

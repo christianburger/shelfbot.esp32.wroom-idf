@@ -5,11 +5,14 @@
 // All public methods attempt to take the internal mutex with a 100 ms timeout.
 // If the mutex cannot be acquired within that time, the method logs an error
 // and returns a safe default (false, empty string, or does nothing).
-// This prevents indefinite blocking and makes the system robust against
-// accidental long holds by other tasks.
 //
 // Internal helpers (_locked suffix) require the caller to hold the mutex.
-// They are not protected by the timeout mechanism.
+//
+// Task model
+// ----------
+// init() ONLY creates the mutex and sets task_running_ = true.
+// The status-dump task is created by shelfbot.cpp (status_dump_task_fn).
+// This keeps ALL task creation in one auditable location.
 
 #include "state_machine.hpp"
 #include "state_machine_lifecycle.hpp"
@@ -51,6 +54,9 @@ void StateMachine::giveMutex() {
 
 // ---------------------------------------------------------------------------
 // init
+//
+// Creates the mutex and sets task_running_ = true.
+// Does NOT create any FreeRTOS task — shelfbot.cpp creates status_dump_task_fn.
 // ---------------------------------------------------------------------------
 void StateMachine::init() {
     if (task_running_) {
@@ -58,25 +64,16 @@ void StateMachine::init() {
         return;
     }
 
-    // Create the mutex
     if (mutex_ == nullptr) {
         mutex_ = xSemaphoreCreateMutex();
         configASSERT(mutex_ != nullptr);
         ESP_LOGI(TAG, "StateMachine mutex created");
     }
 
+    // Signal status_dump_task_fn it is safe to run.
+    // The task itself is created by shelfbot.cpp after this call returns.
     task_running_ = true;
-    const BaseType_t ret = xTaskCreate(
-        status_dump_task, "sm_dump", 4096, nullptr,
-        tskIDLE_PRIORITY + 1, &status_task_handle_);
-    if (ret != pdPASS) {
-        ESP_LOGE(TAG, "Failed to create status dump task (ret=%d) — state dumps disabled",
-                 (int)ret);
-        task_running_ = false;
-        status_task_handle_ = nullptr;
-    } else {
-        ESP_LOGI(TAG, "StateMachine initialised — status dump every 10 s");
-    }
+    ESP_LOGI(TAG, "StateMachine initialised — shelfbot must create 'sm_dump' task");
 }
 
 // ---------------------------------------------------------------------------
@@ -183,7 +180,6 @@ bool StateMachine::changeState_locked(const std::string& module,
 
     const std::string& old_state = it->second.current_state;
 
-    // No-op guard: never log or record a transition to the same state.
     if (old_state == new_state) {
         ESP_LOGD(TAG, "changeState: '%s' already in '%s' — no-op",
                  module.c_str(), new_state.c_str());
@@ -237,7 +233,6 @@ bool StateMachine::waitForPrerequisites(const std::string& module,
     const TickType_t poll    = pdMS_TO_TICKS(poll_ms);
     while (true) {
         if (!takeMutex()) {
-            // If we can't get the lock, wait and try again
             vTaskDelay(poll);
             continue;
         }
@@ -289,19 +284,14 @@ bool StateMachine::isInState(const std::string& module, const std::string& state
 }
 
 // ---------------------------------------------------------------------------
-// getState
+// getState — returns by VALUE (safe: no reference-after-unlock race)
 // ---------------------------------------------------------------------------
-const std::string& StateMachine::getState(const std::string& module) {
-    static const std::string empty;
-    if (!takeMutex()) return empty;
+std::string StateMachine::getState(const std::string& module) {
+    if (!takeMutex()) return {};
     auto it = modules_.find(module);
-    if (it != modules_.end()) {
-        const std::string& result = it->second.current_state;
-        giveMutex();
-        return result;
-    }
+    std::string result = (it != modules_.end()) ? it->second.current_state : std::string{};
     giveMutex();
-    return empty;
+    return result;
 }
 
 // ---------------------------------------------------------------------------
@@ -321,7 +311,7 @@ static std::vector<std::string> getOrderedStates(const std::string& module) {
 }
 
 // ---------------------------------------------------------------------------
-// advance (all modules) - unused, kept as void
+// advance (all modules) - unused convenience overload
 // ---------------------------------------------------------------------------
 void StateMachine::advance() {
     if (!takeMutex()) return;
@@ -334,9 +324,9 @@ void StateMachine::advance() {
     do {
         changed = false;
         for (auto& kv : modules_) {
-            const std::string& module    = kv.first;
-            const std::string& current   = kv.second.current_state;
-            const auto         ordered   = getOrderedStates(module);
+            const std::string& module  = kv.first;
+            const std::string& current = kv.second.current_state;
+            const auto         ordered = getOrderedStates(module);
             if (ordered.empty()) continue;
 
             int cur_idx = -1;
@@ -361,7 +351,16 @@ void StateMachine::advance() {
 }
 
 // ---------------------------------------------------------------------------
-// advance (single module) - returns bool and logs reason on failure
+// advance (single module) — returns true if a transition occurred.
+//
+// When this returns false it means one of:
+//   a) the module is already at its final state
+//   b) the next state's prerequisites are not yet satisfied
+//   c) no allowed-transition rule exists from the current state
+//
+// Callers that are waiting on external conditions (wifi, time-sync, …) should
+// simply delay and call again — the conditions will eventually be met and the
+// function will return true.
 // ---------------------------------------------------------------------------
 bool StateMachine::advance(const std::string& module) {
     if (!takeMutex()) return false;
@@ -373,7 +372,6 @@ bool StateMachine::advance(const std::string& module) {
         return false;
     }
 
-    // Build current state map for transition rule checks
     std::unordered_map<std::string, std::string> current_map;
     current_map.reserve(modules_.size());
     for (const auto& kv : modules_) current_map[kv.first] = kv.second.current_state;
@@ -396,42 +394,36 @@ bool StateMachine::advance(const std::string& module) {
         return false;
     }
 
-    // Check if already at the last state
     if ((size_t)cur_idx == ordered.size() - 1) {
-        ESP_LOGD(TAG, "advance('%s'): already at final state '%s'", module.c_str(), current.c_str());
+        ESP_LOGD(TAG, "advance('%s'): already at final state '%s'",
+                 module.c_str(), current.c_str());
         giveMutex();
         return false;
     }
 
-    // Try each next state in order
-    for (size_t ni = (size_t)cur_idx + 1; ni < ordered.size(); ++ni) {
-        const std::string& next = ordered[ni];
+    // Try the immediately next state only (one step per call).
+    // Callers are responsible for looping until their target state is reached.
+    const std::string& next = ordered[(size_t)cur_idx + 1];
 
-        // Check prerequisites
-        if (!prereqsSatisfied_locked(module, next)) {
-            ESP_LOGW(TAG, "advance('%s') -> '%s' BLOCKED by prerequisites", module.c_str(), next.c_str());
-            // Log the first unsatisfied prerequisite for debugging
-            continue;
-        }
-
-        // Check allowed transitions
-        if (!::is_allowed_transition(module, next, current_map)) {
-            ESP_LOGW(TAG, "advance('%s') -> '%s' NOT ALLOWED by transition rules", module.c_str(), next.c_str());
-            continue;
-        }
-
-        // Attempt the transition
-        if (changeState_locked(module, next, true)) {
-            ESP_LOGI(TAG, "advance('%s') -> '%s' SUCCEEDED", module.c_str(), next.c_str());
-            giveMutex();
-            return true;
-        }
-        // If changeState_locked returns false, it already logged the reason
-        break; // stop at first eligible transition that fails
+    if (!prereqsSatisfied_locked(module, next)) {
+        // This is normal — the caller should delay and retry.
+        ESP_LOGD(TAG, "advance('%s') -> '%s' WAITING: prerequisites not met",
+                 module.c_str(), next.c_str());
+        giveMutex();
+        return false;
     }
 
+    if (!::is_allowed_transition(module, next, current_map)) {
+        // Also normal during startup — transition rules gate on peer module states.
+        ESP_LOGD(TAG, "advance('%s') -> '%s' WAITING: transition rule not satisfied",
+                 module.c_str(), next.c_str());
+        giveMutex();
+        return false;
+    }
+
+    const bool ok = changeState_locked(module, next, true);
     giveMutex();
-    return false;
+    return ok;
 }
 
 // ---------------------------------------------------------------------------
@@ -485,7 +477,7 @@ void StateMachine::recover() {
 }
 
 // ---------------------------------------------------------------------------
-// Status dump task
+// Status dump
 // ---------------------------------------------------------------------------
 void StateMachine::dumpAllStates() {
     if (!takeMutex()) return;
@@ -497,7 +489,16 @@ void StateMachine::dumpAllStates() {
     giveMutex();
 }
 
-void StateMachine::status_dump_task(void* /*arg*/) {
+// ---------------------------------------------------------------------------
+// status_dump_task_fn  — created by shelfbot.cpp, NOT by init().
+//
+// Stack budget: 4096 words (16 KB).
+//   dumpAllStates() takes the mutex and iterates std::unordered_map<std::string,…>
+//   with ESP_LOGI inside the lock.  The std::string temporaries in the loop
+//   need headroom; 4096 words is the safe minimum (same as the old inline
+//   xTaskCreate used).
+// ---------------------------------------------------------------------------
+void StateMachine::status_dump_task_fn(void* /*arg*/) {
     while (task_running_) {
         vTaskDelay(pdMS_TO_TICKS(10000));
         dumpAllStates();

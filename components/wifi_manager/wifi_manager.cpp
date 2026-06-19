@@ -37,7 +37,7 @@ static int valid_cred_count() {
 #define CONNECT_TIMEOUT_MS  12000
 #define SCAN_MAX_APS        20
 
-// Internal event bits – must not overlap the public WM_* bits (BIT0, BIT1).
+// Internal event bits – must not overlap the public WM_* bits
 #define EVT_GOT_IP       BIT2
 #define EVT_DISCONNECTED BIT3
 
@@ -45,20 +45,150 @@ static_assert((EVT_GOT_IP       & (WM_CONNECTED_BIT | WM_DISCONNECTED_BIT)) == 0
 static_assert((EVT_DISCONNECTED & (WM_CONNECTED_BIT | WM_DISCONNECTED_BIT)) == 0);
 
 // ---------------------------------------------------------------------------
-// SNTP callback
+// Singleton implementation
 // ---------------------------------------------------------------------------
-static void sntp_sync_callback(struct timeval *tv) {
+WifiManager& WifiManager::getInstance() {
+    static WifiManager instance;
+    return instance;
+}
+
+// ---------------------------------------------------------------------------
+// SNTP callback (C function) → forwards to singleton
+// ---------------------------------------------------------------------------
+void sntp_sync_callback(struct timeval* tv) {
+    WifiManager::getInstance().handleSntpSync(tv);
+}
+
+void WifiManager::handleSntpSync(struct timeval* tv) {
     ESP_LOGI(TAG, "SNTP time sync received: sec=%lld, usec=%ld",
              (long long)tv->tv_sec, tv->tv_usec);
 }
 
 // ---------------------------------------------------------------------------
+// Event handlers (C functions) → forward to singleton methods
+// ---------------------------------------------------------------------------
+void wifi_event_handler(void* arg, esp_event_base_t base, int32_t id, void* data) {
+    WifiManager::getInstance().handleWifiEvent(id, data);
+}
+
+void ip_event_handler(void* arg, esp_event_base_t base, int32_t id, void* data) {
+    WifiManager::getInstance().handleIpEvent(id, data);
+}
+
+void WifiManager::handleWifiEvent(int32_t id, const void* data) {
+    if (id == WIFI_EVENT_STA_DISCONNECTED) {
+        const auto* d = static_cast<const wifi_event_sta_disconnected_t*>(data);
+        ESP_LOGW(TAG, "STA disconnected reason=%d", d->reason);
+        xEventGroupClearBits(evt_, WM_CONNECTED_BIT);
+        xEventGroupSetBits(evt_, WM_DISCONNECTED_BIT | EVT_DISCONNECTED);
+        setWifiState(WifiManagerState::DISCONNECTED);
+    }
+}
+
+void WifiManager::handleIpEvent(int32_t id, const void* data) {
+    if (id == IP_EVENT_STA_GOT_IP) {
+        const auto* e = static_cast<const ip_event_got_ip_t*>(data);
+        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&e->ip_info.ip));
+        xEventGroupClearBits(evt_, WM_DISCONNECTED_BIT | EVT_DISCONNECTED);
+        xEventGroupSetBits(evt_, WM_CONNECTED_BIT | EVT_GOT_IP);
+        setWifiState(WifiManagerState::CONNECTED);
+        startOrRestartSntp();
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Public API
+// ---------------------------------------------------------------------------
+esp_err_t WifiManager::init() {
+    if (initialized_) {
+        ESP_LOGW(TAG, "init() called again – already initialised, skipping");
+        return ESP_OK;
+    }
+
+    evt_ = xEventGroupCreate();
+    if (!evt_) {
+        ESP_LOGE(TAG, "xEventGroupCreate failed – out of memory");
+        return ESP_ERR_NO_MEM;
+    }
+    xEventGroupSetBits(evt_, WM_DISCONNECTED_BIT);
+
+    ESP_ERROR_CHECK(esp_netif_init());
+    ESP_ERROR_CHECK(esp_event_loop_create_default());
+    netif_ = esp_netif_create_default_wifi_sta();
+
+    const wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
+    ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
+    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
+    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
+    ESP_ERROR_CHECK(esp_wifi_start());
+    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(84));
+
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        WIFI_EVENT, ESP_EVENT_ANY_ID,
+        reinterpret_cast<esp_event_handler_t>(wifi_event_handler), nullptr));
+    ESP_ERROR_CHECK(esp_event_handler_register(
+        IP_EVENT, IP_EVENT_STA_GOT_IP,
+        reinterpret_cast<esp_event_handler_t>(ip_event_handler), nullptr));
+
+    // StateMachine::setInitial() for "wifi_manager" is called from shelfbot.cpp
+    // before wifi_manager_init() – we do not set it here.
+
+    initialized_ = true;
+    ESP_LOGI(TAG, "wifi_manager_init complete – task will be created by shelfbot");
+    return ESP_OK;
+}
+
+// getInfo is now non‑const because of port critical sections
+void WifiManager::getInfo(wifi_manager_info_t* out) {
+    portENTER_CRITICAL(&info_mux_);
+    *out = info_;
+    portEXIT_CRITICAL(&info_mux_);
+}
+
+// ---------------------------------------------------------------------------
+// State machine helper
+// ---------------------------------------------------------------------------
+void WifiManager::setWifiState(WifiManagerState new_state) {
+    StateMachine::changeState("wifi_manager",
+                              stateToString(new_state),
+                              /*force_skip_prereqs=*/true);
+    portENTER_CRITICAL(&info_mux_);
+    switch (new_state) {
+        case WifiManagerState::OFF:
+        case WifiManagerState::ERROR:       info_.state = WM_STATE_IDLE;       break;
+        case WifiManagerState::DISCONNECTED:info_.state = WM_STATE_SCANNING;   break;
+        case WifiManagerState::CONNECTING:  info_.state = WM_STATE_CONNECTING; break;
+        case WifiManagerState::CONNECTED:   info_.state = WM_STATE_CONNECTED;  break;
+        default:                            info_.state = WM_STATE_IDLE;       break;
+    }
+    portEXIT_CRITICAL(&info_mux_);
+}
+
+void WifiManager::publishInfo(const char* ssid, int8_t rssi, bool degraded) {
+    esp_netif_ip_info_t ip = {};
+    if (netif_) esp_netif_get_ip_info(netif_, &ip);
+    char ip_str[16] = {};
+    if (ip.ip.addr) snprintf(ip_str, sizeof(ip_str), IPSTR, IP2STR(&ip.ip));
+    const uint32_t uptime = (connected_us_ > 0)
+        ? static_cast<uint32_t>((esp_timer_get_time() - connected_us_) / 1000000ULL)
+        : 0;
+
+    portENTER_CRITICAL(&info_mux_);
+    info_.rssi_dbm   = rssi;
+    info_.degraded   = degraded;
+    info_.uptime_s   = uptime;
+    info_.switches   = switches_;
+    info_.reconnects = reconnects_;
+    strlcpy(info_.ip, ip_str, sizeof(info_.ip));
+    if (ssid) strlcpy(info_.ssid, ssid, sizeof(info_.ssid));
+    portEXIT_CRITICAL(&info_mux_);
+}
+
+// ---------------------------------------------------------------------------
 // SNTP
 // ---------------------------------------------------------------------------
-static bool s_sntp_started = false;
-
-static void start_or_restart_sntp() {
-    if (s_sntp_started) esp_sntp_stop();
+void WifiManager::startOrRestartSntp() {
+    if (sntp_started_) esp_sntp_stop();
     esp_sntp_setoperatingmode(SNTP_OPMODE_POLL);
     esp_sntp_setservername(0, "pool.ntp.org");
     esp_sntp_setservername(1, "time.cloudflare.com");
@@ -66,90 +196,15 @@ static void start_or_restart_sntp() {
     esp_sntp_init();
     ESP_LOGI(TAG, "SNTP client initialized, sync status: %d", esp_sntp_get_sync_status());
     esp_log_level_set("sntp", ESP_LOG_VERBOSE);
-    // Register sync callback
     esp_sntp_set_time_sync_notification_cb(sntp_sync_callback);
-    s_sntp_started = true;
+    sntp_started_ = true;
     ESP_LOGI(TAG, "SNTP client started (pool.ntp.org, time.cloudflare.com)");
-}
-
-// ---------------------------------------------------------------------------
-// Static state
-// ---------------------------------------------------------------------------
-static EventGroupHandle_t  s_evt           = nullptr;
-static esp_netif_t*        s_netif         = nullptr;
-static wifi_manager_info_t s_info          = {};
-static portMUX_TYPE        s_info_mux      = portMUX_INITIALIZER_UNLOCKED;
-static int64_t             s_connected_us  = 0;
-static uint32_t            s_switches      = 0;
-static uint32_t            s_reconnects    = 0;
-static int                 s_degrade_streak= 0;
-
-// ---------------------------------------------------------------------------
-// State machine helper
-// ---------------------------------------------------------------------------
-static void set_wifi_state(WifiManagerState new_state) {
-    StateMachine::changeState("wifi_manager",
-                              stateToString(new_state),
-                              /*force_skip_prereqs=*/true);
-    portENTER_CRITICAL(&s_info_mux);
-    switch (new_state) {
-        case WifiManagerState::OFF:
-        case WifiManagerState::ERROR:       s_info.state = WM_STATE_IDLE;       break;
-        case WifiManagerState::DISCONNECTED:s_info.state = WM_STATE_SCANNING;   break;
-        case WifiManagerState::CONNECTING:  s_info.state = WM_STATE_CONNECTING; break;
-        case WifiManagerState::CONNECTED:   s_info.state = WM_STATE_CONNECTED;  break;
-        default:                            s_info.state = WM_STATE_IDLE;       break;
-    }
-    portEXIT_CRITICAL(&s_info_mux);
-}
-
-static void publish_info(const char* ssid, int8_t rssi, bool degraded) {
-    esp_netif_ip_info_t ip = {};
-    if (s_netif) esp_netif_get_ip_info(s_netif, &ip);
-    char ip_str[16] = {};
-    if (ip.ip.addr) snprintf(ip_str, sizeof(ip_str), IPSTR, IP2STR(&ip.ip));
-    const uint32_t uptime = (s_connected_us > 0)
-        ? static_cast<uint32_t>((esp_timer_get_time() - s_connected_us) / 1000000ULL)
-        : 0;
-    portENTER_CRITICAL(&s_info_mux);
-    s_info.rssi_dbm   = rssi;
-    s_info.degraded   = degraded;
-    s_info.uptime_s   = uptime;
-    s_info.switches   = s_switches;
-    s_info.reconnects = s_reconnects;
-    strlcpy(s_info.ip, ip_str, sizeof(s_info.ip));
-    if (ssid) strlcpy(s_info.ssid, ssid, sizeof(s_info.ssid));
-    portEXIT_CRITICAL(&s_info_mux);
-}
-
-// ---------------------------------------------------------------------------
-// Event handlers
-// ---------------------------------------------------------------------------
-static void on_wifi_event(void*, esp_event_base_t, int32_t id, const void* data) {
-    if (id == WIFI_EVENT_STA_DISCONNECTED) {
-        const auto* d = static_cast<const wifi_event_sta_disconnected_t*>(data);
-        ESP_LOGW(TAG, "STA disconnected reason=%d", d->reason);
-        xEventGroupClearBits(s_evt, WM_CONNECTED_BIT);
-        xEventGroupSetBits  (s_evt, WM_DISCONNECTED_BIT | EVT_DISCONNECTED);
-        set_wifi_state(WifiManagerState::DISCONNECTED);
-    }
-}
-
-static void on_ip_event(void*, esp_event_base_t, int32_t id, const void* data) {
-    if (id == IP_EVENT_STA_GOT_IP) {
-        const auto* e = static_cast<const ip_event_got_ip_t*>(data);
-        ESP_LOGI(TAG, "Got IP: " IPSTR, IP2STR(&e->ip_info.ip));
-        xEventGroupClearBits(s_evt, WM_DISCONNECTED_BIT | EVT_DISCONNECTED);
-        xEventGroupSetBits  (s_evt, WM_CONNECTED_BIT | EVT_GOT_IP);
-        set_wifi_state(WifiManagerState::CONNECTED);
-        start_or_restart_sntp();
-    }
 }
 
 // ---------------------------------------------------------------------------
 // Scan: pick strongest visible known AP
 // ---------------------------------------------------------------------------
-static int scan_pick_best() {
+int WifiManager::scanPickBest() {
     constexpr wifi_scan_config_t cfg = {
         .ssid = nullptr, .bssid = nullptr, .channel = 0,
         .show_hidden = false, .scan_type = WIFI_SCAN_TYPE_ACTIVE,
@@ -160,7 +215,8 @@ static int scan_pick_best() {
         .channel_bitmap = { .ghz_2_channels = 0, .ghz_5_channels = 0 }
     };
     if (esp_wifi_scan_start(&cfg, true) != ESP_OK) {
-        ESP_LOGE(TAG, "scan_start failed"); return -1;
+        ESP_LOGE(TAG, "scan_start failed");
+        return -1;
     }
     uint16_t count = SCAN_MAX_APS;
     wifi_ap_record_t aps[SCAN_MAX_APS] = {};
@@ -194,15 +250,15 @@ static int scan_pick_best() {
 // ---------------------------------------------------------------------------
 // Connect helpers
 // ---------------------------------------------------------------------------
-static void disconnect_blocking() {
-    xEventGroupClearBits(s_evt, EVT_DISCONNECTED | EVT_GOT_IP);
+void WifiManager::disconnectBlocking() {
+    xEventGroupClearBits(evt_, EVT_DISCONNECTED | EVT_GOT_IP);
     esp_wifi_disconnect();
-    xEventGroupWaitBits(s_evt, EVT_DISCONNECTED, pdTRUE, pdFALSE,
+    xEventGroupWaitBits(evt_, EVT_DISCONNECTED, pdTRUE, pdFALSE,
                         pdMS_TO_TICKS(2000));
-    xEventGroupClearBits(s_evt, EVT_DISCONNECTED | EVT_GOT_IP);
+    xEventGroupClearBits(evt_, EVT_DISCONNECTED | EVT_GOT_IP);
 }
 
-static esp_err_t start_connect(int ci) {
+esp_err_t WifiManager::startConnect(int ci) {
     configASSERT(ci >= 0 && ci < CRED_COUNT);
     wifi_config_t cfg = {};
     strlcpy(reinterpret_cast<char*>(cfg.sta.ssid),
@@ -217,31 +273,28 @@ static esp_err_t start_connect(int ci) {
     return (r == ESP_OK) ? esp_wifi_connect() : r;
 }
 
-static bool monitor_rssi() {
+bool WifiManager::monitorRssi() {
     wifi_ap_record_t ap;
     if (esp_wifi_sta_get_ap_info(&ap) != ESP_OK) return false;
     if (ap.rssi >= RSSI_WARN) {
-        if (s_degrade_streak > 0)
+        if (degrade_streak_ > 0)
             ESP_LOGI(TAG, "RSSI recovered: %d dBm", ap.rssi);
-        s_degrade_streak = 0;
-        publish_info(nullptr, ap.rssi, false);
+        degrade_streak_ = 0;
+        publishInfo(nullptr, ap.rssi, false);
         return false;
     }
-    ++s_degrade_streak;
-    ESP_LOGW(TAG, "RSSI %d dBm (streak %d/%d)", ap.rssi, s_degrade_streak, DEGRADE_N);
-    publish_info(nullptr, ap.rssi, true);
-    if (ap.rssi < RSSI_CRITICAL) { s_degrade_streak = 0; return true; }
-    if (s_degrade_streak >= DEGRADE_N) { s_degrade_streak = 0; return true; }
+    ++degrade_streak_;
+    ESP_LOGW(TAG, "RSSI %d dBm (streak %d/%d)", ap.rssi, degrade_streak_, DEGRADE_N);
+    publishInfo(nullptr, ap.rssi, true);
+    if (ap.rssi < RSSI_CRITICAL) { degrade_streak_ = 0; return true; }
+    if (degrade_streak_ >= DEGRADE_N) { degrade_streak_ = 0; return true; }
     return false;
 }
 
 // ---------------------------------------------------------------------------
-// Manager task — exposed for shelfbot.cpp to create with pinned-to-core.
-// Pinned to core 1 to keep WiFi driver ISRs away from the micro-ROS executor
-// which runs on core 0.
+// Main loop (runs in the manager task)
 // ---------------------------------------------------------------------------
-
-void wifi_manager_task_fn(void* /*arg*/) {
+void WifiManager::mainLoop() {
     ESP_LOGI(TAG, "manager task started, %d slot(s), %d configured",
              CRED_COUNT, valid_cred_count());
 
@@ -257,14 +310,14 @@ void wifi_manager_task_fn(void* /*arg*/) {
                              "(set CONFIG_WIFI_SSID_1..4 in menuconfig)");
                     no_creds_logged = true;
                 }
-                set_wifi_state(WifiManagerState::OFF);
+                setWifiState(WifiManagerState::OFF);
                 vTaskDelay(pdMS_TO_TICKS(CYCLE_DELAY_S * 1000));
                 continue;
             }
             no_creds_logged = false;
-            set_wifi_state(WifiManagerState::DISCONNECTED);
-            publish_info(nullptr, 0, false);
-            ci = scan_pick_best();
+            setWifiState(WifiManagerState::DISCONNECTED);
+            publishInfo(nullptr, 0, false);
+            ci = scanPickBest();
             if (ci < 0) {
                 ESP_LOGW(TAG, "No known AP visible, waiting %ds", CYCLE_DELAY_S);
                 vTaskDelay(pdMS_TO_TICKS(CYCLE_DELAY_S * 1000));
@@ -273,18 +326,18 @@ void wifi_manager_task_fn(void* /*arg*/) {
         }
         skip_scan = false;
 
-        set_wifi_state(WifiManagerState::CONNECTING);
+        setWifiState(WifiManagerState::CONNECTING);
         bool connected = false;
-        ++s_reconnects;
+        ++reconnects_;
 
         for (int attempt = 1; attempt <= RETRIES_PER_NET && !connected; ++attempt) {
-            disconnect_blocking();
-            if (start_connect(ci) != ESP_OK) {
+            disconnectBlocking();
+            if (startConnect(ci) != ESP_OK) {
                 vTaskDelay(pdMS_TO_TICKS(2000));
                 continue;
             }
             const EventBits_t bits = xEventGroupWaitBits(
-                s_evt, EVT_GOT_IP | EVT_DISCONNECTED,
+                evt_, EVT_GOT_IP | EVT_DISCONNECTED,
                 pdTRUE, pdFALSE, pdMS_TO_TICKS(CONNECT_TIMEOUT_MS));
             if (bits & EVT_GOT_IP) {
                 connected = true;
@@ -301,43 +354,43 @@ void wifi_manager_task_fn(void* /*arg*/) {
             continue;
         }
 
-        s_connected_us  = esp_timer_get_time();
-        s_degrade_streak = 0;
-        publish_info(s_creds[ci].ssid, 0, false);
+        connected_us_ = esp_timer_get_time();
+        degrade_streak_ = 0;
+        publishInfo(s_creds[ci].ssid, 0, false);
         ESP_LOGI(TAG, "connected to \"%s\" (reconnect #%lu)",
-                 s_creds[ci].ssid, (unsigned long)s_reconnects);
+                 s_creds[ci].ssid, (unsigned long)reconnects_);
 
         while (true) {
             const EventBits_t bits = xEventGroupWaitBits(
-                s_evt, EVT_DISCONNECTED,
+                evt_, EVT_DISCONNECTED,
                 pdTRUE, pdFALSE, pdMS_TO_TICKS(MONITOR_MS));
 
             if (bits & EVT_DISCONNECTED) {
                 ESP_LOGW(TAG, "connection lost, rescanning");
-                s_connected_us = 0;
+                connected_us_ = 0;
                 break;
             }
 
-            if (monitor_rssi()) {
-                const int better = scan_pick_best();
+            if (monitorRssi()) {
+                const int better = scanPickBest();
                 if (better < 0) {
                     ESP_LOGW(TAG, "degraded but no alternative AP visible, staying");
                     continue;
                 }
                 if (better == ci) {
                     ESP_LOGI(TAG, "\"%s\" still best, staying", s_creds[ci].ssid);
-                    s_degrade_streak = 0;
+                    degrade_streak_ = 0;
                     continue;
                 }
-                ++s_switches;
+                ++switches_;
                 ESP_LOGI(TAG, "roaming \"%s\" -> \"%s\" (switch #%lu)",
                          s_creds[ci].ssid, s_creds[better].ssid,
-                         (unsigned long)s_switches);
+                         (unsigned long)switches_);
                 ci             = better;
                 skip_scan      = true;
-                s_connected_us = 0;
-                xEventGroupClearBits(s_evt, WM_CONNECTED_BIT);
-                xEventGroupSetBits  (s_evt, WM_DISCONNECTED_BIT);
+                connected_us_  = 0;
+                xEventGroupClearBits(evt_, WM_CONNECTED_BIT);
+                xEventGroupSetBits(evt_, WM_DISCONNECTED_BIT);
                 break;
             }
         }
@@ -345,53 +398,11 @@ void wifi_manager_task_fn(void* /*arg*/) {
 }
 
 // ---------------------------------------------------------------------------
-// Public API
+// Static task function – called by xTaskCreate
 // ---------------------------------------------------------------------------
-
-esp_err_t wifi_manager_init() {
-    // Guard against double-init (called from shelfbot.cpp begin() only once,
-    // but defensive check prevents issues if called again after a recover()).
-    if (s_evt != nullptr) {
-        ESP_LOGW(TAG, "wifi_manager_init called again — already initialised, skipping");
-        return ESP_OK;
-    }
-
-    s_evt = xEventGroupCreate();
-    if (!s_evt) {
-        ESP_LOGE(TAG, "xEventGroupCreate failed — out of memory");
-        return ESP_ERR_NO_MEM;
-    }
-    xEventGroupSetBits(s_evt, WM_DISCONNECTED_BIT);
-
-    ESP_ERROR_CHECK(esp_netif_init());
-    ESP_ERROR_CHECK(esp_event_loop_create_default());
-    s_netif = esp_netif_create_default_wifi_sta();
-
-    const wifi_init_config_t wifi_cfg = WIFI_INIT_CONFIG_DEFAULT();
-    ESP_ERROR_CHECK(esp_wifi_init(&wifi_cfg));
-    ESP_ERROR_CHECK(esp_wifi_set_mode(WIFI_MODE_STA));
-    ESP_ERROR_CHECK(esp_wifi_set_ps(WIFI_PS_NONE));
-    ESP_ERROR_CHECK(esp_wifi_start());
-    ESP_ERROR_CHECK(esp_wifi_set_max_tx_power(84));
-    ESP_ERROR_CHECK(esp_event_handler_register(
-        WIFI_EVENT, ESP_EVENT_ANY_ID,
-        reinterpret_cast<esp_event_handler_t>(on_wifi_event), nullptr));
-    ESP_ERROR_CHECK(esp_event_handler_register(
-        IP_EVENT, IP_EVENT_STA_GOT_IP,
-        reinterpret_cast<esp_event_handler_t>(on_ip_event), nullptr));
-
-    // Note: StateMachine::setInitial() for "wifi_manager" is called from
-    // shelfbot.cpp before wifi_manager_init() — do not call it again here.
-
-    // Task is created by shelfbot.cpp — do NOT spawn here.
-    ESP_LOGI(TAG, "wifi_manager_init complete — task will be created by shelfbot");
-    return ESP_OK;
+void WifiManager::task_fn(void* arg) {
+    WifiManager* self = static_cast<WifiManager*>(arg);
+    self->mainLoop();
+    // mainLoop never returns; if it does, delete the task.
+    vTaskDelete(nullptr);
 }
-
-void wifi_manager_get_info(wifi_manager_info_t* out) {
-    portENTER_CRITICAL(&s_info_mux);
-    *out = s_info;
-    portEXIT_CRITICAL(&s_info_mux);
-}
-
-EventGroupHandle_t wifi_manager_get_event_group() { return s_evt; }

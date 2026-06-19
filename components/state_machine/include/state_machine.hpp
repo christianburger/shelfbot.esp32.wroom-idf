@@ -13,11 +13,15 @@
 // All public methods attempt to take the internal mutex with a 100 ms timeout.
 // If the mutex cannot be acquired within that time, the method logs an error
 // and returns a safe default (false, empty string, or does nothing).
-// This prevents indefinite blocking and makes the system robust against
-// accidental long holds by other tasks.
 //
 // Internal helpers suffixed with _locked must only be called while the
 // caller holds the mutex.
+//
+// Task model
+// ----------
+// StateMachine::init() ONLY creates the mutex and sets task_running_ = true.
+// The status-dump task (status_dump_task_fn) is created by shelfbot.cpp so
+// that ALL task creation is in one auditable place.
 // ---------------------------------------------------------------------------
 
 class StateMachine {
@@ -64,20 +68,27 @@ public:
                                      const std::string& target_state,
                                      uint32_t timeout_ms,
                                      uint32_t poll_ms = 250);
-    static const std::string& getState(const std::string& module);
+
+    // Returns the current state string by VALUE — safe across task boundaries.
+    // (Returning a reference would be a use-after-unlock race.)
+    static std::string getState(const std::string& module);
 
     // Orchestration — self-locking with timeout.
-    static void advance();                          // progress all modules (void, not used)
-    static bool advance(const std::string& module); // progress one module, returns true if transitioned
+    static void advance();                          // progress all modules (unused)
+    static bool advance(const std::string& module); // progress one module; true if transitioned
     static void recover();                          // reset error/recovery states
 
     // Direct state change — self-locking with timeout.
-    // Safe to call from any component without holding the mutex.
-    // Use force_skip_prereqs=true only for components that own their state
-    // (e.g. wifi_manager reporting hardware events).
     static bool changeState(const std::string& module,
                             const std::string& new_state,
                             bool force_skip_prereqs = false);
+
+    // ── Status-dump task ──────────────────────────────────────────────────
+    // Periodic (10 s) dump of all module states to the log.
+    // Created by shelfbot.cpp — NOT spawned inside init().
+    // Stack budget: 4096 words (16 KB) — iterates std::unordered_map with
+    // std::string keys and calls ESP_LOGI inside the lock.
+    static void status_dump_task_fn(void* arg);
 
 private:
     static SemaphoreHandle_t mutex_;
@@ -90,21 +101,16 @@ private:
     static TaskHandle_t status_task_handle_;
     static bool         task_running_;
 
-    // ── Internal helpers (caller must hold mutex_) ────────────────────────────
+    // ── Internal helpers (caller must hold mutex_) ────────────────────────
     static bool prereqsSatisfied_locked(const std::string& module,
                                         const std::string& new_state);
 
-    // changeState_locked: write path used internally by advance() and recover()
-    // which already hold mutex_.  Identical logic to changeState() but without
-    // acquiring the lock a second time.
     static bool changeState_locked(const std::string& module,
                                    const std::string& new_state,
                                    bool force_skip_prereqs = false);
 
-    static void status_dump_task(void* arg);
     static void dumpAllStates();
 
-    // Helper to safely take the mutex with a timeout.
     static bool takeMutex();
     static void giveMutex();
 };
